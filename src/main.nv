@@ -25,14 +25,20 @@ struct Editor
 struct InputState
     count:     Int
     pending_g: Bool
+    mode:      Int        // 0 = Normal, 1 = Insert  (slice 4)
 
 // feed()'s result: the new editor + the new input state.
 struct Step
     ed: Editor
     st: InputState
 
+// Reset to a clean Normal-mode state (count/pending cleared).  Used at the
+// end of every completed Normal-mode command.
 fn ist_new() -> InputState
-    InputState { count: 0, pending_g: false }
+    InputState { count: 0, pending_g: false, mode: 0 }
+
+fn ist_insert() -> InputState
+    InputState { count: 0, pending_g: false, mode: 1 }
 
 // ── Buffer ──────────────────────────────────────────────────────
 
@@ -253,10 +259,127 @@ fn repeat_word(ed: Editor, kind: Int, times: Int) -> Editor
         k = k + 1
     e
 
+// ── Editing (insert mode) ───────────────────────────────────────
+
+// Replace line `y` with `s` (returns a fresh line vector).
+fn set_line(lines: [Str], y: Int, s: Str) -> [Str]
+    var ls: [Str] = []
+    let mut i = 0
+    let n = list.len(lines)
+    while i < n
+        if i == y
+            ls = list.append(ls, [s])
+        else
+            ls = list.append(ls, [lines[i]])
+        i = i + 1
+    ls
+
+// Clamp for INSERT mode: cx may sit one past the last glyph (cx == len)
+// so text can be appended at the end of a line.
+fn clamp_insert(ed: Editor) -> Editor
+    let n = list.len(ed.lines)
+    var cy = ed.cy
+    if cy < 0
+        cy = 0
+    if cy >= n
+        cy = n - 1
+    if cy < 0
+        cy = 0
+    let ll = if cy >= 0 and cy < n then str.len(ed.lines[cy]) else 0
+    var cx = ed.cx
+    if cx < 0
+        cx = 0
+    if cx > ll
+        cx = ll
+    Editor { lines: ed.lines, cy: cy, cx: cx }
+
+// Insert byte `b` at the cursor and advance one column.
+fn insert_char(ed: Editor, b: Int) -> Editor
+    let line = line_at(ed, ed.cy)
+    let before = str.slice(line, 0, ed.cx)
+    let after = str.slice(line, ed.cx, str.len(line))
+    let merged = before + str.from_char(b) + after
+    Editor { lines: set_line(ed.lines, ed.cy, merged), cy: ed.cy, cx: ed.cx + 1 }
+
+// Split the current line at the cursor (Enter in insert mode).
+fn insert_newline(ed: Editor) -> Editor
+    let line = line_at(ed, ed.cy)
+    let before = str.slice(line, 0, ed.cx)
+    let after = str.slice(line, ed.cx, str.len(line))
+    var ls: [Str] = []
+    let mut i = 0
+    let n = list.len(ed.lines)
+    while i < n
+        if i == ed.cy
+            ls = list.append(ls, [before])
+            ls = list.append(ls, [after])
+        else
+            ls = list.append(ls, [ed.lines[i]])
+        i = i + 1
+    Editor { lines: ls, cy: ed.cy + 1, cx: 0 }
+
+// Backspace: delete the glyph before the cursor, or join with the line
+// above when at column 0.
+fn backspace(ed: Editor) -> Editor
+    if ed.cx > 0
+        let line = line_at(ed, ed.cy)
+        let merged = str.slice(line, 0, ed.cx - 1) + str.slice(line, ed.cx, str.len(line))
+        Editor { lines: set_line(ed.lines, ed.cy, merged), cy: ed.cy, cx: ed.cx - 1 }
+    elif ed.cy > 0
+        let prev = line_at(ed, ed.cy - 1)
+        let cur = line_at(ed, ed.cy)
+        let joincol = str.len(prev)
+        var ls: [Str] = []
+        let mut i = 0
+        let n = list.len(ed.lines)
+        while i < n
+            if i == ed.cy - 1
+                ls = list.append(ls, [prev + cur])
+            elif i == ed.cy
+                // skip — merged into the previous line
+                i = i
+            else
+                ls = list.append(ls, [ed.lines[i]])
+            i = i + 1
+        Editor { lines: ls, cy: ed.cy - 1, cx: joincol }
+    else
+        ed
+
+// Open a fresh empty line below (`o`) or above (`O`) and enter it.
+fn open_line(ed: Editor, below: Bool) -> Editor
+    let at = if below then ed.cy + 1 else ed.cy
+    var ls: [Str] = []
+    let mut i = 0
+    let n = list.len(ed.lines)
+    while i < n
+        if i == at
+            ls = list.append(ls, [""])
+        ls = list.append(ls, [ed.lines[i]])
+        i = i + 1
+    if at >= n          // opening below the last line
+        ls = list.append(ls, [""])
+    Editor { lines: ls, cy: at, cx: 0 }
+
+// Handle one byte while in Insert mode.
+fn feed_insert(ed: Editor, st: InputState, b: Int) -> Step
+    if b == 27                         // Esc → Normal (cursor steps left, vim)
+        let e = clamp(Editor { lines: ed.lines, cy: ed.cy, cx: ed.cx - 1 })
+        return Step { ed: e, st: ist_new() }
+    if b == 13 or b == 10              // Enter → split line
+        return Step { ed: insert_newline(ed), st: st }
+    if b == 127 or b == 8              // Backspace / DEL
+        return Step { ed: backspace(ed), st: st }
+    if b == 9 or (b >= 32 and b < 127) // printable (+ tab) → insert
+        return Step { ed: insert_char(ed, b), st: st }
+    Step { ed: ed, st: st }            // ignore other control bytes
+
 // Feed one byte through the Normal-mode handler, threading InputState.
 // Counts (`5j`, `10G`), line motions (`0 $ ^`), and buffer motions
 // (`gg G`) join the slice-1 `h j k l`.  (slices 1-2)
 fn feed(ed: Editor, st: InputState, b: Int) -> Step
+    // Insert mode owns every byte until Esc.  (slice 4)
+    if st.mode == 1
+        return feed_insert(ed, st, b)
     // Completing `gg`?
     if st.pending_g
         if b == 0x67                   // second 'g' — go to line (count or 1)
@@ -264,13 +387,13 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
             return Step { ed: clamp(Editor { lines: ed.lines, cy: tgt, cx: ed.cx }), st: ist_new() }
         else
             // Not `gg` — drop the pending g and reprocess this byte fresh.
-            return feed(ed, InputState { count: st.count, pending_g: false }, b)
+            return feed(ed, InputState { count: st.count, pending_g: false, mode: 0 }, b)
     // Count digits.  `0` is a count digit only when a count is already
     // building; otherwise `0` is the "first column" motion.
     if b >= 0x31 and b <= 0x39         // '1'-'9'
-        return Step { ed: ed, st: InputState { count: st.count * 10 + (b - 0x30), pending_g: false } }
+        return Step { ed: ed, st: InputState { count: st.count * 10 + (b - 0x30), pending_g: false, mode: 0 } }
     if b == 0x30 and st.count > 0      // '0' continues a count
-        return Step { ed: ed, st: InputState { count: st.count * 10, pending_g: false } }
+        return Step { ed: ed, st: InputState { count: st.count * 10, pending_g: false, mode: 0 } }
     let cnt = if st.count > 0 then st.count else 1
     if b == 0x68 or b == 0x6C or b == 0x6A or b == 0x6B      // h l j k
         return Step { ed: repeat_hjkl(ed, b, cnt), st: ist_new() }
@@ -289,10 +412,24 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
     if b == 0x5E                       // '^' — first non-blank
         return Step { ed: clamp(Editor { lines: ed.lines, cy: ed.cy, cx: first_nonblank(line_at(ed, ed.cy)) }), st: ist_new() }
     if b == 0x67                       // 'g' — await second g
-        return Step { ed: ed, st: InputState { count: st.count, pending_g: true } }
+        return Step { ed: ed, st: InputState { count: st.count, pending_g: true, mode: 0 } }
     if b == 0x47                       // 'G' — go to line (count or last)
         let tgt = if st.count > 0 then st.count - 1 else list.len(ed.lines) - 1
         return Step { ed: clamp(Editor { lines: ed.lines, cy: tgt, cx: ed.cx }), st: ist_new() }
+    // Insert-mode entry (slice 4).  Position the cursor (insert-clamped so
+    // it may sit at end-of-line) and switch to Insert.
+    if b == 0x69                       // 'i' — insert before cursor
+        return Step { ed: ed, st: ist_insert() }
+    if b == 0x61                       // 'a' — append after cursor
+        return Step { ed: clamp_insert(Editor { lines: ed.lines, cy: ed.cy, cx: ed.cx + 1 }), st: ist_insert() }
+    if b == 0x49                       // 'I' — insert at first non-blank
+        return Step { ed: Editor { lines: ed.lines, cy: ed.cy, cx: first_nonblank(line_at(ed, ed.cy)) }, st: ist_insert() }
+    if b == 0x41                       // 'A' — append at end of line
+        return Step { ed: Editor { lines: ed.lines, cy: ed.cy, cx: str.len(line_at(ed, ed.cy)) }, st: ist_insert() }
+    if b == 0x6F                       // 'o' — open line below
+        return Step { ed: open_line(ed, true), st: ist_insert() }
+    if b == 0x4F                       // 'O' — open line above
+        return Step { ed: open_line(ed, false), st: ist_insert() }
     Step { ed: ed, st: ist_new() }     // unknown — reset
 
 // ── Batch (headless test) mode ──────────────────────────────────
@@ -301,17 +438,36 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
 // same apply_key the interactive loop uses (ignoring 'q'), then print
 // the final buffer followed by `cursor=<line>:<col>` and exit.  Fully
 // deterministic — the test harness asserts on this output.
+// Decode a batch key string into bytes on the fly: `\e`=Esc, `\n`/`\r`=
+// Enter, `\t`=Tab, `\\`=backslash.  Lets test sequences embed control
+// keys in plain ASCII (e.g. `iHello\e`).
 fn run_batch(keys: Str, path: Str) [io]
     var ed = Editor { lines: buf_load(path), cy: 0, cx: 0 }
     var st = ist_new()
     let n = str.len(keys)
     let mut i = 0
     while i < n
-        let b = str.byte_at(keys, i) ?? 0
-        if b != 0x71      // 'q' quits — a no-op in batch
-            let step = feed(ed, st, b)
-            ed = step.ed
-            st = step.st
+        var b = str.byte_at(keys, i) ?? 0
+        if b == 92 and i + 1 < n       // backslash escape
+            let nx = str.byte_at(keys, i + 1) ?? 0
+            if nx == 0x65              // \e → Esc
+                b = 27
+                i = i + 1
+            elif nx == 0x6E or nx == 0x72   // \n / \r → Enter
+                b = 13
+                i = i + 1
+            elif nx == 0x74            // \t → Tab
+                b = 9
+                i = i + 1
+            elif nx == 0x62            // \b → Backspace (DEL)
+                b = 127
+                i = i + 1
+            elif nx == 0x5C            // \\ → backslash
+                b = 92
+                i = i + 1
+        let step = feed(ed, st, b)
+        ed = step.ed
+        st = step.st
         i = i + 1
     let mut li = 0
     let nl = list.len(ed.lines)
@@ -351,7 +507,7 @@ fn sgr(code: Str) [io]            // ESC [ <code> m
 // Full repaint: clear, draw up to (rows-1) buffer lines (a `~` past
 // end-of-buffer), a reverse-video status line on the last row, then
 // place the hardware cursor at the editor cursor.
-fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int) [io]
+fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, mode: Int) [io]
     csi()
     emit("2J")            // clear screen
     let body = rows - 1
@@ -367,7 +523,8 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int) [io]
         r = r + 1
     cup(rows, 1)
     sgr("7")              // reverse video
-    emit(" " + path + "  " + str.from_int(ed.cy + 1) + ":" + str.from_int(ed.cx + 1) + "  -- NORMAL -- ")
+    let modestr = if mode == 1 then "-- INSERT -- " else "-- NORMAL -- "
+    emit(" " + path + "  " + str.from_int(ed.cy + 1) + ":" + str.from_int(ed.cx + 1) + "  " + modestr)
     sgr("0")
     cup(ed.cy - top + 1, ed.cx + 1)
 
@@ -399,7 +556,7 @@ fn run_interactive(path: Str) [io, time]
     var rows = term_rows()
     var cols = term_cols()
     var top = 0
-    render(ed, rows, cols, path, top)
+    render(ed, rows, cols, path, top, st.mode)
     var running = true
     while running
         let m = novo_pty_poll_h(0, 100)      // poll host stdin (fd 0)
@@ -412,7 +569,7 @@ fn run_interactive(path: Str) [io, time]
                 elif b == -1
                     done = true
                     running = false
-                elif b == 0x71                // 'q' — quit
+                elif b == 0x71 and st.mode == 0   // 'q' quits in Normal mode only
                     running = false
                     done = true
                 else
@@ -420,12 +577,12 @@ fn run_interactive(path: Str) [io, time]
                     ed = step.ed
                     st = step.st
             top = scroll_to(top, ed.cy, rows - 1)
-            render(ed, rows, cols, path, top)
+            render(ed, rows, cols, path, top, st.mode)
         if novo_pty_winsize_changed_h() == 1
             rows = term_rows()
             cols = term_cols()
             top = scroll_to(top, ed.cy, rows - 1)
-            render(ed, rows, cols, path, top)
+            render(ed, rows, cols, path, top, st.mode)
     novo_pty_restore_mode_h()
     csi()
     emit("2J")
