@@ -30,6 +30,7 @@ struct InputState
     mode:    Int          // 0 = Normal, 1 = Insert
     reg:     Str
     reg_lw:  Bool
+    search:  Str          // last `/pattern` (slice 10), for n / N
 
 // feed()'s result: the new editor + the new input state.
 struct Step
@@ -38,16 +39,20 @@ struct Step
 
 // The clean initial state (empty register).  Used once at editor start.
 fn ist_new() -> InputState
-    InputState { count: 0, pending: 0, mode: 0, reg: "", reg_lw: false }
+    InputState { count: 0, pending: 0, mode: 0, reg: "", reg_lw: false, search: "" }
 
 // End-of-command reset: clear count/pending, return to Normal, but PRESERVE
 // the register so a later `p` can paste an earlier `yy`/`dd`.
 fn ist_done(st: InputState) -> InputState
-    InputState { count: 0, pending: 0, mode: 0, reg: st.reg, reg_lw: st.reg_lw }
+    InputState { count: 0, pending: 0, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search }
 
 // Enter Insert mode, preserving the register.
 fn ist_insert(st: InputState) -> InputState
-    InputState { count: 0, pending: 0, mode: 1, reg: st.reg, reg_lw: st.reg_lw }
+    InputState { count: 0, pending: 0, mode: 1, reg: st.reg, reg_lw: st.reg_lw, search: st.search }
+
+// Record the last search pattern (after `/pattern<Enter>`).
+fn ist_set_search(st: InputState, pat: Str) -> InputState
+    InputState { count: 0, pending: 0, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: pat }
 
 // ── Buffer ──────────────────────────────────────────────────────
 
@@ -407,7 +412,7 @@ fn delete_to_eol(ed: Editor) -> Editor
 // Clear a pending operator but keep the count + register (used when the
 // second key of d/y/g isn't the doubling key — reprocess it fresh).
 fn ist_clear_pending(st: InputState) -> InputState
-    InputState { count: st.count, pending: 0, mode: 0, reg: st.reg, reg_lw: st.reg_lw }
+    InputState { count: st.count, pending: 0, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search }
 
 // Join `n` lines starting at cy into a single Str with '\n' separators —
 // the linewise register payload (round-trips through str.split_lines).
@@ -426,7 +431,7 @@ fn join_lines(ed: Editor, n: Int) -> Str
 
 // `yy` / `Nyy` — yank `n` lines into the (linewise) register; cursor stays.
 fn op_yank_lines(ed: Editor, st: InputState, n: Int) -> Step
-    Step { ed: ed, st: InputState { count: 0, pending: 0, mode: 0, reg: join_lines(ed, n), reg_lw: true } }
+    Step { ed: ed, st: InputState { count: 0, pending: 0, mode: 0, reg: join_lines(ed, n), reg_lw: true, search: st.search } }
 
 // `dd` / `Ndd` — yank `n` lines into the register, then remove them.
 fn op_delete_lines(ed: Editor, st: InputState, n: Int) -> Step
@@ -443,7 +448,7 @@ fn op_delete_lines(ed: Editor, st: InputState, n: Int) -> Step
     var ncy = ed.cy
     if ncy >= list.len(ls)
         ncy = list.len(ls) - 1
-    Step { ed: clamp(Editor { lines: ls, cy: ncy, cx: 0 }), st: InputState { count: 0, pending: 0, mode: 0, reg: payload, reg_lw: true } }
+    Step { ed: clamp(Editor { lines: ls, cy: ncy, cx: 0 }), st: InputState { count: 0, pending: 0, mode: 0, reg: payload, reg_lw: true, search: st.search } }
 
 // `p` / `P` — paste the register after/before the cursor.  Linewise inserts
 // whole lines below/above; characterwise inserts text at the cursor.
@@ -515,9 +520,9 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
     // Count digits.  `0` is a count digit only when a count is already
     // building; otherwise `0` is the "first column" motion.
     if b >= 0x31 and b <= 0x39         // '1'-'9'
-        return Step { ed: ed, st: InputState { count: st.count * 10 + (b - 0x30), pending: 0, mode: 0, reg: st.reg, reg_lw: st.reg_lw } }
+        return Step { ed: ed, st: InputState { count: st.count * 10 + (b - 0x30), pending: 0, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
     if b == 0x30 and st.count > 0      // '0' continues a count
-        return Step { ed: ed, st: InputState { count: st.count * 10, pending: 0, mode: 0, reg: st.reg, reg_lw: st.reg_lw } }
+        return Step { ed: ed, st: InputState { count: st.count * 10, pending: 0, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
     let cnt = if st.count > 0 then st.count else 1
     if b == 0x68 or b == 0x6C or b == 0x6A or b == 0x6B      // h l j k
         return Step { ed: repeat_hjkl(ed, b, cnt), st: ist_done(st) }
@@ -536,15 +541,19 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
     if b == 0x5E                       // '^' — first non-blank
         return Step { ed: clamp(Editor { lines: ed.lines, cy: ed.cy, cx: first_nonblank(line_at(ed, ed.cy)) }), st: ist_done(st) }
     if b == 0x67                       // 'g' — await second g
-        return Step { ed: ed, st: InputState { count: st.count, pending: 1, mode: 0, reg: st.reg, reg_lw: st.reg_lw } }
+        return Step { ed: ed, st: InputState { count: st.count, pending: 1, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
     if b == 0x64                       // 'd' — await operator target (dd)
-        return Step { ed: ed, st: InputState { count: st.count, pending: 2, mode: 0, reg: st.reg, reg_lw: st.reg_lw } }
+        return Step { ed: ed, st: InputState { count: st.count, pending: 2, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
     if b == 0x79                       // 'y' — await operator target (yy)
-        return Step { ed: ed, st: InputState { count: st.count, pending: 3, mode: 0, reg: st.reg, reg_lw: st.reg_lw } }
+        return Step { ed: ed, st: InputState { count: st.count, pending: 3, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
     if b == 0x70                       // 'p' — paste after
         return Step { ed: paste(ed, st, true), st: ist_done(st) }
     if b == 0x50                       // 'P' — paste before
         return Step { ed: paste(ed, st, false), st: ist_done(st) }
+    if b == 0x6E                       // 'n' — repeat search forward
+        return Step { ed: find_next(ed, st.search, true), st: ist_done(st) }
+    if b == 0x4E                       // 'N' — repeat search backward
+        return Step { ed: find_next(ed, st.search, false), st: ist_done(st) }
     if b == 0x47                       // 'G' — go to line (count or last)
         let tgt = if st.count > 0 then st.count - 1 else list.len(ed.lines) - 1
         return Step { ed: clamp(Editor { lines: ed.lines, cy: tgt, cx: ed.cx }), st: ist_done(st) }
@@ -761,6 +770,71 @@ fn status_sgr(cs: Colorscheme) -> Str
     else
         codes
 
+// ── Search (/pattern, n / N) — slice 10 ─────────────────────────
+
+// First occurrence of `needle` in `hay` at or after column `from`; -1 if
+// none.  Plain substring (no regex in v1).
+fn find_in_line(hay: Str, needle: Str, from: Int) -> Int
+    let hl = str.len(hay)
+    let nl = str.len(needle)
+    if nl == 0
+        return 0 - 1
+    var i = if from < 0 then 0 else from
+    while i + nl <= hl
+        if str.slice(hay, i, i + nl) == needle
+            return i
+        i = i + 1
+    0 - 1
+
+// Last occurrence of `needle` in `hay` strictly before column `before`
+// (before < 0 → search the whole line); -1 if none.
+fn find_last_in_line(hay: Str, needle: Str, before: Int) -> Int
+    let hl = str.len(hay)
+    let nl = str.len(needle)
+    if nl == 0
+        return 0 - 1
+    let cap = if before < 0 then hl else before
+    var found = 0 - 1
+    var i = 0
+    while i + nl <= hl and i < cap
+        if str.slice(hay, i, i + nl) == needle
+            found = i
+        i = i + 1
+    found
+
+// Move the cursor to the next (`forward`) / previous occurrence of
+// `pattern`, wrapping around the buffer.  Unchanged if no match anywhere.
+fn find_next(ed: Editor, pattern: Str, forward: Bool) -> Editor
+    if str.len(pattern) == 0
+        return ed
+    let total = list.len(ed.lines)
+    if forward
+        var y = ed.cy
+        var startcol = ed.cx + 1
+        var steps = 0
+        while steps <= total
+            let col = find_in_line(line_at(ed, y), pattern, startcol)
+            if col >= 0
+                return Editor { lines: ed.lines, cy: y, cx: col }
+            y = (y + 1) % total
+            startcol = 0
+            steps = steps + 1
+        ed
+    else
+        var y = ed.cy
+        var before = ed.cx
+        var steps = 0
+        while steps <= total
+            let col = find_last_in_line(line_at(ed, y), pattern, before)
+            if col >= 0
+                return Editor { lines: ed.lines, cy: y, cx: col }
+            y = y - 1
+            if y < 0
+                y = total - 1
+            before = 0 - 1
+            steps = steps + 1
+        ed
+
 // ── Batch (headless test) mode ──────────────────────────────────
 
 // `novim --batch "<keys>" <file>`: load, feed each key byte through the
@@ -793,6 +867,8 @@ fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
     let decoded = decode_escapes(keys)
     var cmd_mode = false
     var cmd_buf = ""
+    var search_mode = false
+    var search_buf = ""
     var quit = false
     let n = str.len(decoded)
     let mut i = 0
@@ -815,9 +891,26 @@ fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
                     cmd_buf = str.slice(cmd_buf, 0, str.len(cmd_buf) - 1)
             elif b >= 32 and b < 127
                 cmd_buf = cmd_buf + str.from_char(b)
+        elif search_mode
+            if b == 13 or b == 10            // Enter — run the search
+                st = ist_set_search(st, search_buf)
+                ed = find_next(ed, search_buf, true)
+                search_mode = false
+                search_buf = ""
+            elif b == 27                     // Esc — cancel
+                search_mode = false
+                search_buf = ""
+            elif b == 127 or b == 8
+                if str.len(search_buf) > 0
+                    search_buf = str.slice(search_buf, 0, str.len(search_buf) - 1)
+            elif b >= 32 and b < 127
+                search_buf = search_buf + str.from_char(b)
         elif b == 58 and st.mode == 0        // ':' — open the Ex line
             cmd_mode = true
             cmd_buf = ""
+        elif b == 47 and st.mode == 0        // '/' — open the search line
+            search_mode = true
+            search_buf = ""
         else
             let step = feed_mapped(ed, st, km, b)
             ed = step.ed
@@ -918,6 +1011,8 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
     var top = 0
     var cmd_mode = false
     var cmd_buf = ""
+    var search_mode = false
+    var search_buf = ""
     render(ed, rows, cols, path, top, st.mode, cs)
     var running = true
     while running
@@ -949,9 +1044,26 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                             cmd_buf = str.slice(cmd_buf, 0, str.len(cmd_buf) - 1)
                     elif b >= 32 and b < 127
                         cmd_buf = cmd_buf + str.from_char(b)
+                elif search_mode
+                    if b == 13 or b == 10
+                        st = ist_set_search(st, search_buf)
+                        ed = find_next(ed, search_buf, true)
+                        search_mode = false
+                        search_buf = ""
+                    elif b == 27
+                        search_mode = false
+                        search_buf = ""
+                    elif b == 127 or b == 8
+                        if str.len(search_buf) > 0
+                            search_buf = str.slice(search_buf, 0, str.len(search_buf) - 1)
+                    elif b >= 32 and b < 127
+                        search_buf = search_buf + str.from_char(b)
                 elif b == 58 and st.mode == 0        // ':' — open the Ex line
                     cmd_mode = true
                     cmd_buf = ""
+                elif b == 47 and st.mode == 0        // '/' — open the search line
+                    search_mode = true
+                    search_buf = ""
                 else
                     let step = feed_mapped(ed, st, km, b)
                     ed = step.ed
@@ -961,8 +1073,13 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
             if cmd_mode
                 cup(rows, 1)
                 csi()
-                emit("K")                            // clear status row
+                emit("K")
                 emit(":" + cmd_buf)
+            if search_mode
+                cup(rows, 1)
+                csi()
+                emit("K")
+                emit("/" + search_buf)
         if novo_pty_winsize_changed_h() == 1
             rows = term_rows()
             cols = term_cols()
