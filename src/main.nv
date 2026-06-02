@@ -19,6 +19,21 @@ struct Editor
     cy:    Int
     cx:    Int
 
+// Normal-mode input state carried across bytes: `count` accumulates a
+// numeric prefix (e.g. `5j`); `pending_g` is set after a lone `g`, so the
+// next `g` completes `gg`.  (slice 2)
+struct InputState
+    count:     Int
+    pending_g: Bool
+
+// feed()'s result: the new editor + the new input state.
+struct Step
+    ed: Editor
+    st: InputState
+
+fn ist_new() -> InputState
+    InputState { count: 0, pending_g: false }
+
 // ── Buffer ──────────────────────────────────────────────────────
 
 // Load `path` into a line vector.  Missing/unreadable file → a single
@@ -53,8 +68,22 @@ fn clamp(ed: Editor) -> Editor
 
 // ── Input ───────────────────────────────────────────────────────
 
-// Apply one key byte in Normal mode.  Slice 1: h/j/k/l cursor motion.
-fn apply_key(ed: Editor, b: Int) -> Editor
+fn line_at(ed: Editor, y: Int) -> Str
+    if y >= 0 and y < list.len(ed.lines) then ed.lines[y] else ""
+
+// Column of the first non-blank glyph on `line` (0 if all blank/empty).
+fn first_nonblank(line: Str) -> Int
+    let n = str.len(line)
+    let mut i = 0
+    while i < n
+        let c = str.byte_at(line, i) ?? 0
+        if c != 32 and c != 9          // not space / tab
+            return i
+        i = i + 1
+    0
+
+// One h/j/k/l step (clamped).
+fn motion_hjkl(ed: Editor, b: Int) -> Editor
     if b == 0x68          // 'h' — left
         clamp(Editor { lines: ed.lines, cy: ed.cy, cx: ed.cx - 1 })
     elif b == 0x6C        // 'l' — right
@@ -66,6 +95,50 @@ fn apply_key(ed: Editor, b: Int) -> Editor
     else
         ed
 
+fn repeat_hjkl(ed: Editor, b: Int, times: Int) -> Editor
+    var e = ed
+    let mut k = 0
+    while k < times
+        e = motion_hjkl(e, b)
+        k = k + 1
+    e
+
+// Feed one byte through the Normal-mode handler, threading InputState.
+// Counts (`5j`, `10G`), line motions (`0 $ ^`), and buffer motions
+// (`gg G`) join the slice-1 `h j k l`.  (slices 1-2)
+fn feed(ed: Editor, st: InputState, b: Int) -> Step
+    // Completing `gg`?
+    if st.pending_g
+        if b == 0x67                   // second 'g' — go to line (count or 1)
+            let tgt = if st.count > 0 then st.count - 1 else 0
+            return Step { ed: clamp(Editor { lines: ed.lines, cy: tgt, cx: ed.cx }), st: ist_new() }
+        else
+            // Not `gg` — drop the pending g and reprocess this byte fresh.
+            return feed(ed, InputState { count: st.count, pending_g: false }, b)
+    // Count digits.  `0` is a count digit only when a count is already
+    // building; otherwise `0` is the "first column" motion.
+    if b >= 0x31 and b <= 0x39         // '1'-'9'
+        return Step { ed: ed, st: InputState { count: st.count * 10 + (b - 0x30), pending_g: false } }
+    if b == 0x30 and st.count > 0      // '0' continues a count
+        return Step { ed: ed, st: InputState { count: st.count * 10, pending_g: false } }
+    let cnt = if st.count > 0 then st.count else 1
+    if b == 0x68 or b == 0x6C or b == 0x6A or b == 0x6B      // h l j k
+        return Step { ed: repeat_hjkl(ed, b, cnt), st: ist_new() }
+    if b == 0x30                       // '0' — first column
+        return Step { ed: clamp(Editor { lines: ed.lines, cy: ed.cy, cx: 0 }), st: ist_new() }
+    if b == 0x24                       // '$' — end of line
+        let ll = str.len(line_at(ed, ed.cy))
+        let ex = if ll > 0 then ll - 1 else 0
+        return Step { ed: clamp(Editor { lines: ed.lines, cy: ed.cy, cx: ex }), st: ist_new() }
+    if b == 0x5E                       // '^' — first non-blank
+        return Step { ed: clamp(Editor { lines: ed.lines, cy: ed.cy, cx: first_nonblank(line_at(ed, ed.cy)) }), st: ist_new() }
+    if b == 0x67                       // 'g' — await second g
+        return Step { ed: ed, st: InputState { count: st.count, pending_g: true } }
+    if b == 0x47                       // 'G' — go to line (count or last)
+        let tgt = if st.count > 0 then st.count - 1 else list.len(ed.lines) - 1
+        return Step { ed: clamp(Editor { lines: ed.lines, cy: tgt, cx: ed.cx }), st: ist_new() }
+    Step { ed: ed, st: ist_new() }     // unknown — reset
+
 // ── Batch (headless test) mode ──────────────────────────────────
 
 // `novim --batch "<keys>" <file>`: load, feed each key byte through the
@@ -74,12 +147,15 @@ fn apply_key(ed: Editor, b: Int) -> Editor
 // deterministic — the test harness asserts on this output.
 fn run_batch(keys: Str, path: Str) [io]
     var ed = Editor { lines: buf_load(path), cy: 0, cx: 0 }
+    var st = ist_new()
     let n = str.len(keys)
     let mut i = 0
     while i < n
         let b = str.byte_at(keys, i) ?? 0
         if b != 0x71      // 'q' quits — a no-op in batch
-            ed = apply_key(ed, b)
+            let step = feed(ed, st, b)
+            ed = step.ed
+            st = step.st
         i = i + 1
     let mut li = 0
     let nl = list.len(ed.lines)
@@ -119,7 +195,7 @@ fn sgr(code: Str) [io]            // ESC [ <code> m
 // Full repaint: clear, draw up to (rows-1) buffer lines (a `~` past
 // end-of-buffer), a reverse-video status line on the last row, then
 // place the hardware cursor at the editor cursor.
-fn render(ed: Editor, rows: Int, cols: Int, path: Str) [io]
+fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int) [io]
     csi()
     emit("2J")            // clear screen
     let body = rows - 1
@@ -127,8 +203,9 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str) [io]
     let mut r = 0
     while r < body
         cup(r + 1, 1)
-        if r < nl
-            emit(ed.lines[r])
+        let li = top + r
+        if li < nl
+            emit(ed.lines[li])
         else
             emit("~")
         r = r + 1
@@ -136,7 +213,7 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str) [io]
     sgr("7")              // reverse video
     emit(" " + path + "  " + str.from_int(ed.cy + 1) + ":" + str.from_int(ed.cx + 1) + "  -- NORMAL -- ")
     sgr("0")
-    cup(ed.cy + 1, ed.cx + 1)
+    cup(ed.cy - top + 1, ed.cx + 1)
 
 fn term_rows() -> Int [io]
     let packed = novo_pty_get_winsize_h()
@@ -148,12 +225,25 @@ fn term_cols() -> Int [io]
     let c = bits.band(packed, 65535)
     if c > 0 then c else 80
 
+// Adjust the viewport top so the cursor line is visible in `body` rows.
+fn scroll_to(top: Int, cy: Int, body: Int) -> Int
+    var t = top
+    if cy < t
+        t = cy
+    if cy >= t + body
+        t = cy - body + 1
+    if t < 0
+        t = 0
+    t
+
 fn run_interactive(path: Str) [io, time]
     let _ = novo_pty_set_raw_mode_h()
     var ed = Editor { lines: buf_load(path), cy: 0, cx: 0 }
+    var st = ist_new()
     var rows = term_rows()
     var cols = term_cols()
-    render(ed, rows, cols, path)
+    var top = 0
+    render(ed, rows, cols, path, top)
     var running = true
     while running
         let m = novo_pty_poll_h(0, 100)      // poll host stdin (fd 0)
@@ -170,12 +260,16 @@ fn run_interactive(path: Str) [io, time]
                     running = false
                     done = true
                 else
-                    ed = apply_key(ed, b)
-            render(ed, rows, cols, path)
+                    let step = feed(ed, st, b)
+                    ed = step.ed
+                    st = step.st
+            top = scroll_to(top, ed.cy, rows - 1)
+            render(ed, rows, cols, path, top)
         if novo_pty_winsize_changed_h() == 1
             rows = term_rows()
             cols = term_cols()
-            render(ed, rows, cols, path)
+            top = scroll_to(top, ed.cy, rows - 1)
+            render(ed, rows, cols, path, top)
     novo_pty_restore_mode_h()
     csi()
     emit("2J")
