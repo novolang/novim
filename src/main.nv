@@ -20,25 +20,34 @@ struct Editor
     cx:    Int
 
 // Normal-mode input state carried across bytes: `count` accumulates a
-// numeric prefix (e.g. `5j`); `pending_g` is set after a lone `g`, so the
-// next `g` completes `gg`.  (slice 2)
+// numeric prefix (e.g. `5j`); `pending` is the awaiting-second-key operator
+// (0 none, 1 `g` for gg, 2 `d` for dd, 3 `y` for yy); `mode` is Normal/Insert;
+// `reg` + `reg_lw` are the unnamed yank/delete register (slice 6 — linewise
+// when reg_lw, characterwise otherwise).  (slices 2/4/6)
 struct InputState
-    count:     Int
-    pending_g: Bool
-    mode:      Int        // 0 = Normal, 1 = Insert  (slice 4)
+    count:   Int
+    pending: Int
+    mode:    Int          // 0 = Normal, 1 = Insert
+    reg:     Str
+    reg_lw:  Bool
 
 // feed()'s result: the new editor + the new input state.
 struct Step
     ed: Editor
     st: InputState
 
-// Reset to a clean Normal-mode state (count/pending cleared).  Used at the
-// end of every completed Normal-mode command.
+// The clean initial state (empty register).  Used once at editor start.
 fn ist_new() -> InputState
-    InputState { count: 0, pending_g: false, mode: 0 }
+    InputState { count: 0, pending: 0, mode: 0, reg: "", reg_lw: false }
 
-fn ist_insert() -> InputState
-    InputState { count: 0, pending_g: false, mode: 1 }
+// End-of-command reset: clear count/pending, return to Normal, but PRESERVE
+// the register so a later `p` can paste an earlier `yy`/`dd`.
+fn ist_done(st: InputState) -> InputState
+    InputState { count: 0, pending: 0, mode: 0, reg: st.reg, reg_lw: st.reg_lw }
+
+// Enter Insert mode, preserving the register.
+fn ist_insert(st: InputState) -> InputState
+    InputState { count: 0, pending: 0, mode: 1, reg: st.reg, reg_lw: st.reg_lw }
 
 // ── Buffer ──────────────────────────────────────────────────────
 
@@ -383,11 +392,87 @@ fn delete_to_eol(ed: Editor) -> Editor
     let line = line_at(ed, ed.cy)
     clamp(Editor { lines: set_line(ed.lines, ed.cy, str.slice(line, 0, ed.cx)), cy: ed.cy, cx: ed.cx })
 
+// ── Register: yank / delete-lines / paste (slice 6) ─────────────
+
+// Clear a pending operator but keep the count + register (used when the
+// second key of d/y/g isn't the doubling key — reprocess it fresh).
+fn ist_clear_pending(st: InputState) -> InputState
+    InputState { count: st.count, pending: 0, mode: 0, reg: st.reg, reg_lw: st.reg_lw }
+
+// Join `n` lines starting at cy into a single Str with '\n' separators —
+// the linewise register payload (round-trips through str.split_lines).
+fn join_lines(ed: Editor, n: Int) -> Str
+    let total = list.len(ed.lines)
+    var acc = ""
+    var i = ed.cy
+    var cnt = 0
+    while i < total and cnt < n
+        if cnt > 0
+            acc = acc + str.from_char(10)
+        acc = acc + ed.lines[i]
+        i = i + 1
+        cnt = cnt + 1
+    acc
+
+// `yy` / `Nyy` — yank `n` lines into the (linewise) register; cursor stays.
+fn op_yank_lines(ed: Editor, st: InputState, n: Int) -> Step
+    Step { ed: ed, st: InputState { count: 0, pending: 0, mode: 0, reg: join_lines(ed, n), reg_lw: true } }
+
+// `dd` / `Ndd` — yank `n` lines into the register, then remove them.
+fn op_delete_lines(ed: Editor, st: InputState, n: Int) -> Step
+    let payload = join_lines(ed, n)
+    let total = list.len(ed.lines)
+    var ls: [Str] = []
+    let mut i = 0
+    while i < total
+        if i < ed.cy or i >= ed.cy + n
+            ls = list.append(ls, [ed.lines[i]])
+        i = i + 1
+    if list.len(ls) == 0
+        ls = list.append(ls, [""])      // the buffer always keeps one line
+    var ncy = ed.cy
+    if ncy >= list.len(ls)
+        ncy = list.len(ls) - 1
+    Step { ed: clamp(Editor { lines: ls, cy: ncy, cx: 0 }), st: InputState { count: 0, pending: 0, mode: 0, reg: payload, reg_lw: true } }
+
+// `p` / `P` — paste the register after/before the cursor.  Linewise inserts
+// whole lines below/above; characterwise inserts text at the cursor.
+fn paste(ed: Editor, st: InputState, after: Bool) -> Editor
+    if str.len(st.reg) == 0
+        return ed
+    if st.reg_lw
+        let plines = str.split_lines(st.reg)
+        let np = list.len(plines)
+        let at = if after then ed.cy + 1 else ed.cy
+        var ls: [Str] = []
+        let mut i = 0
+        let total = list.len(ed.lines)
+        while i < total
+            if i == at
+                let mut j = 0
+                while j < np
+                    ls = list.append(ls, [plines[j]])
+                    j = j + 1
+            ls = list.append(ls, [ed.lines[i]])
+            i = i + 1
+        if at >= total
+            let mut j = 0
+            while j < np
+                ls = list.append(ls, [plines[j]])
+                j = j + 1
+        clamp(Editor { lines: ls, cy: at, cx: 0 })
+    else
+        let line = line_at(ed, ed.cy)
+        let want = if after then ed.cx + 1 else ed.cx
+        let col = if want > str.len(line) then str.len(line) else want
+        let merged = str.slice(line, 0, col) + st.reg + str.slice(line, col, str.len(line))
+        clamp(Editor { lines: set_line(ed.lines, ed.cy, merged), cy: ed.cy, cx: col + str.len(st.reg) - 1 })
+
 // Handle one byte while in Insert mode.
 fn feed_insert(ed: Editor, st: InputState, b: Int) -> Step
     if b == 27                         // Esc → Normal (cursor steps left, vim)
         let e = clamp(Editor { lines: ed.lines, cy: ed.cy, cx: ed.cx - 1 })
-        return Step { ed: e, st: ist_new() }
+        return Step { ed: e, st: ist_done(st) }
     if b == 13 or b == 10              // Enter → split line
         return Step { ed: insert_newline(ed), st: st }
     if b == 127 or b == 8              // Backspace / DEL
@@ -403,62 +488,76 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
     // Insert mode owns every byte until Esc.  (slice 4)
     if st.mode == 1
         return feed_insert(ed, st, b)
-    // Completing `gg`?
-    if st.pending_g
-        if b == 0x67                   // second 'g' — go to line (count or 1)
+    // Operators awaiting a second key (pending: 1=g, 2=d, 3=y).
+    if st.pending == 1
+        if b == 0x67                   // `gg` — go to line (count or 1)
             let tgt = if st.count > 0 then st.count - 1 else 0
-            return Step { ed: clamp(Editor { lines: ed.lines, cy: tgt, cx: ed.cx }), st: ist_new() }
-        else
-            // Not `gg` — drop the pending g and reprocess this byte fresh.
-            return feed(ed, InputState { count: st.count, pending_g: false, mode: 0 }, b)
+            return Step { ed: clamp(Editor { lines: ed.lines, cy: tgt, cx: ed.cx }), st: ist_done(st) }
+        return feed(ed, ist_clear_pending(st), b)     // not gg — reprocess fresh
+    if st.pending == 2
+        if b == 0x64                   // `dd` — delete count lines (→ register)
+            return op_delete_lines(ed, st, if st.count > 0 then st.count else 1)
+        return feed(ed, ist_clear_pending(st), b)
+    if st.pending == 3
+        if b == 0x79                   // `yy` — yank count lines (→ register)
+            return op_yank_lines(ed, st, if st.count > 0 then st.count else 1)
+        return feed(ed, ist_clear_pending(st), b)
     // Count digits.  `0` is a count digit only when a count is already
     // building; otherwise `0` is the "first column" motion.
     if b >= 0x31 and b <= 0x39         // '1'-'9'
-        return Step { ed: ed, st: InputState { count: st.count * 10 + (b - 0x30), pending_g: false, mode: 0 } }
+        return Step { ed: ed, st: InputState { count: st.count * 10 + (b - 0x30), pending: 0, mode: 0, reg: st.reg, reg_lw: st.reg_lw } }
     if b == 0x30 and st.count > 0      // '0' continues a count
-        return Step { ed: ed, st: InputState { count: st.count * 10, pending_g: false, mode: 0 } }
+        return Step { ed: ed, st: InputState { count: st.count * 10, pending: 0, mode: 0, reg: st.reg, reg_lw: st.reg_lw } }
     let cnt = if st.count > 0 then st.count else 1
     if b == 0x68 or b == 0x6C or b == 0x6A or b == 0x6B      // h l j k
-        return Step { ed: repeat_hjkl(ed, b, cnt), st: ist_new() }
+        return Step { ed: repeat_hjkl(ed, b, cnt), st: ist_done(st) }
     if b == 0x77                       // 'w' — next word start
-        return Step { ed: repeat_word(ed, 0, cnt), st: ist_new() }
+        return Step { ed: repeat_word(ed, 0, cnt), st: ist_done(st) }
     if b == 0x62                       // 'b' — previous word start
-        return Step { ed: repeat_word(ed, 1, cnt), st: ist_new() }
+        return Step { ed: repeat_word(ed, 1, cnt), st: ist_done(st) }
     if b == 0x65                       // 'e' — next word end
-        return Step { ed: repeat_word(ed, 2, cnt), st: ist_new() }
+        return Step { ed: repeat_word(ed, 2, cnt), st: ist_done(st) }
     if b == 0x30                       // '0' — first column
-        return Step { ed: clamp(Editor { lines: ed.lines, cy: ed.cy, cx: 0 }), st: ist_new() }
+        return Step { ed: clamp(Editor { lines: ed.lines, cy: ed.cy, cx: 0 }), st: ist_done(st) }
     if b == 0x24                       // '$' — end of line
         let ll = str.len(line_at(ed, ed.cy))
         let ex = if ll > 0 then ll - 1 else 0
-        return Step { ed: clamp(Editor { lines: ed.lines, cy: ed.cy, cx: ex }), st: ist_new() }
+        return Step { ed: clamp(Editor { lines: ed.lines, cy: ed.cy, cx: ex }), st: ist_done(st) }
     if b == 0x5E                       // '^' — first non-blank
-        return Step { ed: clamp(Editor { lines: ed.lines, cy: ed.cy, cx: first_nonblank(line_at(ed, ed.cy)) }), st: ist_new() }
+        return Step { ed: clamp(Editor { lines: ed.lines, cy: ed.cy, cx: first_nonblank(line_at(ed, ed.cy)) }), st: ist_done(st) }
     if b == 0x67                       // 'g' — await second g
-        return Step { ed: ed, st: InputState { count: st.count, pending_g: true, mode: 0 } }
+        return Step { ed: ed, st: InputState { count: st.count, pending: 1, mode: 0, reg: st.reg, reg_lw: st.reg_lw } }
+    if b == 0x64                       // 'd' — await operator target (dd)
+        return Step { ed: ed, st: InputState { count: st.count, pending: 2, mode: 0, reg: st.reg, reg_lw: st.reg_lw } }
+    if b == 0x79                       // 'y' — await operator target (yy)
+        return Step { ed: ed, st: InputState { count: st.count, pending: 3, mode: 0, reg: st.reg, reg_lw: st.reg_lw } }
+    if b == 0x70                       // 'p' — paste after
+        return Step { ed: paste(ed, st, true), st: ist_done(st) }
+    if b == 0x50                       // 'P' — paste before
+        return Step { ed: paste(ed, st, false), st: ist_done(st) }
     if b == 0x47                       // 'G' — go to line (count or last)
         let tgt = if st.count > 0 then st.count - 1 else list.len(ed.lines) - 1
-        return Step { ed: clamp(Editor { lines: ed.lines, cy: tgt, cx: ed.cx }), st: ist_new() }
+        return Step { ed: clamp(Editor { lines: ed.lines, cy: tgt, cx: ed.cx }), st: ist_done(st) }
     // Insert-mode entry (slice 4).  Position the cursor (insert-clamped so
     // it may sit at end-of-line) and switch to Insert.
     if b == 0x69                       // 'i' — insert before cursor
-        return Step { ed: ed, st: ist_insert() }
+        return Step { ed: ed, st: ist_insert(st) }
     if b == 0x61                       // 'a' — append after cursor
-        return Step { ed: clamp_insert(Editor { lines: ed.lines, cy: ed.cy, cx: ed.cx + 1 }), st: ist_insert() }
+        return Step { ed: clamp_insert(Editor { lines: ed.lines, cy: ed.cy, cx: ed.cx + 1 }), st: ist_insert(st) }
     if b == 0x49                       // 'I' — insert at first non-blank
-        return Step { ed: Editor { lines: ed.lines, cy: ed.cy, cx: first_nonblank(line_at(ed, ed.cy)) }, st: ist_insert() }
+        return Step { ed: Editor { lines: ed.lines, cy: ed.cy, cx: first_nonblank(line_at(ed, ed.cy)) }, st: ist_insert(st) }
     if b == 0x41                       // 'A' — append at end of line
-        return Step { ed: Editor { lines: ed.lines, cy: ed.cy, cx: str.len(line_at(ed, ed.cy)) }, st: ist_insert() }
+        return Step { ed: Editor { lines: ed.lines, cy: ed.cy, cx: str.len(line_at(ed, ed.cy)) }, st: ist_insert(st) }
     if b == 0x6F                       // 'o' — open line below
-        return Step { ed: open_line(ed, true), st: ist_insert() }
+        return Step { ed: open_line(ed, true), st: ist_insert(st) }
     if b == 0x4F                       // 'O' — open line above
-        return Step { ed: open_line(ed, false), st: ist_insert() }
+        return Step { ed: open_line(ed, false), st: ist_insert(st) }
     // Deletes (slice 5).
     if b == 0x78                       // 'x' — delete char(s) under cursor
-        return Step { ed: repeat_delete_char(ed, cnt), st: ist_new() }
+        return Step { ed: repeat_delete_char(ed, cnt), st: ist_done(st) }
     if b == 0x44                       // 'D' — delete to end of line
-        return Step { ed: delete_to_eol(ed), st: ist_new() }
-    Step { ed: ed, st: ist_new() }     // unknown — reset
+        return Step { ed: delete_to_eol(ed), st: ist_done(st) }
+    Step { ed: ed, st: ist_done(st) }     // unknown — reset
 
 // ── Batch (headless test) mode ──────────────────────────────────
 
