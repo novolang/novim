@@ -697,6 +697,70 @@ fn load_keymaps(cfg_path: Str) -> Keymap [io]
                 i = i + 1
             Keymap { lhs: lhs, rhs: rhs }
 
+// ── Colorscheme (slice 9) ───────────────────────────────────────
+// `[colorscheme]` sets 256-colour SGR indices for chrome elements; -1 =
+// use the default.  v1 colours the status line (fg/bg) and the `~`
+// end-of-buffer markers; syntax-token classes inherit this once
+// highlighting lands (v2).
+
+struct Colorscheme
+    status_fg: Int
+    status_bg: Int
+    tilde_fg:  Int
+
+fn colorscheme_default() -> Colorscheme
+    Colorscheme { status_fg: 0 - 1, status_bg: 0 - 1, tilde_fg: 0 - 1 }
+
+fn parse_color_val(s: Str) -> Int
+    match str.to_int(str.trim(strip_quotes(str.trim(s))))
+        None => 0 - 1
+        Some(v) => v
+
+fn load_colorscheme(cfg_path: Str) -> Colorscheme [io]
+    match fs.read(cfg_path)
+        None => colorscheme_default()
+        Some(content) =>
+            var sfg = 0 - 1
+            var sbg = 0 - 1
+            var tfg = 0 - 1
+            let lines = str.split_lines(content)
+            var in_cs = false
+            let mut i = 0
+            let n = list.len(lines)
+            while i < n
+                let raw = str.trim(lines[i])
+                if str.len(raw) > 0 and (str.byte_at(raw, 0) ?? 0) != 35
+                    if (str.byte_at(raw, 0) ?? 0) == 91
+                        in_cs = raw == "[colorscheme]"
+                    elif in_cs
+                        let eq = index_of_byte(raw, 61)
+                        if eq > 0
+                            let key = str.trim(str.slice(raw, 0, eq))
+                            let cv = parse_color_val(str.slice(raw, eq + 1, str.len(raw)))
+                            if key == "status_fg"
+                                sfg = cv
+                            elif key == "status_bg"
+                                sbg = cv
+                            elif key == "tilde_fg"
+                                tfg = cv
+                i = i + 1
+            Colorscheme { status_fg: sfg, status_bg: sbg, tilde_fg: tfg }
+
+// SGR parameter string for the status line: 256-colour fg/bg if set, else
+// reverse-video (`7`).
+fn status_sgr(cs: Colorscheme) -> Str
+    var codes = ""
+    if cs.status_fg >= 0
+        codes = codes + "38;5;" + str.from_int(cs.status_fg)
+    if cs.status_bg >= 0
+        if str.len(codes) > 0
+            codes = codes + ";"
+        codes = codes + "48;5;" + str.from_int(cs.status_bg)
+    if str.len(codes) == 0
+        "7"
+    else
+        codes
+
 // ── Batch (headless test) mode ──────────────────────────────────
 
 // `novim --batch "<keys>" <file>`: load, feed each key byte through the
@@ -797,7 +861,7 @@ fn sgr(code: Str) [io]            // ESC [ <code> m
 // Full repaint: clear, draw up to (rows-1) buffer lines (a `~` past
 // end-of-buffer), a reverse-video status line on the last row, then
 // place the hardware cursor at the editor cursor.
-fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, mode: Int) [io]
+fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, mode: Int, cs: Colorscheme) [io]
     csi()
     emit("2J")            // clear screen
     let body = rows - 1
@@ -808,11 +872,15 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, mode: Int) [io]
         let li = top + r
         if li < nl
             emit(ed.lines[li])
+        elif cs.tilde_fg >= 0
+            sgr("38;5;" + str.from_int(cs.tilde_fg))
+            emit("~")
+            sgr("0")
         else
             emit("~")
         r = r + 1
     cup(rows, 1)
-    sgr("7")              // reverse video
+    sgr(status_sgr(cs))
     let modestr = if mode == 1 then "-- INSERT -- " else "-- NORMAL -- "
     emit(" " + path + "  " + str.from_int(ed.cy + 1) + ":" + str.from_int(ed.cx + 1) + "  " + modestr)
     sgr("0")
@@ -844,12 +912,13 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
     var ed = Editor { lines: buf_load(path), cy: 0, cx: 0 }
     var st = ist_new()
     let km = load_keymaps(cfg_path)
+    let cs = load_colorscheme(cfg_path)
     var rows = term_rows()
     var cols = term_cols()
     var top = 0
     var cmd_mode = false
     var cmd_buf = ""
-    render(ed, rows, cols, path, top, st.mode)
+    render(ed, rows, cols, path, top, st.mode, cs)
     var running = true
     while running
         let m = novo_pty_poll_h(0, 100)      // poll host stdin (fd 0)
@@ -888,7 +957,7 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                     ed = step.ed
                     st = step.st
             top = scroll_to(top, ed.cy, rows - 1)
-            render(ed, rows, cols, path, top, st.mode)
+            render(ed, rows, cols, path, top, st.mode, cs)
             if cmd_mode
                 cup(rows, 1)
                 csi()
@@ -898,7 +967,7 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
             rows = term_rows()
             cols = term_cols()
             top = scroll_to(top, ed.cy, rows - 1)
-            render(ed, rows, cols, path, top, st.mode)
+            render(ed, rows, cols, path, top, st.mode, cs)
     novo_pty_restore_mode_h()
     csi()
     emit("2J")
