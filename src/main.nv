@@ -1,0 +1,207 @@
+// novim — modal terminal editor written in Novo.
+//
+// v1 slice 1: a [Str] line-vector buffer, file load, h/j/k/l cursor
+// motion, an interactive ANSI TUI viewer, and a deterministic `--batch`
+// mode used by the test harness.  See features/orbits/novim/README.md
+// for the full v1 scope + 10-slice plan (piece-tree / novols LSP /
+// novo-treesitter / plugins are v2; the buffer is a plain line vector
+// in v1).
+//
+// The interactive TUI uses the host-TTY primitives std.pty already
+// exposes (raw mode, host stdin byte, host stdout byte, poll, winsize)
+// — the same surface novomux/novoterm drive.  `novo_pty_` references
+// also trip the stdlib's conditional-link so libutil is pulled in.
+
+// Editor state.  Cursor is 0-based (line, col); the buffer is a plain
+// line vector in v1.
+struct Editor
+    lines: [Str]
+    cy:    Int
+    cx:    Int
+
+// ── Buffer ──────────────────────────────────────────────────────
+
+// Load `path` into a line vector.  Missing/unreadable file → a single
+// empty line (a fresh scratch buffer); an empty split keeps one line so
+// the cursor always has somewhere to sit.
+fn buf_load(path: Str) -> [Str] [io]
+    match fs.read(path)
+        None    => [""]
+        Some(s) =>
+            let ls = str.split_lines(s)
+            if list.len(ls) == 0 then [""] else ls
+
+// Clamp the cursor into the buffer.  Vim normal-mode rule: cx sits on
+// the last glyph (len-1), or col 0 on an empty line.
+fn clamp(ed: Editor) -> Editor
+    let n = list.len(ed.lines)
+    var cy = ed.cy
+    if cy < 0
+        cy = 0
+    if cy >= n
+        cy = n - 1
+    if cy < 0
+        cy = 0
+    let ll = if cy >= 0 and cy < n then str.len(ed.lines[cy]) else 0
+    let maxx = if ll > 0 then ll - 1 else 0
+    var cx = ed.cx
+    if cx < 0
+        cx = 0
+    if cx > maxx
+        cx = maxx
+    Editor { lines: ed.lines, cy: cy, cx: cx }
+
+// ── Input ───────────────────────────────────────────────────────
+
+// Apply one key byte in Normal mode.  Slice 1: h/j/k/l cursor motion.
+fn apply_key(ed: Editor, b: Int) -> Editor
+    if b == 0x68          // 'h' — left
+        clamp(Editor { lines: ed.lines, cy: ed.cy, cx: ed.cx - 1 })
+    elif b == 0x6C        // 'l' — right
+        clamp(Editor { lines: ed.lines, cy: ed.cy, cx: ed.cx + 1 })
+    elif b == 0x6A        // 'j' — down
+        clamp(Editor { lines: ed.lines, cy: ed.cy + 1, cx: ed.cx })
+    elif b == 0x6B        // 'k' — up
+        clamp(Editor { lines: ed.lines, cy: ed.cy - 1, cx: ed.cx })
+    else
+        ed
+
+// ── Batch (headless test) mode ──────────────────────────────────
+
+// `novim --batch "<keys>" <file>`: load, feed each key byte through the
+// same apply_key the interactive loop uses (ignoring 'q'), then print
+// the final buffer followed by `cursor=<line>:<col>` and exit.  Fully
+// deterministic — the test harness asserts on this output.
+fn run_batch(keys: Str, path: Str) [io]
+    var ed = Editor { lines: buf_load(path), cy: 0, cx: 0 }
+    let n = str.len(keys)
+    let mut i = 0
+    while i < n
+        let b = str.byte_at(keys, i) ?? 0
+        if b != 0x71      // 'q' quits — a no-op in batch
+            ed = apply_key(ed, b)
+        i = i + 1
+    let mut li = 0
+    let nl = list.len(ed.lines)
+    while li < nl
+        println(ed.lines[li])
+        li = li + 1
+    println("cursor=" + str.from_int(ed.cy) + ":" + str.from_int(ed.cx))
+
+// ── Interactive TUI ─────────────────────────────────────────────
+
+fn emit_byte(b: Int) [io]
+    let _ = novo_pty_stdout_write_byte_h(b)
+
+// Write a string to stdout byte-by-byte (raw mode — no libc buffering
+// surprises with control sequences).
+fn emit(s: Str) [io]
+    let n = str.len(s)
+    let mut i = 0
+    while i < n
+        emit_byte(str.byte_at(s, i) ?? 0)
+        i = i + 1
+
+// ESC [ — start a CSI sequence.  ESC is spelled as byte 27 rather than
+// a string escape (Novo source convention; see novomux/render.nv).
+fn csi() [io]
+    emit_byte(27)
+    emit_byte(91)         // '['
+
+fn cup(row: Int, col: Int) [io]   // 1-based cursor position
+    csi()
+    emit(str.from_int(row) + ";" + str.from_int(col) + "H")
+
+fn sgr(code: Str) [io]            // ESC [ <code> m
+    csi()
+    emit(code + "m")
+
+// Full repaint: clear, draw up to (rows-1) buffer lines (a `~` past
+// end-of-buffer), a reverse-video status line on the last row, then
+// place the hardware cursor at the editor cursor.
+fn render(ed: Editor, rows: Int, cols: Int, path: Str) [io]
+    csi()
+    emit("2J")            // clear screen
+    let body = rows - 1
+    let nl = list.len(ed.lines)
+    let mut r = 0
+    while r < body
+        cup(r + 1, 1)
+        if r < nl
+            emit(ed.lines[r])
+        else
+            emit("~")
+        r = r + 1
+    cup(rows, 1)
+    sgr("7")              // reverse video
+    emit(" " + path + "  " + str.from_int(ed.cy + 1) + ":" + str.from_int(ed.cx + 1) + "  -- NORMAL -- ")
+    sgr("0")
+    cup(ed.cy + 1, ed.cx + 1)
+
+fn term_rows() -> Int [io]
+    let packed = novo_pty_get_winsize_h()
+    let r = int.shr_logical(packed, 16)
+    if r > 0 then r else 24
+
+fn term_cols() -> Int [io]
+    let packed = novo_pty_get_winsize_h()
+    let c = bits.band(packed, 65535)
+    if c > 0 then c else 80
+
+fn run_interactive(path: Str) [io, time]
+    let _ = novo_pty_set_raw_mode_h()
+    var ed = Editor { lines: buf_load(path), cy: 0, cx: 0 }
+    var rows = term_rows()
+    var cols = term_cols()
+    render(ed, rows, cols, path)
+    var running = true
+    while running
+        let m = novo_pty_poll_h(0, 100)      // poll host stdin (fd 0)
+        if m % 2 == 1
+            var done = false
+            while not done
+                let b = novo_pty_stdin_read_byte_h()
+                if b == -2
+                    done = true
+                elif b == -1
+                    done = true
+                    running = false
+                elif b == 0x71                // 'q' — quit
+                    running = false
+                    done = true
+                else
+                    ed = apply_key(ed, b)
+            render(ed, rows, cols, path)
+        if novo_pty_winsize_changed_h() == 1
+            rows = term_rows()
+            cols = term_cols()
+            render(ed, rows, cols, path)
+    novo_pty_restore_mode_h()
+    csi()
+    emit("2J")
+    cup(1, 1)
+
+// ── Entry ───────────────────────────────────────────────────────
+
+fn main() [io, time]
+    let argv = env.args()
+    let n = list.len(argv)
+    var is_batch = false
+    var batch_keys = ""
+    var file = ""
+    let mut i = 1
+    while i < n
+        let a = argv[i]
+        if a == "--batch" and i + 1 < n
+            is_batch = true
+            batch_keys = argv[i + 1]
+            i = i + 2
+        else
+            file = a
+            i = i + 1
+    if file == ""
+        println("usage: novim [--batch <keys>] <file>")
+    elif is_batch
+        run_batch(batch_keys, file)
+    else
+        run_interactive(file)
