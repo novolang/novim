@@ -103,6 +103,156 @@ fn repeat_hjkl(ed: Editor, b: Int, times: Int) -> Editor
         k = k + 1
     e
 
+// ── Word motions (w / b / e) ────────────────────────────────────
+// Vim word semantics: a "word" is a maximal run of word chars
+// (alnum + `_`) OR a maximal run of other punctuation; whitespace
+// separates.  class 0 = whitespace, 1 = word, 2 = punctuation.
+
+fn char_class_of(c: Int) -> Int
+    if c == 32 or c == 9
+        0
+    elif (c >= 48 and c <= 57) or (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or c == 95
+        1
+    else
+        2
+
+// Class of the glyph at (y,x); out-of-range / past end-of-line reads as
+// whitespace (the inter-line / trailing gap).
+fn class_at(ed: Editor, y: Int, x: Int) -> Int
+    let line = line_at(ed, y)
+    if x >= 0 and x < str.len(line)
+        char_class_of(str.byte_at(line, x) ?? 32)
+    else
+        0
+
+// `w` — forward to the start of the next word.  Skips the rest of the
+// current run, then skips whitespace (crossing line boundaries), landing
+// on the next non-blank; clamps at end-of-buffer.
+fn motion_w(ed: Editor) -> Editor
+    let nlines = list.len(ed.lines)
+    var y = ed.cy
+    var x = ed.cx
+    let cc0 = class_at(ed, y, x)
+    if cc0 != 0
+        var go = true
+        var g = 0
+        while go and g < 1000000
+            g = g + 1
+            if x < str.len(line_at(ed, y)) and class_at(ed, y, x) == cc0
+                x = x + 1
+            else
+                go = false
+    var done = false
+    var g2 = 0
+    while not done and g2 < 1000000
+        g2 = g2 + 1
+        let ll = str.len(line_at(ed, y))
+        if x < ll
+            if class_at(ed, y, x) == 0
+                x = x + 1
+            else
+                done = true
+        elif y + 1 < nlines
+            y = y + 1
+            x = 0
+        else
+            x = if ll > 0 then ll - 1 else 0
+            done = true
+    clamp(Editor { lines: ed.lines, cy: y, cx: x })
+
+// `e` — forward to the end of the next word.
+fn motion_e(ed: Editor) -> Editor
+    let nlines = list.len(ed.lines)
+    var y = ed.cy
+    var x = ed.cx
+    // step one position forward
+    if x + 1 < str.len(line_at(ed, y))
+        x = x + 1
+    elif y + 1 < nlines
+        y = y + 1
+        x = 0
+    // skip whitespace forward to a word
+    var done = false
+    var g = 0
+    while not done and g < 1000000
+        g = g + 1
+        let ll = str.len(line_at(ed, y))
+        if x < ll
+            if class_at(ed, y, x) == 0
+                x = x + 1
+            else
+                done = true
+        elif y + 1 < nlines
+            y = y + 1
+            x = 0
+        else
+            done = true
+    // advance to the end of this run
+    let cc = class_at(ed, y, x)
+    if cc != 0
+        var go = true
+        var g2 = 0
+        while go and g2 < 1000000
+            g2 = g2 + 1
+            if x + 1 < str.len(line_at(ed, y)) and class_at(ed, y, x + 1) == cc
+                x = x + 1
+            else
+                go = false
+    clamp(Editor { lines: ed.lines, cy: y, cx: x })
+
+// `b` — backward to the start of the current/previous word.
+fn motion_b(ed: Editor) -> Editor
+    var y = ed.cy
+    var x = ed.cx
+    // step one position back
+    if x > 0
+        x = x - 1
+    elif y > 0
+        y = y - 1
+        let pl = str.len(line_at(ed, y))
+        x = if pl > 0 then pl - 1 else 0
+    // skip whitespace backward
+    var done = false
+    var g = 0
+    while not done and g < 1000000
+        g = g + 1
+        if class_at(ed, y, x) == 0 and not (y == 0 and x == 0)
+            if x > 0
+                x = x - 1
+            elif y > 0
+                y = y - 1
+                let pl = str.len(line_at(ed, y))
+                x = if pl > 0 then pl - 1 else 0
+            else
+                done = true
+        else
+            done = true
+    // skip back to the start of this run (within the line)
+    let cc = class_at(ed, y, x)
+    if cc != 0
+        var go = true
+        var g2 = 0
+        while go and g2 < 1000000
+            g2 = g2 + 1
+            if x > 0 and class_at(ed, y, x - 1) == cc
+                x = x - 1
+            else
+                go = false
+    clamp(Editor { lines: ed.lines, cy: y, cx: x })
+
+fn repeat_word(ed: Editor, kind: Int, times: Int) -> Editor
+    var e = ed
+    let mut k = 0
+    while k < times
+        if kind == 0
+            e = motion_w(e)
+        elif kind == 1
+            e = motion_b(e)
+        else
+            e = motion_e(e)
+        k = k + 1
+    e
+
 // Feed one byte through the Normal-mode handler, threading InputState.
 // Counts (`5j`, `10G`), line motions (`0 $ ^`), and buffer motions
 // (`gg G`) join the slice-1 `h j k l`.  (slices 1-2)
@@ -124,6 +274,12 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
     let cnt = if st.count > 0 then st.count else 1
     if b == 0x68 or b == 0x6C or b == 0x6A or b == 0x6B      // h l j k
         return Step { ed: repeat_hjkl(ed, b, cnt), st: ist_new() }
+    if b == 0x77                       // 'w' — next word start
+        return Step { ed: repeat_word(ed, 0, cnt), st: ist_new() }
+    if b == 0x62                       // 'b' — previous word start
+        return Step { ed: repeat_word(ed, 1, cnt), st: ist_new() }
+    if b == 0x65                       // 'e' — next word end
+        return Step { ed: repeat_word(ed, 2, cnt), st: ist_new() }
     if b == 0x30                       // '0' — first column
         return Step { ed: clamp(Editor { lines: ed.lines, cy: ed.cy, cx: 0 }), st: ist_new() }
     if b == 0x24                       // '$' — end of line
