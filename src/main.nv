@@ -360,6 +360,29 @@ fn open_line(ed: Editor, below: Bool) -> Editor
         ls = list.append(ls, [""])
     Editor { lines: ls, cy: at, cx: 0 }
 
+// Delete the glyph under the cursor (`x`); cursor clamps onto the new
+// last glyph if it ran off the end.
+fn delete_char_at(ed: Editor) -> Editor
+    let line = line_at(ed, ed.cy)
+    if str.len(line) == 0
+        ed
+    else
+        let merged = str.slice(line, 0, ed.cx) + str.slice(line, ed.cx + 1, str.len(line))
+        clamp(Editor { lines: set_line(ed.lines, ed.cy, merged), cy: ed.cy, cx: ed.cx })
+
+fn repeat_delete_char(ed: Editor, times: Int) -> Editor
+    var e = ed
+    let mut k = 0
+    while k < times
+        e = delete_char_at(e)
+        k = k + 1
+    e
+
+// Delete from the cursor to end of line (`D`).
+fn delete_to_eol(ed: Editor) -> Editor
+    let line = line_at(ed, ed.cy)
+    clamp(Editor { lines: set_line(ed.lines, ed.cy, str.slice(line, 0, ed.cx)), cy: ed.cy, cx: ed.cx })
+
 // Handle one byte while in Insert mode.
 fn feed_insert(ed: Editor, st: InputState, b: Int) -> Step
     if b == 27                         // Esc → Normal (cursor steps left, vim)
@@ -430,6 +453,11 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
         return Step { ed: open_line(ed, true), st: ist_insert() }
     if b == 0x4F                       // 'O' — open line above
         return Step { ed: open_line(ed, false), st: ist_insert() }
+    // Deletes (slice 5).
+    if b == 0x78                       // 'x' — delete char(s) under cursor
+        return Step { ed: repeat_delete_char(ed, cnt), st: ist_new() }
+    if b == 0x44                       // 'D' — delete to end of line
+        return Step { ed: delete_to_eol(ed), st: ist_new() }
     Step { ed: ed, st: ist_new() }     // unknown — reset
 
 // ── Batch (headless test) mode ──────────────────────────────────
