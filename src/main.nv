@@ -559,21 +559,58 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
         return Step { ed: delete_to_eol(ed), st: ist_done(st) }
     Step { ed: ed, st: ist_done(st) }     // unknown — reset
 
+// ── Ex command line (`:w :q :wq`) ───────────────────────────────
+
+// Result of running an Ex command: the (possibly unchanged) editor plus
+// quit / save signals the driver acts on (the driver owns the file path
+// and the loop, so the [io] save stays out of the pure feed path).
+struct ExResult
+    quit: Bool
+    save: Bool
+
+// Parse the text after `:` into quit/save signals.  `w` save, `q`/`q!`
+// quit, `wq`/`x` save+quit; anything else is ignored.
+fn exec_ex(cmd: Str) -> ExResult
+    let c = str.trim(cmd)
+    if c == "w"
+        ExResult { quit: false, save: true }
+    elif c == "q" or c == "q!"
+        ExResult { quit: true, save: false }
+    elif c == "wq" or c == "x" or c == "wq!"
+        ExResult { quit: true, save: true }
+    else
+        ExResult { quit: false, save: false }
+
+// Serialise the line buffer to file text (one trailing newline per line).
+fn buf_to_str(lines: [Str]) -> Str
+    var s = ""
+    let n = list.len(lines)
+    let mut i = 0
+    while i < n
+        s = s + lines[i] + str.from_char(10)
+        i = i + 1
+    s
+
+fn save_buf(path: Str, lines: [Str]) [io]
+    fs.write(path, buf_to_str(lines))
+
 // ── Batch (headless test) mode ──────────────────────────────────
 
 // `novim --batch "<keys>" <file>`: load, feed each key byte through the
-// same apply_key the interactive loop uses (ignoring 'q'), then print
-// the final buffer followed by `cursor=<line>:<col>` and exit.  Fully
-// deterministic — the test harness asserts on this output.
-// Decode a batch key string into bytes on the fly: `\e`=Esc, `\n`/`\r`=
-// Enter, `\t`=Tab, `\\`=backslash.  Lets test sequences embed control
-// keys in plain ASCII (e.g. `iHello\e`).
+// same handler the interactive loop uses, then print the final buffer
+// followed by `cursor=<line>:<col>` and exit.  Fully deterministic.
+// Decodes `\e`=Esc, `\n`/`\r`=Enter, `\t`=Tab, `\b`=Backspace,
+// `\\`=backslash so test sequences embed control keys in ASCII
+// (e.g. `iHello\e`, `:w\n`).  `:` opens the Ex command line.
 fn run_batch(keys: Str, path: Str) [io]
     var ed = Editor { lines: buf_load(path), cy: 0, cx: 0 }
     var st = ist_new()
+    var cmd_mode = false
+    var cmd_buf = ""
+    var quit = false
     let n = str.len(keys)
     let mut i = 0
-    while i < n
+    while i < n and not quit
         var b = str.byte_at(keys, i) ?? 0
         if b == 92 and i + 1 < n       // backslash escape
             let nx = str.byte_at(keys, i + 1) ?? 0
@@ -592,9 +629,30 @@ fn run_batch(keys: Str, path: Str) [io]
             elif nx == 0x5C            // \\ → backslash
                 b = 92
                 i = i + 1
-        let step = feed(ed, st, b)
-        ed = step.ed
-        st = step.st
+        if cmd_mode
+            if b == 13 or b == 10            // Enter — run the command
+                let r = exec_ex(cmd_buf)
+                if r.save
+                    save_buf(path, ed.lines)
+                if r.quit
+                    quit = true
+                cmd_mode = false
+                cmd_buf = ""
+            elif b == 27                     // Esc — cancel
+                cmd_mode = false
+                cmd_buf = ""
+            elif b == 127 or b == 8          // Backspace
+                if str.len(cmd_buf) > 0
+                    cmd_buf = str.slice(cmd_buf, 0, str.len(cmd_buf) - 1)
+            elif b >= 32 and b < 127
+                cmd_buf = cmd_buf + str.from_char(b)
+        elif b == 58 and st.mode == 0        // ':' — open the Ex line
+            cmd_mode = true
+            cmd_buf = ""
+        else
+            let step = feed(ed, st, b)
+            ed = step.ed
+            st = step.st
         i = i + 1
     let mut li = 0
     let nl = list.len(ed.lines)
@@ -683,6 +741,8 @@ fn run_interactive(path: Str) [io, time]
     var rows = term_rows()
     var cols = term_cols()
     var top = 0
+    var cmd_mode = false
+    var cmd_buf = ""
     render(ed, rows, cols, path, top, st.mode)
     var running = true
     while running
@@ -696,15 +756,38 @@ fn run_interactive(path: Str) [io, time]
                 elif b == -1
                     done = true
                     running = false
-                elif b == 0x71 and st.mode == 0   // 'q' quits in Normal mode only
-                    running = false
-                    done = true
+                elif cmd_mode
+                    if b == 13 or b == 10            // Enter — run command
+                        let r = exec_ex(cmd_buf)
+                        if r.save
+                            save_buf(path, ed.lines)
+                        if r.quit
+                            running = false
+                            done = true
+                        cmd_mode = false
+                        cmd_buf = ""
+                    elif b == 27                     // Esc — cancel
+                        cmd_mode = false
+                        cmd_buf = ""
+                    elif b == 127 or b == 8
+                        if str.len(cmd_buf) > 0
+                            cmd_buf = str.slice(cmd_buf, 0, str.len(cmd_buf) - 1)
+                    elif b >= 32 and b < 127
+                        cmd_buf = cmd_buf + str.from_char(b)
+                elif b == 58 and st.mode == 0        // ':' — open the Ex line
+                    cmd_mode = true
+                    cmd_buf = ""
                 else
                     let step = feed(ed, st, b)
                     ed = step.ed
                     st = step.st
             top = scroll_to(top, ed.cy, rows - 1)
             render(ed, rows, cols, path, top, st.mode)
+            if cmd_mode
+                cup(rows, 1)
+                csi()
+                emit("K")                            // clear status row
+                emit(":" + cmd_buf)
         if novo_pty_winsize_changed_h() == 1
             rows = term_rows()
             cols = term_cols()
