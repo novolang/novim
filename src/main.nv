@@ -86,6 +86,16 @@ fn clamp(ed: Editor) -> Editor
 fn line_at(ed: Editor, y: Int) -> Str
     if y >= 0 and y < list.len(ed.lines) then ed.lines[y] else ""
 
+// Index of the first occurrence of byte `b` in `s`, or -1.
+fn index_of_byte(s: Str, b: Int) -> Int
+    let n = str.len(s)
+    let mut i = 0
+    while i < n
+        if (str.byte_at(s, i) ?? 0) == b
+            return i
+        i = i + 1
+    0 - 1
+
 // Column of the first non-blank glyph on `line` (0 if all blank/empty).
 fn first_nonblank(line: Str) -> Int
     let n = str.len(line)
@@ -594,6 +604,99 @@ fn buf_to_str(lines: [Str]) -> Str
 fn save_buf(path: Str, lines: [Str]) [io]
     fs.write(path, buf_to_str(lines))
 
+// ── Key-sequence decoding + keymaps (slice 8) ───────────────────
+
+// Decode `\e`=Esc `\n`/`\r`=Enter `\t`=Tab `\b`=Backspace `\\`=backslash
+// into their real bytes, returning a new string.  Used for both `--batch`
+// key strings and `[keymaps]` right-hand sides.
+fn decode_escapes(s: Str) -> Str
+    var out = ""
+    let n = str.len(s)
+    let mut i = 0
+    while i < n
+        let b = str.byte_at(s, i) ?? 0
+        if b == 92 and i + 1 < n
+            let nx = str.byte_at(s, i + 1) ?? 0
+            if nx == 0x65
+                out = out + str.from_char(27)
+                i = i + 2
+            elif nx == 0x6E or nx == 0x72
+                out = out + str.from_char(13)
+                i = i + 2
+            elif nx == 0x74
+                out = out + str.from_char(9)
+                i = i + 2
+            elif nx == 0x62
+                out = out + str.from_char(127)
+                i = i + 2
+            elif nx == 0x5C
+                out = out + str.from_char(92)
+                i = i + 2
+            else
+                out = out + str.from_char(b)
+                i = i + 1
+        else
+            out = out + str.from_char(b)
+            i = i + 1
+    out
+
+// A user keymap: single Normal-mode key `lhs[i]` is replaced by the
+// (already-decoded) key sequence `rhs[i]`.  (slice 8 — single-key LHS;
+// multi-key LHS like `jk` is a later enhancement.)
+struct Keymap
+    lhs: [Int]
+    rhs: [Str]
+
+fn keymap_empty() -> Keymap
+    Keymap { lhs: [], rhs: [] }
+
+// The remapped sequence for byte `b`, or "" if `b` isn't remapped.
+fn keymap_lookup(km: Keymap, b: Int) -> Str
+    let n = list.len(km.lhs)
+    let mut i = 0
+    while i < n
+        if km.lhs[i] == b
+            return km.rhs[i]
+        i = i + 1
+    ""
+
+// Strip a single pair of surrounding double-quotes from `s`.
+fn strip_quotes(s: Str) -> Str
+    let n = str.len(s)
+    if n >= 2 and (str.byte_at(s, 0) ?? 0) == 34 and (str.byte_at(s, n - 1) ?? 0) == 34
+        str.slice(s, 1, n - 1)
+    else
+        s
+
+// Load `[keymaps]` from a config file: lines `lhs = "rhs"` (rhs may use
+// `\e` etc.).  Comments (`#`) and blank lines are skipped; section headers
+// (`[name]`) gate which section we're in.  Missing file → empty keymap.
+fn load_keymaps(cfg_path: Str) -> Keymap [io]
+    match fs.read(cfg_path)
+        None => keymap_empty()
+        Some(content) =>
+            var lhs: [Int] = []
+            var rhs: [Str] = []
+            let lines = str.split_lines(content)
+            var in_km = false
+            let mut i = 0
+            let n = list.len(lines)
+            while i < n
+                let raw = str.trim(lines[i])
+                if str.len(raw) > 0 and (str.byte_at(raw, 0) ?? 0) != 35    // not a '#' comment
+                    if (str.byte_at(raw, 0) ?? 0) == 91                     // '[' section
+                        in_km = raw == "[keymaps]"
+                    elif in_km
+                        let eq = index_of_byte(raw, 61)                     // '='
+                        if eq > 0
+                            let lkey = strip_quotes(str.trim(str.slice(raw, 0, eq)))
+                            let rseq = strip_quotes(str.trim(str.slice(raw, eq + 1, str.len(raw))))
+                            if str.len(lkey) >= 1
+                                lhs = list.append(lhs, [str.byte_at(lkey, 0) ?? 0])
+                                rhs = list.append(rhs, [decode_escapes(rseq)])
+                i = i + 1
+            Keymap { lhs: lhs, rhs: rhs }
+
 // ── Batch (headless test) mode ──────────────────────────────────
 
 // `novim --batch "<keys>" <file>`: load, feed each key byte through the
@@ -602,33 +705,35 @@ fn save_buf(path: Str, lines: [Str]) [io]
 // Decodes `\e`=Esc, `\n`/`\r`=Enter, `\t`=Tab, `\b`=Backspace,
 // `\\`=backslash so test sequences embed control keys in ASCII
 // (e.g. `iHello\e`, `:w\n`).  `:` opens the Ex command line.
-fn run_batch(keys: Str, path: Str) [io]
+// Feed one already-decoded Normal-mode byte through `feed`, expanding a
+// keymap remap (in Normal mode) into its sequence first.  Threads ed+st.
+fn feed_mapped(ed: Editor, st: InputState, km: Keymap, b: Int) -> Step
+    let seq = if st.mode == 0 then keymap_lookup(km, b) else ""
+    if str.len(seq) == 0
+        return feed(ed, st, b)
+    var e = ed
+    var s = st
+    let mut j = 0
+    let m = str.len(seq)
+    while j < m
+        let step = feed(e, s, str.byte_at(seq, j) ?? 0)
+        e = step.ed
+        s = step.st
+        j = j + 1
+    Step { ed: e, st: s }
+
+fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
     var ed = Editor { lines: buf_load(path), cy: 0, cx: 0 }
     var st = ist_new()
+    let km = load_keymaps(cfg_path)
+    let decoded = decode_escapes(keys)
     var cmd_mode = false
     var cmd_buf = ""
     var quit = false
-    let n = str.len(keys)
+    let n = str.len(decoded)
     let mut i = 0
     while i < n and not quit
-        var b = str.byte_at(keys, i) ?? 0
-        if b == 92 and i + 1 < n       // backslash escape
-            let nx = str.byte_at(keys, i + 1) ?? 0
-            if nx == 0x65              // \e → Esc
-                b = 27
-                i = i + 1
-            elif nx == 0x6E or nx == 0x72   // \n / \r → Enter
-                b = 13
-                i = i + 1
-            elif nx == 0x74            // \t → Tab
-                b = 9
-                i = i + 1
-            elif nx == 0x62            // \b → Backspace (DEL)
-                b = 127
-                i = i + 1
-            elif nx == 0x5C            // \\ → backslash
-                b = 92
-                i = i + 1
+        let b = str.byte_at(decoded, i) ?? 0
         if cmd_mode
             if b == 13 or b == 10            // Enter — run the command
                 let r = exec_ex(cmd_buf)
@@ -650,7 +755,7 @@ fn run_batch(keys: Str, path: Str) [io]
             cmd_mode = true
             cmd_buf = ""
         else
-            let step = feed(ed, st, b)
+            let step = feed_mapped(ed, st, km, b)
             ed = step.ed
             st = step.st
         i = i + 1
@@ -734,10 +839,11 @@ fn scroll_to(top: Int, cy: Int, body: Int) -> Int
         t = 0
     t
 
-fn run_interactive(path: Str) [io, time]
+fn run_interactive(cfg_path: Str, path: Str) [io, time]
     let _ = novo_pty_set_raw_mode_h()
     var ed = Editor { lines: buf_load(path), cy: 0, cx: 0 }
     var st = ist_new()
+    let km = load_keymaps(cfg_path)
     var rows = term_rows()
     var cols = term_cols()
     var top = 0
@@ -778,7 +884,7 @@ fn run_interactive(path: Str) [io, time]
                     cmd_mode = true
                     cmd_buf = ""
                 else
-                    let step = feed(ed, st, b)
+                    let step = feed_mapped(ed, st, km, b)
                     ed = step.ed
                     st = step.st
             top = scroll_to(top, ed.cy, rows - 1)
@@ -800,12 +906,25 @@ fn run_interactive(path: Str) [io, time]
 
 // ── Entry ───────────────────────────────────────────────────────
 
+// Default config path: $NOVIM_CONFIG, else $XDG_CONFIG_HOME/novim/config.toml,
+// else ~/.config/novim/config.toml.
+fn default_config_path() -> Str [io]
+    let envp = process.env("NOVIM_CONFIG") ?? ""
+    if envp != ""
+        return envp
+    let xdg = process.env("XDG_CONFIG_HOME") ?? ""
+    if xdg != ""
+        return xdg + "/novim/config.toml"
+    let home = process.env("HOME") ?? ""
+    home + "/.config/novim/config.toml"
+
 fn main() [io, time]
     let argv = env.args()
     let n = list.len(argv)
     var is_batch = false
     var batch_keys = ""
     var file = ""
+    var cfg = ""
     let mut i = 1
     while i < n
         let a = argv[i]
@@ -813,12 +932,16 @@ fn main() [io, time]
             is_batch = true
             batch_keys = argv[i + 1]
             i = i + 2
+        elif a == "--config" and i + 1 < n
+            cfg = argv[i + 1]
+            i = i + 2
         else
             file = a
             i = i + 1
+    let cfg_path = if cfg != "" then cfg else default_config_path()
     if file == ""
-        println("usage: novim [--batch <keys>] <file>")
+        println("usage: novim [--config <toml>] [--batch <keys>] <file>")
     elif is_batch
-        run_batch(batch_keys, file)
+        run_batch(batch_keys, cfg_path, file)
     else
-        run_interactive(file)
+        run_interactive(cfg_path, file)
