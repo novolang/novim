@@ -1005,6 +1005,46 @@ fn el() [io]                      // ESC [ K — erase from cursor to end of lin
     csi()
     emit("K")
 
+// Expand tab bytes (0x09) to spaces up to the next `ts`-column stop, so a
+// buffer line renders with consistent indentation regardless of the
+// terminal's own tab stops.  Byte-oriented, matching the rest of the editor
+// (cx is a byte index).  ts <= 0 leaves the line untouched.
+fn expand_tabs(s: Str, ts: Int) -> Str
+    if ts <= 0
+        return s
+    var out = ""
+    var col = 0
+    let n = str.len(s)
+    let mut i = 0
+    while i < n
+        let b = str.byte_at(s, i) ?? 0
+        if b == 9
+            let nextstop = ((col / ts) + 1) * ts
+            while col < nextstop
+                out = out + " "
+                col = col + 1
+        else
+            out = out + str.from_char(b)
+            col = col + 1
+        i = i + 1
+    out
+
+// Visual column of byte index `cx` within `s` once tabs are expanded — used
+// to place the hardware cursor over the rendered (tab-expanded) text.
+fn vis_col(s: Str, cx: Int, ts: Int) -> Int
+    if ts <= 0
+        return cx
+    var col = 0
+    let mut i = 0
+    while i < cx
+        let b = str.byte_at(s, i) ?? 0
+        if b == 9
+            col = ((col / ts) + 1) * ts
+        else
+            col = col + 1
+        i = i + 1
+    col
+
 // Clear the whole screen (ESC [ 2J).  Only used once at startup and on a
 // resize — NOT per frame: a per-frame clear blanks the screen between the
 // erase and the repaint, which the eye sees as flicker on every keystroke.
@@ -1031,7 +1071,7 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, mode: Int, cs: 
         if li < nl
             if opts.number
                 emit(pad_num(li + 1, 3) + " ")
-            emit(ed.lines[li])
+            emit(expand_tabs(ed.lines[li], opts.tabstop))
         elif cs.tilde_fg >= 0
             sgr("38;5;" + str.from_int(cs.tilde_fg))
             emit("~")
@@ -1046,7 +1086,8 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, mode: Int, cs: 
     emit(" " + path + "  " + str.from_int(ed.cy + 1) + ":" + str.from_int(ed.cx + 1) + "  " + modestr)
     el()                 // fill the rest of the status bar with the status bg
     sgr("0")
-    cup(ed.cy - top + 1, ed.cx + gutter + 1)
+    let curline = if ed.cy < nl then ed.lines[ed.cy] else ""
+    cup(ed.cy - top + 1, vis_col(curline, ed.cx, opts.tabstop) + gutter + 1)
     csi()
     emit("?25h")         // show the cursor at its new home
 
