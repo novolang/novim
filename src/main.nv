@@ -483,6 +483,85 @@ fn paste(ed: Editor, st: InputState, after: Bool) -> Editor
         let merged = str.slice(line, 0, col) + st.reg + str.slice(line, col, str.len(line))
         clamp(Editor { lines: set_line(ed.lines, ed.cy, merged), cy: ed.cy, cx: col + str.len(st.reg) - 1 })
 
+// ── Char-level edits (slice 14): ~ toggle case, r replace, J join ───────
+
+// ASCII case toggle: A-Z ↔ a-z, other bytes unchanged.
+fn toggle_case_byte(b: Int) -> Int
+    if b >= 0x41 and b <= 0x5A
+        b + 32
+    elif b >= 0x61 and b <= 0x7A
+        b - 32
+    else
+        b
+
+// `~` / `N~` — toggle the case of `n` chars from the cursor, advancing the
+// cursor past the last one (vim).  Stops at end of line.
+fn op_toggle_case(ed: Editor, n: Int) -> Editor
+    let line = line_at(ed, ed.cy)
+    let ll = str.len(line)
+    if ll == 0
+        return ed
+    var s = line
+    var col = ed.cx
+    var k = 0
+    while k < n and col < ll
+        let b = str.byte_at(s, col) ?? 0
+        s = str.slice(s, 0, col) + str.from_char(toggle_case_byte(b)) + str.slice(s, col + 1, str.len(s))
+        col = col + 1
+        k = k + 1
+    clamp(Editor { lines: set_line(ed.lines, ed.cy, s), cy: ed.cy, cx: col })
+
+// `r<c>` / `Nr<c>` — replace `n` chars under/after the cursor with byte `rb`.
+// Vim no-ops when fewer than `n` chars remain on the line; cursor ends on the
+// last replaced char.
+fn op_replace_char(ed: Editor, rb: Int, n: Int) -> Editor
+    let line = line_at(ed, ed.cy)
+    let ll = str.len(line)
+    if ll == 0 or ed.cx + n > ll
+        return ed
+    var s = line
+    var col = ed.cx
+    var k = 0
+    while k < n
+        s = str.slice(s, 0, col) + str.from_char(rb) + str.slice(s, col + 1, str.len(s))
+        col = col + 1
+        k = k + 1
+    clamp(Editor { lines: set_line(ed.lines, ed.cy, s), cy: ed.cy, cx: ed.cx + n - 1 })
+
+// `J` / `NJ` — join the current line with the following line(s): `NJ` joins
+// `n` lines (so `J` and `2J` both join 2), collapsing each pulled-up line's
+// leading blanks to a single separating space.  Cursor lands on the first
+// join column.  No-op on the last line.
+fn op_join_lines(ed: Editor, n: Int) -> Editor
+    let joins = if n > 1 then n - 1 else 1
+    var merged = line_at(ed, ed.cy)
+    var dropped = 0
+    var joincol = -1
+    var k = 0
+    while k < joins and (ed.cy + 1 + dropped) < list.len(ed.lines)
+        let nxt = ed.lines[ed.cy + 1 + dropped]
+        let stripped = str.slice(nxt, first_nonblank(nxt), str.len(nxt))
+        if joincol < 0
+            joincol = str.len(merged)
+        let sep = if str.len(merged) == 0 then "" else " "
+        merged = merged + sep + stripped
+        dropped = dropped + 1
+        k = k + 1
+    if dropped == 0
+        return ed
+    let total = list.len(ed.lines)
+    var ls: [Str] = []
+    let mut i = 0
+    while i < total
+        let drop = i > ed.cy and i <= ed.cy + dropped
+        if i == ed.cy
+            ls = list.append(ls, [merged])
+        elif not drop
+            ls = list.append(ls, [ed.lines[i]])
+        i = i + 1
+    let cx = if joincol < 0 then 0 else joincol
+    clamp(Editor { lines: ls, cy: ed.cy, cx: cx })
+
 // Handle one byte while in Insert mode.
 fn feed_insert(ed: Editor, st: InputState, b: Int) -> Step
     if b == 27                         // Esc → Normal (cursor steps left, vim)
@@ -517,6 +596,10 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
         if b == 0x79                   // `yy` — yank count lines (→ register)
             return op_yank_lines(ed, st, if st.count > 0 then st.count else 1)
         return feed(ed, ist_clear_pending(st), b)
+    if st.pending == 4                 // `r<c>` — next byte is the replacement
+        if b == 27                     // Esc cancels the replace
+            return Step { ed: ed, st: ist_done(st) }
+        return Step { ed: op_replace_char(ed, b, if st.count > 0 then st.count else 1), st: ist_done(st) }
     // Count digits.  `0` is a count digit only when a count is already
     // building; otherwise `0` is the "first column" motion.
     if b >= 0x31 and b <= 0x39         // '1'-'9'
@@ -576,6 +659,13 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
         return Step { ed: repeat_delete_char(ed, cnt), st: ist_done(st) }
     if b == 0x44                       // 'D' — delete to end of line
         return Step { ed: delete_to_eol(ed), st: ist_done(st) }
+    // Char-level edits (slice 14).
+    if b == 0x7E                       // '~' — toggle case (count chars), advance
+        return Step { ed: op_toggle_case(ed, cnt), st: ist_done(st) }
+    if b == 0x4A                       // 'J' — join line(s)
+        return Step { ed: op_join_lines(ed, cnt), st: ist_done(st) }
+    if b == 0x72                       // 'r' — await the replacement byte
+        return Step { ed: ed, st: InputState { count: st.count, pending: 4, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
     Step { ed: ed, st: ist_done(st) }     // unknown — reset
 
 // ── Ex command line (`:w :q :wq`) ───────────────────────────────
