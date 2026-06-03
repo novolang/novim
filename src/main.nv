@@ -562,6 +562,44 @@ fn op_join_lines(ed: Editor, n: Int) -> Editor
     let cx = if joincol < 0 then 0 else joincol
     clamp(Editor { lines: ls, cy: ed.cy, cx: cx })
 
+// ── Indent (slice 16): >> and << ───────────────────────────────────────
+
+// Add one indent level.  We indent with a real tab byte — its rendered width
+// follows `tabstop` (see expand_tabs), so the indent respects the user's
+// width without `feed` needing to see Options.  Blank lines are left alone
+// (vim doesn't indent them).
+fn indent_one(line: Str) -> Str
+    if str.len(line) == 0 then line else str.from_char(9) + line
+
+// Remove one indent level: a single leading tab, or — for space-indented
+// files — up to a tab's worth (capped at 8) of leading spaces.
+fn dedent_one(line: Str) -> Str
+    let n = str.len(line)
+    if n == 0
+        return line
+    if (str.byte_at(line, 0) ?? 0) == 9
+        return str.slice(line, 1, n)
+    var k = 0
+    while k < 8 and k < n and (str.byte_at(line, k) ?? 0) == 32
+        k = k + 1
+    str.slice(line, k, n)
+
+// `>>` / `N>>` (right) and `<<` / `N<<` (left): shift `n` lines from the
+// cursor by one indent level.  Cursor lands on the first non-blank of the
+// current line (vim).
+fn op_indent(ed: Editor, st: InputState, n: Int, right: Bool) -> Step
+    let total = list.len(ed.lines)
+    var ls: [Str] = []
+    let mut i = 0
+    while i < total
+        if i >= ed.cy and i < ed.cy + n
+            ls = list.append(ls, [if right then indent_one(ed.lines[i]) else dedent_one(ed.lines[i])])
+        else
+            ls = list.append(ls, [ed.lines[i]])
+        i = i + 1
+    let fnb = first_nonblank(if ed.cy < list.len(ls) then ls[ed.cy] else "")
+    Step { ed: clamp(Editor { lines: ls, cy: ed.cy, cx: fnb }), st: ist_done(st) }
+
 // Handle one byte while in Insert mode.
 fn feed_insert(ed: Editor, st: InputState, b: Int) -> Step
     if b == 27                         // Esc → Normal (cursor steps left, vim)
@@ -600,6 +638,14 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
         if b == 27                     // Esc cancels the replace
             return Step { ed: ed, st: ist_done(st) }
         return Step { ed: op_replace_char(ed, b, if st.count > 0 then st.count else 1), st: ist_done(st) }
+    if st.pending == 5                 // `>>` — indent right
+        if b == 0x3E
+            return op_indent(ed, st, if st.count > 0 then st.count else 1, true)
+        return feed(ed, ist_clear_pending(st), b)
+    if st.pending == 6                 // `<<` — indent left
+        if b == 0x3C
+            return op_indent(ed, st, if st.count > 0 then st.count else 1, false)
+        return feed(ed, ist_clear_pending(st), b)
     // Count digits.  `0` is a count digit only when a count is already
     // building; otherwise `0` is the "first column" motion.
     if b >= 0x31 and b <= 0x39         // '1'-'9'
@@ -666,6 +712,10 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
         return Step { ed: op_join_lines(ed, cnt), st: ist_done(st) }
     if b == 0x72                       // 'r' — await the replacement byte
         return Step { ed: ed, st: InputState { count: st.count, pending: 4, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
+    if b == 0x3E                       // '>' — await second '>' (indent right)
+        return Step { ed: ed, st: InputState { count: st.count, pending: 5, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
+    if b == 0x3C                       // '<' — await second '<' (indent left)
+        return Step { ed: ed, st: InputState { count: st.count, pending: 6, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
     Step { ed: ed, st: ist_done(st) }     // unknown — reset
 
 // ── Ex command line (`:w :q :wq`) ───────────────────────────────
