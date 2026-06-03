@@ -600,6 +600,177 @@ fn op_indent(ed: Editor, st: InputState, n: Int, right: Bool) -> Step
     let fnb = first_nonblank(if ed.cy < list.len(ls) then ls[ed.cy] else "")
     Step { ed: clamp(Editor { lines: ls, cy: ed.cy, cx: fnb }), st: ist_done(st) }
 
+// ── Find-char motions f/F/t/T (slice 17) ───────────────────────────────
+
+// Index of the `count`-th `ch` strictly after `from` in `line`, or -1.
+fn find_char_fwd(line: Str, ch: Int, from: Int, count: Int) -> Int
+    let n = str.len(line)
+    var found = 0
+    var i = from + 1
+    while i < n
+        if (str.byte_at(line, i) ?? 0) == ch
+            found = found + 1
+            if found == count
+                return i
+        i = i + 1
+    -1
+
+// Index of the `count`-th `ch` strictly before `from` in `line`, or -1.
+fn find_char_bwd(line: Str, ch: Int, from: Int, count: Int) -> Int
+    var found = 0
+    var i = from - 1
+    while i >= 0
+        if (str.byte_at(line, i) ?? 0) == ch
+            found = found + 1
+            if found == count
+                return i
+        i = i - 1
+    -1
+
+// Move the cursor to a found char.  forward/back; `till` stops one short
+// (t/T vs f/F).  No move when the char isn't found on the line.
+fn move_find(ed: Editor, ch: Int, forward: Bool, till: Bool, count: Int) -> Editor
+    let line = line_at(ed, ed.cy)
+    if forward
+        let idx = find_char_fwd(line, ch, ed.cx, count)
+        if idx < 0 then ed else clamp(Editor { lines: ed.lines, cy: ed.cy, cx: if till then idx - 1 else idx })
+    else
+        let idx = find_char_bwd(line, ch, ed.cx, count)
+        if idx < 0 then ed else clamp(Editor { lines: ed.lines, cy: ed.cy, cx: if till then idx + 1 else idx })
+
+// ── Operator + motion (slice 17): d / c / y over a motion ───────────────
+
+// A motion's resolved destination, as an operator target.  Charwise targets
+// stay on the cursor's line (cross-line word motions clamp to the line edge);
+// `inclusive` means the target glyph is part of the span (e / $-ish).
+struct MTarget
+    ty:        Int
+    tx:        Int
+    ok:        Bool
+    linewise:  Bool
+    inclusive: Bool
+
+fn mt(ty: Int, tx: Int, lw: Bool, inc: Bool) -> MTarget
+    MTarget { ty: ty, tx: tx, ok: true, linewise: lw, inclusive: inc }
+
+// Resolve a motion byte to an operator target relative to the cursor.
+// `rawcount` is 0 when no count was typed; per-step motions default it to 1,
+// but `G` needs the raw value (no count → last line, not line 1).
+fn motion_target(ed: Editor, b: Int, rawcount: Int) -> MTarget
+    let count = if rawcount > 0 then rawcount else 1
+    let line = line_at(ed, ed.cy)
+    let llen = str.len(line)
+    if b == 0x6C                                  // l
+        return mt(ed.cy, if ed.cx + count > llen then llen else ed.cx + count, false, false)
+    if b == 0x68                                  // h
+        return mt(ed.cy, if ed.cx - count < 0 then 0 else ed.cx - count, false, false)
+    if b == 0x30                                  // 0
+        return mt(ed.cy, 0, false, false)
+    if b == 0x24                                  // $
+        return mt(ed.cy, llen, false, false)
+    if b == 0x5E                                  // ^
+        return mt(ed.cy, first_nonblank(line), false, false)
+    if b == 0x77                                  // w
+        let e = repeat_word(ed, 0, count)
+        return mt(ed.cy, if e.cy > ed.cy then llen else e.cx, false, false)
+    if b == 0x65                                  // e (inclusive)
+        let e = repeat_word(ed, 2, count)
+        return mt(ed.cy, if e.cy > ed.cy then (if llen > 0 then llen - 1 else 0) else e.cx, false, true)
+    if b == 0x62                                  // b
+        let e = repeat_word(ed, 1, count)
+        return mt(ed.cy, if e.cy < ed.cy then 0 else e.cx, false, false)
+    if b == 0x6A                                  // j — linewise down
+        return mt(ed.cy + count, 0, true, false)
+    if b == 0x6B                                  // k — linewise up
+        return mt(ed.cy - count, 0, true, false)
+    if b == 0x47                                  // G — linewise to line
+        return mt(if rawcount > 0 then rawcount - 1 else list.len(ed.lines) - 1, 0, true, false)
+    MTarget { ty: ed.cy, tx: ed.cx, ok: false, linewise: false, inclusive: false }
+
+// End-of-command state carrying a fresh CHARWISE register (used by d/c/y over
+// a charwise motion).  `ins` selects Insert mode (the `c` operator).
+fn ist_reg_cw(st: InputState, text: Str, ins: Bool) -> InputState
+    InputState { count: 0, pending: 0, mode: if ins then 1 else 0, reg: text, reg_lw: false, search: st.search }
+
+// Apply operator `opb` (d/c/y) over a LINEWISE range [cur, ty].
+fn apply_linewise_op(ed: Editor, st: InputState, opb: Int, ty: Int) -> Step
+    let total = list.len(ed.lines)
+    var lo = if ed.cy < ty then ed.cy else ty
+    var hi = if ed.cy < ty then ty else ed.cy
+    if lo < 0
+        lo = 0
+    if hi >= total
+        hi = total - 1
+    var payload = ""
+    var i = lo
+    while i <= hi
+        if i > lo
+            payload = payload + str.from_char(10)
+        payload = payload + ed.lines[i]
+        i = i + 1
+    if opb == 0x79                                // y — yank, cursor to lo
+        return Step { ed: clamp(Editor { lines: ed.lines, cy: lo, cx: 0 }), st: InputState { count: 0, pending: 0, mode: 0, reg: payload, reg_lw: true, search: st.search } }
+    // d / c — remove lines lo..hi; c leaves one blank line and enters Insert.
+    var ls: [Str] = []
+    let mut j = 0
+    while j < total
+        let keep = j < lo or j > hi
+        if keep
+            ls = list.append(ls, [ed.lines[j]])
+        elif opb == 0x63 and j == lo
+            ls = list.append(ls, [""])            // c: the replacement blank line
+        j = j + 1
+    if list.len(ls) == 0
+        ls = list.append(ls, [""])               // buffer always keeps one line
+    var ncy = lo
+    if ncy >= list.len(ls)
+        ncy = list.len(ls) - 1
+    let ins = opb == 0x63
+    Step { ed: clamp_insert(Editor { lines: ls, cy: ncy, cx: 0 }), st: InputState { count: 0, pending: 0, mode: if ins then 1 else 0, reg: payload, reg_lw: true, search: st.search } }
+
+// Apply operator `opb` over a resolved motion target.
+fn apply_motion_op(ed: Editor, st: InputState, opb: Int, tgt: MTarget) -> Step
+    if not tgt.ok
+        return Step { ed: ed, st: ist_done(st) }
+    if tgt.linewise
+        return apply_linewise_op(ed, st, opb, tgt.ty)
+    let line = line_at(ed, ed.cy)
+    let llen = str.len(line)
+    var lo = if ed.cx < tgt.tx then ed.cx else tgt.tx
+    var hi = if ed.cx < tgt.tx then tgt.tx else ed.cx
+    if tgt.inclusive
+        hi = hi + 1
+    if hi > llen
+        hi = llen
+    if lo < 0
+        lo = 0
+    let removed = str.slice(line, lo, hi)
+    if opb == 0x79                                // y — yank, cursor to span start
+        return Step { ed: clamp(Editor { lines: ed.lines, cy: ed.cy, cx: lo }), st: ist_reg_cw(st, removed, false) }
+    let newline = str.slice(line, 0, lo) + str.slice(line, hi, llen)
+    let nls = set_line(ed.lines, ed.cy, newline)
+    let ins = opb == 0x63                         // c enters Insert at the gap
+    if ins
+        return Step { ed: clamp_insert(Editor { lines: nls, cy: ed.cy, cx: lo }), st: ist_reg_cw(st, removed, true) }
+    Step { ed: clamp(Editor { lines: nls, cy: ed.cy, cx: lo }), st: ist_reg_cw(st, removed, false) }
+
+// Dispatch the second key of an operator (`pcode` is its pending code, `opb`
+// its byte d/c/y).  Doubled operator → linewise; a count digit accumulates;
+// `cw` is remapped to `ce` (vim); any other motion resolves + applies; an
+// unknown key cancels the operator and is reprocessed fresh.
+fn feed_operator(ed: Editor, st: InputState, opb: Int, pcode: Int, b: Int) -> Step
+    if b == opb                                   // dd / cc / yy — linewise
+        return apply_linewise_op(ed, st, opb, ed.cy + (if st.count > 1 then st.count - 1 else 0))
+    if b >= 0x31 and b <= 0x39                    // count digit after the operator
+        return Step { ed: ed, st: InputState { count: st.count * 10 + (b - 0x30), pending: pcode, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
+    if b == 0x30 and st.count > 0                 // '0' continues a count
+        return Step { ed: ed, st: InputState { count: st.count * 10, pending: pcode, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
+    let mb = if opb == 0x63 and b == 0x77 then 0x65 else b   // cw behaves like ce
+    let tgt = motion_target(ed, mb, st.count)               // raw count (0 = none)
+    if tgt.ok
+        return apply_motion_op(ed, st, opb, tgt)
+    feed(ed, ist_clear_pending(st), b)            // not a motion — cancel + reprocess
+
 // Handle one byte while in Insert mode.
 fn feed_insert(ed: Editor, st: InputState, b: Int) -> Step
     if b == 27                         // Esc → Normal (cursor steps left, vim)
@@ -626,14 +797,12 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
             let tgt = if st.count > 0 then st.count - 1 else 0
             return Step { ed: clamp(Editor { lines: ed.lines, cy: tgt, cx: ed.cx }), st: ist_done(st) }
         return feed(ed, ist_clear_pending(st), b)     // not gg — reprocess fresh
-    if st.pending == 2
-        if b == 0x64                   // `dd` — delete count lines (→ register)
-            return op_delete_lines(ed, st, if st.count > 0 then st.count else 1)
-        return feed(ed, ist_clear_pending(st), b)
-    if st.pending == 3
-        if b == 0x79                   // `yy` — yank count lines (→ register)
-            return op_yank_lines(ed, st, if st.count > 0 then st.count else 1)
-        return feed(ed, ist_clear_pending(st), b)
+    if st.pending == 2                 // `d` — operator awaiting a motion (or dd)
+        return feed_operator(ed, st, 0x64, 2, b)
+    if st.pending == 3                 // `y` — operator awaiting a motion (or yy)
+        return feed_operator(ed, st, 0x79, 3, b)
+    if st.pending == 7                 // `c` — operator awaiting a motion (or cc)
+        return feed_operator(ed, st, 0x63, 7, b)
     if st.pending == 4                 // `r<c>` — next byte is the replacement
         if b == 27                     // Esc cancels the replace
             return Step { ed: ed, st: ist_done(st) }
@@ -646,6 +815,23 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
         if b == 0x3C
             return op_indent(ed, st, if st.count > 0 then st.count else 1, false)
         return feed(ed, ist_clear_pending(st), b)
+    // Find-char motions (slice 17): pending 8=f 9=F 10=t 11=T await the target.
+    if st.pending == 8                 // f<char>
+        if b == 27
+            return Step { ed: ed, st: ist_done(st) }
+        return Step { ed: move_find(ed, b, true, false, if st.count > 0 then st.count else 1), st: ist_done(st) }
+    if st.pending == 9                 // F<char>
+        if b == 27
+            return Step { ed: ed, st: ist_done(st) }
+        return Step { ed: move_find(ed, b, false, false, if st.count > 0 then st.count else 1), st: ist_done(st) }
+    if st.pending == 10                // t<char>
+        if b == 27
+            return Step { ed: ed, st: ist_done(st) }
+        return Step { ed: move_find(ed, b, true, true, if st.count > 0 then st.count else 1), st: ist_done(st) }
+    if st.pending == 11                // T<char>
+        if b == 27
+            return Step { ed: ed, st: ist_done(st) }
+        return Step { ed: move_find(ed, b, false, true, if st.count > 0 then st.count else 1), st: ist_done(st) }
     // Count digits.  `0` is a count digit only when a count is already
     // building; otherwise `0` is the "first column" motion.
     if b >= 0x31 and b <= 0x39         // '1'-'9'
@@ -716,6 +902,30 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
         return Step { ed: ed, st: InputState { count: st.count, pending: 5, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
     if b == 0x3C                       // '<' — await second '<' (indent left)
         return Step { ed: ed, st: InputState { count: st.count, pending: 6, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
+    // Operator + motion (slice 17): c awaits a motion (like d/y); f/F/t/T
+    // await a target char.
+    if b == 0x63                       // 'c' — change operator (awaits motion)
+        return Step { ed: ed, st: InputState { count: st.count, pending: 7, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
+    if b == 0x66                       // 'f' — find char forward
+        return Step { ed: ed, st: InputState { count: st.count, pending: 8, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
+    if b == 0x46                       // 'F' — find char backward
+        return Step { ed: ed, st: InputState { count: st.count, pending: 9, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
+    if b == 0x74                       // 't' — till char forward
+        return Step { ed: ed, st: InputState { count: st.count, pending: 10, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
+    if b == 0x54                       // 'T' — till char backward
+        return Step { ed: ed, st: InputState { count: st.count, pending: 11, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
+    if b == 0x43                       // 'C' — change to end of line
+        let cline = line_at(ed, ed.cy)
+        let tail = str.slice(cline, ed.cx, str.len(cline))
+        let nls = set_line(ed.lines, ed.cy, str.slice(cline, 0, ed.cx))
+        return Step { ed: clamp_insert(Editor { lines: nls, cy: ed.cy, cx: ed.cx }), st: ist_reg_cw(st, tail, true) }
+    if b == 0x73                       // 's' — substitute char(s): delete then insert
+        let sline = line_at(ed, ed.cy)
+        let sl = str.len(sline)
+        let shi = if ed.cx + cnt > sl then sl else ed.cx + cnt
+        let sremoved = str.slice(sline, ed.cx, shi)
+        let snls = set_line(ed.lines, ed.cy, str.slice(sline, 0, ed.cx) + str.slice(sline, shi, sl))
+        return Step { ed: clamp_insert(Editor { lines: snls, cy: ed.cy, cx: ed.cx }), st: ist_reg_cw(st, sremoved, true) }
     Step { ed: ed, st: ist_done(st) }     // unknown — reset
 
 // ── Ex command line (`:w :q :wq`) ───────────────────────────────
