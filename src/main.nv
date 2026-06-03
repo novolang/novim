@@ -1135,6 +1135,20 @@ fn vis_col(s: Str, cx: Int, ts: Int) -> Int
         i = i + 1
     col
 
+// Horizontal counterpart of `scroll_to`: shift the visual-column viewport
+// offset `left` so the cursor's visual column stays within a `width`-wide
+// text area.  No side margin (cursor sits at the very edge before scrolling).
+fn hscroll_to(left: Int, viscol: Int, width: Int) -> Int
+    let w = if width < 1 then 1 else width
+    var l = left
+    if viscol < l
+        l = viscol
+    if viscol >= l + w
+        l = viscol - w + 1
+    if l < 0
+        l = 0
+    l
+
 // Clear the whole screen (ESC [ 2J).  Only used once at startup and on a
 // resize — NOT per frame: a per-frame clear blanks the screen between the
 // erase and the repaint, which the eye sees as flicker on every keystroke.
@@ -1148,12 +1162,13 @@ fn clear_screen() [io]
 // stale glyphs from a longer previous line survive.  Draws up to (rows-1)
 // buffer lines (a `~` past end-of-buffer), a reverse-video status line on the
 // last row, then places the hardware cursor at the editor cursor.
-fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, mode: Int, cs: Colorscheme, opts: Options) [io]
+fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode: Int, cs: Colorscheme, opts: Options) [io]
     csi()
     emit("?25l")         // hide cursor while we repaint
     let body = rows - 1
     let nl = list.len(ed.lines)
     let gutter = if opts.number then 4 else 0      // "NNN " line-number column
+    let width = if cols - gutter > 0 then cols - gutter else 1   // text area width
     let mut r = 0
     while r < body
         cup(r + 1, 1)
@@ -1161,7 +1176,12 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, mode: Int, cs: 
         if li < nl
             if opts.number
                 emit(pad_num(li + 1, 3) + " ")
-            emit(expand_tabs(ed.lines[li], opts.tabstop))
+            // Tab-expand to visual columns, then show only [left, left+width).
+            let expanded = expand_tabs(ed.lines[li], opts.tabstop)
+            let elen = str.len(expanded)
+            if left < elen
+                let endc = if left + width < elen then left + width else elen
+                emit(str.slice(expanded, left, endc))
         elif cs.tilde_fg >= 0
             sgr("38;5;" + str.from_int(cs.tilde_fg))
             emit("~")
@@ -1177,7 +1197,7 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, mode: Int, cs: 
     el()                 // fill the rest of the status bar with the status bg
     sgr("0")
     let curline = if ed.cy < nl then ed.lines[ed.cy] else ""
-    cup(ed.cy - top + 1, vis_col(curline, ed.cx, opts.tabstop) + gutter + 1)
+    cup(ed.cy - top + 1, (vis_col(curline, ed.cx, opts.tabstop) - left) + gutter + 1)
     csi()
     emit("?25h")         // show the cursor at its new home
 
@@ -1190,6 +1210,13 @@ fn term_cols() -> Int [io]
     let packed = novo_pty_get_winsize_h()
     let c = bits.band(packed, 65535)
     if c > 0 then c else 80
+
+// Recompute the horizontal offset for the current cursor: the text area is
+// `cols` minus the line-number gutter, and the cursor's visual column must
+// stay inside it.  Pure wrapper around hscroll_to used at each repaint site.
+fn hscroll_for(left: Int, ed: Editor, opts: Options, cols: Int) -> Int
+    let gutter = if opts.number then 4 else 0
+    hscroll_to(left, vis_col(line_at(ed, ed.cy), ed.cx, opts.tabstop), cols - gutter)
 
 // Adjust the viewport top so the cursor line is visible in `body` rows.
 fn scroll_to(top: Int, cy: Int, body: Int) -> Int
@@ -1212,12 +1239,14 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
     var rows = term_rows()
     var cols = term_cols()
     var top = 0
+    var left = 0
     var cmd_mode = false
     var cmd_buf = ""
     var search_mode = false
     var search_buf = ""
     clear_screen()       // one-time clear of whatever was on screen before
-    render(ed, rows, cols, path, top, st.mode, cs, opts)
+    left = hscroll_for(left, ed, opts, cols)
+    render(ed, rows, cols, path, top, left, st.mode, cs, opts)
     var running = true
     while running
         let m = novo_pty_poll_h(0, 100)      // poll host stdin (fd 0)
@@ -1273,7 +1302,8 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                     ed = step.ed
                     st = step.st
             top = scroll_to(top, ed.cy, rows - 1)
-            render(ed, rows, cols, path, top, st.mode, cs, opts)
+            left = hscroll_for(left, ed, opts, cols)
+            render(ed, rows, cols, path, top, left, st.mode, cs, opts)
             if cmd_mode
                 cup(rows, 1)
                 csi()
@@ -1288,8 +1318,9 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
             rows = term_rows()
             cols = term_cols()
             top = scroll_to(top, ed.cy, rows - 1)
+            left = hscroll_for(left, ed, opts, cols)
             clear_screen()   // dimensions changed — clear stale content once
-            render(ed, rows, cols, path, top, st.mode, cs, opts)
+            render(ed, rows, cols, path, top, left, st.mode, cs, opts)
     novo_pty_restore_mode_h()
     csi()
     emit("2J")
