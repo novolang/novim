@@ -1001,12 +1001,26 @@ fn sgr(code: Str) [io]            // ESC [ <code> m
     csi()
     emit(code + "m")
 
-// Full repaint: clear, draw up to (rows-1) buffer lines (a `~` past
-// end-of-buffer), a reverse-video status line on the last row, then
-// place the hardware cursor at the editor cursor.
+fn el() [io]                      // ESC [ K — erase from cursor to end of line
+    csi()
+    emit("K")
+
+// Clear the whole screen (ESC [ 2J).  Only used once at startup and on a
+// resize — NOT per frame: a per-frame clear blanks the screen between the
+// erase and the repaint, which the eye sees as flicker on every keystroke.
+fn clear_screen() [io]
+    csi()
+    emit("2J")
+
+// Flicker-free full repaint.  Instead of clearing the screen (which blanks
+// then repaints — visible flicker on every cursor move), we hide the cursor,
+// overwrite every row in place, and erase each row's tail with ESC [ K so no
+// stale glyphs from a longer previous line survive.  Draws up to (rows-1)
+// buffer lines (a `~` past end-of-buffer), a reverse-video status line on the
+// last row, then places the hardware cursor at the editor cursor.
 fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, mode: Int, cs: Colorscheme, opts: Options) [io]
     csi()
-    emit("2J")            // clear screen
+    emit("?25l")         // hide cursor while we repaint
     let body = rows - 1
     let nl = list.len(ed.lines)
     let gutter = if opts.number then 4 else 0      // "NNN " line-number column
@@ -1024,13 +1038,17 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, mode: Int, cs: 
             sgr("0")
         else
             emit("~")
+        el()             // erase any leftover tail from the previous frame
         r = r + 1
     cup(rows, 1)
     sgr(status_sgr(cs))
     let modestr = if mode == 1 then "-- INSERT -- " else "-- NORMAL -- "
     emit(" " + path + "  " + str.from_int(ed.cy + 1) + ":" + str.from_int(ed.cx + 1) + "  " + modestr)
+    el()                 // fill the rest of the status bar with the status bg
     sgr("0")
     cup(ed.cy - top + 1, ed.cx + gutter + 1)
+    csi()
+    emit("?25h")         // show the cursor at its new home
 
 fn term_rows() -> Int [io]
     let packed = novo_pty_get_winsize_h()
@@ -1067,6 +1085,7 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
     var cmd_buf = ""
     var search_mode = false
     var search_buf = ""
+    clear_screen()       // one-time clear of whatever was on screen before
     render(ed, rows, cols, path, top, st.mode, cs, opts)
     var running = true
     while running
@@ -1138,6 +1157,7 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
             rows = term_rows()
             cols = term_cols()
             top = scroll_to(top, ed.cy, rows - 1)
+            clear_screen()   // dimensions changed — clear stale content once
             render(ed, rows, cols, path, top, st.mode, cs, opts)
     novo_pty_restore_mode_h()
     csi()
