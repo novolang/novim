@@ -1309,9 +1309,123 @@ fn feed_mapped(ed: Editor, st: InputState, km: Keymap, b: Int) -> Step
         j = j + 1
     Step { ed: e, st: s }
 
+// ── `.` repeat (slice 19) ───────────────────────────────────────────────
+// Repeat the last buffer-changing command.  Kept in the DRIVER (not the pure
+// feed) by recording the raw byte sequence of each change command and
+// replaying it on `.`.  This way feed stays pure and the recorded bytes
+// re-run through the same feed_mapped (keymaps included), so insert-mode text,
+// counts, and operator+motion all repeat faithfully.
+
+// Whole-buffer text, used to detect whether a command changed the buffer.
+fn buf_text(ed: Editor) -> Str
+    var acc = ""
+    let n = list.len(ed.lines)
+    let mut i = 0
+    while i < n
+        if i > 0
+            acc = acc + str.from_char(10)
+        acc = acc + ed.lines[i]
+        i = i + 1
+    acc
+
+// Bytes that can BEGIN a buffer-changing command (so navigation keystrokes
+// stay cheap — we only snapshot/compare the buffer for these).  Counts are
+// tracked too (a leading digit may precede an edit, e.g. `3x`).  Yank (`y`)
+// is excluded: it changes no buffer text, so `.` never repeats it.
+fn is_edit_start(b: Int) -> Bool
+    if b >= 0x30 and b <= 0x39                               // count digit (may precede an edit)
+        return true
+    // i a I A  o O  x X D  J ~ r  s S c C  p P  d > <
+    let edits = [0x69, 0x61, 0x49, 0x41, 0x6F, 0x4F, 0x78, 0x58, 0x44, 0x4A, 0x7E, 0x72, 0x73, 0x53, 0x63, 0x43, 0x70, 0x50, 0x64, 0x3E, 0x3C]
+    var found = false
+    let mut i = 0
+    let n = list.len(edits)
+    while i < n
+        if edits[i] == b
+            found = true
+        i = i + 1
+    found
+
+// The per-session dot state: `last` = the recorded change to repeat; `cur` =
+// bytes of the in-progress command; `snap` = buffer text when it began;
+// `active` = whether a command is being recorded right now.
+struct DotState
+    last:   Str
+    cur:    Str
+    snap:   Str
+    active: Bool
+
+fn dot_new() -> DotState
+    DotState { last: "", cur: "", snap: "", active: false }
+
+// feed_dot's result: new editor + input state + updated dot state.
+struct DotStep
+    ed:  Editor
+    st:  InputState
+    dot: DotState
+
+// Replay a recorded byte sequence through feed_mapped.
+fn replay_seq(ed: Editor, st: InputState, km: Keymap, seq: Str) -> Step
+    var e = ed
+    var s = st
+    let m = str.len(seq)
+    let mut j = 0
+    while j < m
+        let step = feed_mapped(e, s, km, str.byte_at(seq, j) ?? 0)
+        e = step.ed
+        s = step.st
+        j = j + 1
+    Step { ed: e, st: s }
+
+// Feed one byte, appending it to the in-progress command and — when the
+// command completes at a clean state — recording it as `last` if it changed
+// the buffer.
+fn dot_record(ed: Editor, st: InputState, km: Keymap, dot: DotState, b: Int) -> DotStep
+    // Build cur2 + extract the snapshot/last as LOCALS before feed_mapped: the
+    // operator/insert paths allocate heavily, and reading the DotState param's
+    // string fields *after* the call reads freed memory under --llvm
+    // (string-ownership bug family).  Rooting them as locals first avoids it.
+    let step = feed_mapped(ed, st, km, b)
+    let s2 = step.st
+    let cur2 = dot.cur + str.from_char(b)
+    let done = s2.mode == 0 and s2.pending == 0 and s2.count == 0
+    let changed = buf_text(step.ed) != dot.snap
+    // Single return point: an early `return StructLit{...}` from inside an
+    // `if` after this heavy feed_mapped call miscompiles under --llvm
+    // (bugs/codegen-llvm/llvm-early-return-struct-after-call.md), so fold the
+    // branch into the field values instead.
+    let newlast = if done and changed then cur2 else dot.last
+    let newcur  = if done then "" else cur2
+    let newsnap = if done then "" else dot.snap
+    DotStep { ed: step.ed, st: s2, dot: DotState { last: newlast, cur: newcur, snap: newsnap, active: not done } }
+
+// Drive one input byte with dot-repeat recording/replay around feed_mapped.
+fn feed_dot(ed: Editor, st: InputState, km: Keymap, dot: DotState, b: Int) -> DotStep
+    // `.` at a command boundary replays the last change `count` times.
+    if st.mode == 0 and st.pending == 0 and b == 0x2E
+        let reps = if st.count > 0 then st.count else 1
+        var e = ed
+        var s = ist_done(st)
+        var r = 0
+        while r < reps
+            let step = replay_seq(e, s, km, dot.last)
+            e = step.ed
+            s = step.st
+            r = r + 1
+        return DotStep { ed: e, st: s, dot: DotState { last: dot.last, cur: "", snap: "", active: false } }
+    if dot.active                                            // mid-command — keep recording
+        return dot_record(ed, st, km, dot, b)
+    if st.mode == 0 and st.pending == 0 and st.count == 0 and is_edit_start(b)
+        let started = DotState { last: dot.last, cur: "", snap: buf_text(ed), active: true }
+        return dot_record(ed, st, km, started, b)
+    // Untracked (pure motion / navigation): feed without touching dot state.
+    let step = feed_mapped(ed, st, km, b)
+    DotStep { ed: step.ed, st: step.st, dot: dot }
+
 fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
     var ed = Editor { lines: buf_load(path), cy: 0, cx: 0 }
     var st = ist_new()
+    var dot = dot_new()
     let km = load_keymaps(cfg_path)
     let decoded = decode_escapes(keys)
     var cmd_mode = false
@@ -1361,9 +1475,10 @@ fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
             search_mode = true
             search_buf = ""
         else
-            let step = feed_mapped(ed, st, km, b)
-            ed = step.ed
-            st = step.st
+            let dstep = feed_dot(ed, st, km, dot, b)
+            ed = dstep.ed
+            st = dstep.st
+            dot = dstep.dot
         i = i + 1
     let mut li = 0
     let nl = list.len(ed.lines)
@@ -1542,6 +1657,7 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
     let _ = novo_pty_set_raw_mode_h()
     var ed = Editor { lines: buf_load(path), cy: 0, cx: 0 }
     var st = ist_new()
+    var dot = dot_new()
     let km = load_keymaps(cfg_path)
     let cs = load_colorscheme(cfg_path)
     let opts = load_options(cfg_path)
@@ -1607,9 +1723,10 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                     search_mode = true
                     search_buf = ""
                 else
-                    let step = feed_mapped(ed, st, km, b)
-                    ed = step.ed
-                    st = step.st
+                    let dstep = feed_dot(ed, st, km, dot, b)
+                    ed = dstep.ed
+                    st = dstep.st
+                    dot = dstep.dot
             top = scroll_to(top, ed.cy, rows - 1)
             left = hscroll_for(left, ed, opts, cols)
             render(ed, rows, cols, path, top, left, st.mode, cs, opts)
