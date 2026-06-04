@@ -2204,11 +2204,12 @@ fn status_sgr(cs: Colorscheme) -> Str
 // gutter) and `tabstop` (loaded; tab expansion in render is a follow-on).
 
 struct Options
-    number:  Bool
-    tabstop: Int
+    number:         Bool
+    relativenumber: Bool
+    tabstop:        Int
 
 fn options_default() -> Options
-    Options { number: false, tabstop: 8 }
+    Options { number: false, relativenumber: false, tabstop: 8 }
 
 fn parse_bool_val(s: Str) -> Bool
     str.trim(strip_quotes(str.trim(s))) == "true"
@@ -2218,6 +2219,7 @@ fn load_options(cfg_path: Str) -> Options [io]
         None => options_default()
         Some(content) =>
             var number = false
+            var relativenumber = false
             var tabstop = 8
             let lines = str.split_lines(content)
             var in_opt = false
@@ -2233,14 +2235,16 @@ fn load_options(cfg_path: Str) -> Options [io]
                         if eq > 0
                             let key = str.trim(str.slice(raw, 0, eq))
                             let valr = str.slice(raw, eq + 1, str.len(raw))
-                            if key == "number"
+                            if key == "number" or key == "nu"
                                 number = parse_bool_val(valr)
+                            elif key == "relativenumber" or key == "rnu"
+                                relativenumber = parse_bool_val(valr)
                             elif key == "tabstop"
                                 let tv = parse_color_val(valr)
                                 if tv > 0
                                     tabstop = tv
                 i = i + 1
-            Options { number: number, tabstop: tabstop }
+            Options { number: number, relativenumber: relativenumber, tabstop: tabstop }
 
 // Right-align `n` in a `width`-char field (space-padded).
 fn pad_num(n: Int, width: Int) -> Str
@@ -3428,7 +3432,8 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode
     emit("?25l")         // hide cursor while we repaint
     let body = rows - 1
     let nl = list.len(ed.lines)
-    let gutter = if opts.number then 4 else 0      // "NNN " line-number column
+    let numbered = opts.number or opts.relativenumber
+    let gutter = if numbered then 4 else 0          // "NNN " line-number column
     let width = if cols - gutter > 0 then cols - gutter else 1   // text area width
     // Normalised visual selection bounds (start <= end), used for highlighting.
     let a_first = avy < ed.cy or (avy == ed.cy and avx <= ed.cx)
@@ -3442,8 +3447,16 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode
         cup(r + 1, 1)
         let li = top + r
         if li < nl
-            if opts.number
-                emit(pad_num(li + 1, 3) + " ")
+            if numbered
+                // relativenumber → distance from the cursor line; with `number`
+                // too, the cursor line shows its absolute number (vim "hybrid").
+                let gnum = if opts.relativenumber and li != ed.cy
+                    if li > ed.cy then li - ed.cy else ed.cy - li
+                elif opts.relativenumber and (not opts.number)
+                    0
+                else
+                    li + 1
+                emit(pad_num(gnum, 3) + " ")
             // Tab-expand to visual columns, then show only [left, left+width),
             // reverse-videoing any selected span.
             let raw = ed.lines[li]
@@ -3494,7 +3507,7 @@ fn term_cols() -> Int [io]
 // `cols` minus the line-number gutter, and the cursor's visual column must
 // stay inside it.  Pure wrapper around hscroll_to used at each repaint site.
 fn hscroll_for(left: Int, ed: Editor, opts: Options, cols: Int) -> Int
-    let gutter = if opts.number then 4 else 0
+    let gutter = if opts.number or opts.relativenumber then 4 else 0
     hscroll_to(left, vis_col(line_at(ed, ed.cy), ed.cx, opts.tabstop), cols - gutter)
 
 // Adjust the viewport top so the cursor line is visible in `body` rows.
