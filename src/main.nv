@@ -1869,6 +1869,14 @@ fn exec_ex(cmd: Str) -> ExResult
 // occurrence on a line; without it, just the first.
 
 // Is `cmd` a substitute command (`s<delim>…` / `%s<delim>…`)?
+// The current-line form of a substitute command (drop a leading `%`), for `&`.
+fn subst_current_line(cmd: Str) -> Str
+    let c = str.trim(cmd)
+    if str.len(c) > 0 and (str.byte_at(c, 0) ?? 0) == 0x25
+        str.slice(c, 1, str.len(c))
+    else
+        c
+
 fn is_substitute(cmd: Str) -> Bool
     let c = str.trim(cmd)
     let n = str.len(c)
@@ -3099,6 +3107,7 @@ fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
     var search_mode = false
     var search_buf = ""
     var search_back = false
+    var last_subst = ""
     var quit = false
     let n = str.len(decoded)
     let mut i = 0
@@ -3109,6 +3118,7 @@ fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
                 if is_substitute(cmd_buf)
                     es = edit_push_undo(es, ed)
                     ed = ex_substitute(ed, cmd_buf)
+                    last_subst = cmd_buf
                 elif is_global(cmd_buf)
                     es = edit_push_undo(es, ed)
                     ed = ex_global(ed, cmd_buf)
@@ -3160,6 +3170,9 @@ fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
         elif scroll_idle(st, es) and key_free(km, b) and screen_kind(b) >= 0        // H / M / L (top=0 in batch)
             let ty = screen_target(0, batch_rows, list.len(ed.lines), screen_kind(b))
             ed = clamp(Editor { lines: ed.lines, cy: ty, cx: first_nonblank(line_at(ed, ty)) })
+        elif scroll_idle(st, es) and key_free(km, b) and b == 0x26 and str.len(last_subst) > 0   // & — repeat last :s on this line
+            es = edit_push_undo(es, ed)
+            ed = ex_substitute(ed, subst_current_line(last_subst))
         else
             let estep = feed_edit(ed, st, km, es, b)
             ed = estep.ed
@@ -3501,6 +3514,7 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
     var search_buf = ""
     var search_back = false
     var zpend = false                    // awaiting the 2nd byte of a `z` scroll command
+    var last_subst = ""                  // last :s command, for `&`
     clear_screen()       // one-time clear of whatever was on screen before
     left = hscroll_for(left, ed, opts, cols)
     render(ed, rows, cols, path, top, left, st.mode, st.avy, st.avx, cs, opts)
@@ -3521,6 +3535,7 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                         if is_substitute(cmd_buf)
                             es = edit_push_undo(es, ed)
                             ed = ex_substitute(ed, cmd_buf)
+                            last_subst = cmd_buf
                         elif is_global(cmd_buf)
                             es = edit_push_undo(es, ed)
                             ed = ex_global(ed, cmd_buf)
@@ -3571,6 +3586,9 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                 elif scroll_idle(st, es) and key_free(km, b) and screen_kind(b) >= 0        // H / M / L
                     let ty = screen_target(top, rows, list.len(ed.lines), screen_kind(b))
                     ed = clamp(Editor { lines: ed.lines, cy: ty, cx: first_nonblank(line_at(ed, ty)) })
+                elif scroll_idle(st, es) and key_free(km, b) and b == 0x26 and str.len(last_subst) > 0   // & — repeat last :s
+                    es = edit_push_undo(es, ed)
+                    ed = ex_substitute(ed, subst_current_line(last_subst))
                 elif b == 58 and st.mode == 0        // ':' — open the Ex line
                     cmd_mode = true
                     cmd_buf = ""
