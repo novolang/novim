@@ -3068,8 +3068,11 @@ fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
             search_mode = true
             search_buf = ""
             search_back = true
-        elif scroll_idle(st, es) and scroll_ctrl_kind(b) >= 0   // Ctrl-D/U/F/B paging
+        elif scroll_idle(st, es) and key_free(km, b) and scroll_ctrl_kind(b) >= 0   // Ctrl-D/U/F/B paging
             ed = clamp(Editor { lines: ed.lines, cy: scroll_new_cy(ed, batch_rows, scroll_ctrl_kind(b)), cx: ed.cx })
+        elif scroll_idle(st, es) and key_free(km, b) and screen_kind(b) >= 0        // H / M / L (top=0 in batch)
+            let ty = screen_target(0, batch_rows, list.len(ed.lines), screen_kind(b))
+            ed = clamp(Editor { lines: ed.lines, cy: ty, cx: first_nonblank(line_at(ed, ty)) })
         else
             let estep = feed_edit(ed, st, km, es, b)
             ed = estep.ed
@@ -3368,6 +3371,31 @@ fn scroll_z_kind(b: Int) -> Int
 fn scroll_ctrl_kind(b: Int) -> Int
     if b == 0x04 then 0 elif b == 0x15 then 1 elif b == 0x06 then 2 elif b == 0x02 then 3 else 0 - 1
 
+// Target buffer line for the screen motions H / M / L (kind 0/1/2) given the
+// current viewport [top, top+body) clamped to the buffer.
+fn screen_target(top: Int, rows: Int, nl: Int, kind: Int) -> Int
+    let body = rows - 1
+    let last_vis = if top + body - 1 < nl - 1 then top + body - 1 else nl - 1
+    var t = top
+    if kind == 1
+        t = top + (last_vis - top) / 2       // M — middle of the visible lines
+    elif kind == 2
+        t = last_vis                         // L — bottom visible line
+    if t < 0
+        t = 0
+    if t > nl - 1
+        t = nl - 1
+    t
+
+// Decode H / M / L into a kind (0/1/2), or -1.
+fn screen_kind(b: Int) -> Int
+    if b == 0x48 then 0 elif b == 0x4D then 1 elif b == 0x4C then 2 else 0 - 1
+
+// A scroll / screen key is only handled by the driver when the user hasn't
+// remapped it — otherwise the keymap (applied inside feed) must win.
+fn key_free(km: Keymap, b: Int) -> Bool
+    str.len(keymap_lookup(km, b)) == 0
+
 fn run_interactive(cfg_path: Str, path: Str) [io, time]
     let _ = novo_pty_set_raw_mode_h()
     var ed = Editor { lines: buf_load(path), cy: 0, cx: 0 }
@@ -3447,12 +3475,15 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                     let zk = scroll_z_kind(b)
                     if zk >= 0
                         top = scroll_new_top(ed.cy, top, rows, zk)
-                elif scroll_idle(st, es) and b == 0x7A   // 'z' — await z/t/b
+                elif scroll_idle(st, es) and key_free(km, b) and b == 0x7A   // 'z' — await z/t/b
                     zpend = true
-                elif scroll_idle(st, es) and scroll_ctrl_kind(b) >= 0   // Ctrl-D/U/F/B
+                elif scroll_idle(st, es) and key_free(km, b) and scroll_ctrl_kind(b) >= 0   // Ctrl-D/U/F/B
                     let k = scroll_ctrl_kind(b)
                     ed = clamp(Editor { lines: ed.lines, cy: scroll_new_cy(ed, rows, k), cx: ed.cx })
                     top = scroll_new_top(ed.cy, top, rows, k)
+                elif scroll_idle(st, es) and key_free(km, b) and screen_kind(b) >= 0        // H / M / L
+                    let ty = screen_target(top, rows, list.len(ed.lines), screen_kind(b))
+                    ed = clamp(Editor { lines: ed.lines, cy: ty, cx: first_nonblank(line_at(ed, ty)) })
                 elif b == 58 and st.mode == 0        // ':' — open the Ex line
                     cmd_mode = true
                     cmd_buf = ""
