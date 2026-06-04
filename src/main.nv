@@ -584,10 +584,11 @@ fn op_replace_char(ed: Editor, rb: Int, n: Int) -> Editor
     clamp(Editor { lines: set_line(ed.lines, ed.cy, s), cy: ed.cy, cx: ed.cx + n - 1 })
 
 // `J` / `NJ` — join the current line with the following line(s): `NJ` joins
-// `n` lines (so `J` and `2J` both join 2), collapsing each pulled-up line's
-// leading blanks to a single separating space.  Cursor lands on the first
-// join column.  No-op on the last line.
-fn op_join_lines(ed: Editor, n: Int) -> Editor
+// `n` lines (so `J` and `2J` both join 2).  With `space` (plain `J`) each
+// pulled-up line's leading blanks collapse to a single separating space;
+// without it (`gJ`) the lines are concatenated verbatim.  Cursor lands on the
+// first join column.  No-op on the last line.
+fn op_join_lines(ed: Editor, n: Int, space: Bool) -> Editor
     let joins = if n > 1 then n - 1 else 1
     var merged = line_at(ed, ed.cy)
     var dropped = 0
@@ -595,11 +596,11 @@ fn op_join_lines(ed: Editor, n: Int) -> Editor
     var k = 0
     while k < joins and (ed.cy + 1 + dropped) < list.len(ed.lines)
         let nxt = ed.lines[ed.cy + 1 + dropped]
-        let stripped = str.slice(nxt, first_nonblank(nxt), str.len(nxt))
+        let piece = if space then str.slice(nxt, first_nonblank(nxt), str.len(nxt)) else nxt
         if joincol < 0
             joincol = str.len(merged)
-        let sep = if str.len(merged) == 0 then "" else " "
-        merged = merged + sep + stripped
+        let sep = if space and str.len(merged) != 0 then " " else ""
+        merged = merged + sep + piece
         dropped = dropped + 1
         k = k + 1
     if dropped == 0
@@ -1429,7 +1430,7 @@ fn feed_case(ed: Editor, st: InputState, kind: Int, pcode: Int, b: Int) -> Step
 fn visual_join(ed: Editor, st: InputState) -> Step
     let vr = visual_range(st, ed)
     let nlines = vr.ey - vr.sy + 1
-    Step { ed: op_join_lines(Editor { lines: ed.lines, cy: vr.sy, cx: 0 }, nlines), st: ist_done(st) }
+    Step { ed: op_join_lines(Editor { lines: ed.lines, cy: vr.sy, cx: 0 }, nlines, true), st: ist_done(st) }
 
 // `p` replaces the selection with the register's contents; the replaced text
 // becomes the new register.  Delete then paste-before at the gap.
@@ -1511,6 +1512,8 @@ fn feed_visual(ed: Editor, st: InputState, b: Int) -> Step
         return visual_join(ed, st)
     if b == 0x70                                  // p — replace selection with register
         return visual_paste(ed, st)
+    if b == 0x6F                                  // o — swap the cursor and the anchor
+        return Step { ed: clamp(Editor { lines: ed.lines, cy: st.avy, cx: st.avx }), st: InputState { count: 0, pending: 0, mode: st.mode, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: ed.cy, avx: ed.cx } }
     // Multi-key motion entry: await a target char (f/F/t/T) or a second g.
     if b == 0x66
         return Step { ed: ed, st: ist_visual_pending(st, 8) }
@@ -1587,6 +1590,8 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
             return Step { ed: ed, st: InputState { count: st.count, pending: 52, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
         if b == 0x7E                   // `g~` — toggle-case operator
             return Step { ed: ed, st: InputState { count: st.count, pending: 50, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
+        if b == 0x4A                   // `gJ` — join line(s) without a space
+            return Step { ed: op_join_lines(ed, if st.count > 0 then st.count else 1, false), st: ist_done(st) }
         return feed(ed, ist_clear_pending(st), b)     // not g-command — reprocess fresh
     if st.pending == 50                // g~<motion> — toggle case
         return feed_case(ed, st, 0, 50, b)
@@ -1755,8 +1760,8 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
     // Char-level edits (slice 14).
     if b == 0x7E                       // '~' — toggle case (count chars), advance
         return Step { ed: op_toggle_case(ed, cnt), st: ist_done(st) }
-    if b == 0x4A                       // 'J' — join line(s)
-        return Step { ed: op_join_lines(ed, cnt), st: ist_done(st) }
+    if b == 0x4A                       // 'J' — join line(s) with a space
+        return Step { ed: op_join_lines(ed, cnt, true), st: ist_done(st) }
     if b == 0x72                       // 'r' — await the replacement byte
         return Step { ed: ed, st: InputState { count: st.count, pending: 4, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
     if b == 0x3E                       // '>' — await second '>' (indent right)
