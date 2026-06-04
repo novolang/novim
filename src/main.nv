@@ -1019,12 +1019,24 @@ fn vdelete_char_lines(ed: Editor, vr: VRange) -> [Str]
 
 // Apply d / y / c (opb byte) over an arbitrary CHARWISE range `vr` (may span
 // lines).  Single trailing return.
+//
+// `vr` is snapshotted into scalar Int locals BEFORE any call that allocates a
+// heap string: passing a nested struct field (e.g. `to.vr` from a text object)
+// into a helper that allocates can corrupt the still-live `vr` here under the
+// LLVM backend — `vr.ex` was observed picking up a byte of freed string data
+// (length-16+ lines only; the SSO→heap boundary).  Reading the four fields up
+// front, then rebuilding a fresh VRange per callee, sidesteps it.  See
+// bugs/codegen-llvm.
 fn apply_char_vr(ed: Editor, st: InputState, opb: Int, vr: VRange) -> Step
-    let txt = vyank_char_text(ed, vr)
+    let vsy = vr.sy
+    let vsx = vr.sx
+    let vey = vr.ey
+    let vex = vr.ex
+    let txt = vyank_char_text(ed, VRange { sy: vsy, sx: vsx, ey: vey, ex: vex })
     let is_yank = opb == 0x79
     let ins = opb == 0x63
-    let nls = if is_yank then ed.lines else vdelete_char_lines(ed, vr)
-    let ne = if ins then clamp_insert(Editor { lines: nls, cy: vr.sy, cx: vr.sx }) else clamp(Editor { lines: nls, cy: vr.sy, cx: vr.sx })
+    let nls = if is_yank then ed.lines else vdelete_char_lines(ed, VRange { sy: vsy, sx: vsx, ey: vey, ex: vex })
+    let ne = if ins then clamp_insert(Editor { lines: nls, cy: vsy, cx: vsx }) else clamp(Editor { lines: nls, cy: vsy, cx: vsx })
     Step { ed: ne, st: ist_reg_cw(st, txt, ins) }
 
 fn visual_apply_char(ed: Editor, st: InputState, opb: Int) -> Step
