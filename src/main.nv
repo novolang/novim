@@ -923,8 +923,86 @@ fn visual_motion(ed: Editor, b: Int, cnt: Int) -> Editor
 fn ist_visual_keep(st: InputState, mode: Int) -> InputState
     InputState { count: 0, pending: 0, mode: mode, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx }
 
+// Stay in visual mode but set a pending sub-state (await an f/F/t/T target
+// char, or a second g) — preserves the count so `3fx` etc. work.
+fn ist_visual_pending(st: InputState, pcode: Int) -> InputState
+    InputState { count: st.count, pending: pcode, mode: st.mode, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx }
+
+// Case map for a byte: kind 0 = toggle, 1 = lower, 2 = upper.
+fn case_byte(b: Int, kind: Int) -> Int
+    if kind == 0
+        toggle_case_byte(b)
+    elif kind == 1
+        if b >= 0x41 and b <= 0x5A then b + 32 else b
+    else
+        if b >= 0x61 and b <= 0x7A then b - 32 else b
+
+// Apply a case map to byte range [lo, hi) of `line`.
+fn case_line_range(line: Str, lo: Int, hi: Int, kind: Int) -> Str
+    var out = ""
+    let n = str.len(line)
+    let mut i = 0
+    while i < n
+        let b = str.byte_at(line, i) ?? 0
+        if i >= lo and i < hi
+            out = out + str.from_char(case_byte(b, kind))
+        else
+            out = out + str.from_char(b)
+        i = i + 1
+    out
+
+// `~` / `u` / `U` on the visual selection → back to Normal.
+fn visual_case(ed: Editor, st: InputState, kind: Int) -> Step
+    let vr = visual_range(st, ed)
+    let total = list.len(ed.lines)
+    var ls: [Str] = []
+    let mut i = 0
+    while i < total
+        if i >= vr.sy and i <= vr.ey
+            let line = ed.lines[i]
+            let lo = if st.mode == 3 then 0 elif i == vr.sy then vr.sx else 0
+            let hi = if st.mode == 3 then str.len(line) elif i == vr.ey then vr.ex + 1 else str.len(line)
+            ls = list.append(ls, [case_line_range(line, lo, hi, kind)])
+        else
+            ls = list.append(ls, [ed.lines[i]])
+        i = i + 1
+    Step { ed: clamp(Editor { lines: ls, cy: vr.sy, cx: vr.sx }), st: ist_done(st) }
+
+// `J` joins the selected lines → back to Normal.
+fn visual_join(ed: Editor, st: InputState) -> Step
+    let vr = visual_range(st, ed)
+    let nlines = vr.ey - vr.sy + 1
+    Step { ed: op_join_lines(Editor { lines: ed.lines, cy: vr.sy, cx: 0 }, nlines), st: ist_done(st) }
+
+// `p` replaces the selection with the register's contents; the replaced text
+// becomes the new register.  Delete then paste-before at the gap.
+fn visual_paste(ed: Editor, st: InputState) -> Step
+    let vr = visual_range(st, ed)
+    let del = visual_apply(ed, st, 0x64)               // del.st.reg = removed text
+    let tmp = InputState { count: 0, pending: 0, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx }
+    // For a charwise selection paste at the exact gap column (vr.sx, which
+    // may be past end-of-line); paste-before clamps it to len → append.
+    let ped = if st.mode == 2 then Editor { lines: del.ed.lines, cy: del.ed.cy, cx: vr.sx } else del.ed
+    let pasted = paste(ped, tmp, false)
+    Step { ed: pasted, st: del.st }
+
 // Handle one byte in Visual mode (mode 2 = charwise, 3 = linewise).
 fn feed_visual(ed: Editor, st: InputState, b: Int) -> Step
+    let cntp = if st.count > 0 then st.count else 1
+    // Pending multi-key motions (extend the selection, stay visual).
+    if st.pending == 8                           // f<char>
+        return Step { ed: move_find(ed, b, true, false, cntp), st: ist_visual_keep(st, st.mode) }
+    if st.pending == 9                           // F<char>
+        return Step { ed: move_find(ed, b, false, false, cntp), st: ist_visual_keep(st, st.mode) }
+    if st.pending == 10                          // t<char>
+        return Step { ed: move_find(ed, b, true, true, cntp), st: ist_visual_keep(st, st.mode) }
+    if st.pending == 11                          // T<char>
+        return Step { ed: move_find(ed, b, false, true, cntp), st: ist_visual_keep(st, st.mode) }
+    if st.pending == 1                           // g<g> — gg (to line / count)
+        if b == 0x67
+            let tgt = if st.count > 0 then st.count - 1 else 0
+            return Step { ed: clamp(Editor { lines: ed.lines, cy: tgt, cx: ed.cx }), st: ist_visual_keep(st, st.mode) }
+        return Step { ed: ed, st: ist_visual_keep(st, st.mode) }   // not gg — drop
     if b == 27                                   // Esc — leave visual
         return Step { ed: ed, st: ist_done(st) }
     if b == 0x76                                 // v
@@ -951,9 +1029,29 @@ fn feed_visual(ed: Editor, st: InputState, b: Int) -> Step
         return visual_indent(ed, st, true)
     if b == 0x3C                                  // < — dedent selection
         return visual_indent(ed, st, false)
-    // Motion: move the cursor, stay in visual mode (anchor fixed).
-    let cnt = if st.count > 0 then st.count else 1
-    Step { ed: visual_motion(ed, b, cnt), st: ist_visual_keep(st, st.mode) }
+    if b == 0x7E                                  // ~ — toggle case of selection
+        return visual_case(ed, st, 0)
+    if b == 0x75                                  // u — lowercase selection
+        return visual_case(ed, st, 1)
+    if b == 0x55                                  // U — uppercase selection
+        return visual_case(ed, st, 2)
+    if b == 0x4A                                  // J — join the selected lines
+        return visual_join(ed, st)
+    if b == 0x70                                  // p — replace selection with register
+        return visual_paste(ed, st)
+    // Multi-key motion entry: await a target char (f/F/t/T) or a second g.
+    if b == 0x66
+        return Step { ed: ed, st: ist_visual_pending(st, 8) }
+    if b == 0x46
+        return Step { ed: ed, st: ist_visual_pending(st, 9) }
+    if b == 0x74
+        return Step { ed: ed, st: ist_visual_pending(st, 10) }
+    if b == 0x54
+        return Step { ed: ed, st: ist_visual_pending(st, 11) }
+    if b == 0x67
+        return Step { ed: ed, st: ist_visual_pending(st, 1) }
+    // Single-byte motion: move the cursor, stay in visual mode (anchor fixed).
+    Step { ed: visual_motion(ed, b, cntp), st: ist_visual_keep(st, st.mode) }
 
 // Handle one byte while in Insert mode.
 fn feed_insert(ed: Editor, st: InputState, b: Int) -> Step
@@ -1098,11 +1196,14 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
         return Step { ed: repeat_delete_char(ed, cnt), st: ist_done(st) }
     if b == 0x44                       // 'D' — delete to end of line
         return Step { ed: delete_to_eol(ed), st: ist_done(st) }
-    // Visual mode entry (slice 21): anchor the selection at the cursor.
+    // Visual mode entry (slice 21): anchor the selection at the cursor.  A
+    // count pre-extends the selection (`3v` = 3 chars, `2V` = 2 lines).
     if b == 0x76                       // 'v' — charwise visual
-        return Step { ed: ed, st: InputState { count: 0, pending: 0, mode: 2, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: ed.cy, avx: ed.cx } }
+        let ne = clamp(Editor { lines: ed.lines, cy: ed.cy, cx: ed.cx + cnt - 1 })
+        return Step { ed: ne, st: InputState { count: 0, pending: 0, mode: 2, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: ed.cy, avx: ed.cx } }
     if b == 0x56                       // 'V' — linewise visual
-        return Step { ed: ed, st: InputState { count: 0, pending: 0, mode: 3, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: ed.cy, avx: ed.cx } }
+        let ne = clamp(Editor { lines: ed.lines, cy: ed.cy + cnt - 1, cx: ed.cx })
+        return Step { ed: ne, st: InputState { count: 0, pending: 0, mode: 3, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: ed.cy, avx: ed.cx } }
     // Char-level edits (slice 14).
     if b == 0x7E                       // '~' — toggle case (count chars), advance
         return Step { ed: op_toggle_case(ed, cnt), st: ist_done(st) }
