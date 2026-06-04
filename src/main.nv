@@ -2207,10 +2207,11 @@ struct Options
     number:         Bool
     relativenumber: Bool
     hlsearch:       Bool
+    wrap:           Bool
     tabstop:        Int
 
 fn options_default() -> Options
-    Options { number: false, relativenumber: false, hlsearch: true, tabstop: 8 }
+    Options { number: false, relativenumber: false, hlsearch: true, wrap: false, tabstop: 8 }
 
 fn parse_bool_val(s: Str) -> Bool
     str.trim(strip_quotes(str.trim(s))) == "true"
@@ -2222,6 +2223,7 @@ fn load_options(cfg_path: Str) -> Options [io]
             var number = false
             var relativenumber = false
             var hlsearch = true
+            var wrap = false
             var tabstop = 8
             let lines = str.split_lines(content)
             var in_opt = false
@@ -2243,12 +2245,14 @@ fn load_options(cfg_path: Str) -> Options [io]
                                 relativenumber = parse_bool_val(valr)
                             elif key == "hlsearch" or key == "hls"
                                 hlsearch = parse_bool_val(valr)
-                            elif key == "tabstop"
+                            elif key == "wrap"
+                                wrap = parse_bool_val(valr)
+                            elif key == "tabstop" or key == "ts"
                                 let tv = parse_color_val(valr)
                                 if tv > 0
                                     tabstop = tv
                 i = i + 1
-            Options { number: number, relativenumber: relativenumber, hlsearch: hlsearch, tabstop: tabstop }
+            Options { number: number, relativenumber: relativenumber, hlsearch: hlsearch, wrap: wrap, tabstop: tabstop }
 
 // Right-align `n` in a `width`-char field (space-padded).
 fn pad_num(n: Int, width: Int) -> Str
@@ -2256,6 +2260,66 @@ fn pad_num(n: Int, width: Int) -> Str
     while str.len(s) < width
         s = " " + s
     s
+
+// ── `:set` (runtime options) ────────────────────────────────────────────
+// `:set number`, `:set nonumber`, `:set rnu!`, `:set tabstop=4`, and several
+// space-separated at once.  Booleans: `<opt>` on, `no<opt>` off, `<opt>!`
+// toggle.  Aliases: nu rnu hls ts.
+
+fn is_set(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    c == "set" or (str.len(c) >= 4 and str.slice(c, 0, 4) == "set ")
+
+// Apply one `:set` token to the options.
+fn apply_set_token(o: Options, tok: Str) -> Options
+    let t = str.trim(tok)
+    if str.len(t) == 0
+        return o
+    let eq = index_of_byte(t, 0x3D)
+    if eq > 0                                       // name=value (tabstop=4)
+        let nm = str.trim(str.slice(t, 0, eq))
+        let v = parse_color_val(str.slice(t, eq + 1, str.len(t)))
+        if (nm == "tabstop" or nm == "ts") and v > 0
+            return Options { number: o.number, relativenumber: o.relativenumber, hlsearch: o.hlsearch, wrap: o.wrap, tabstop: v }
+        return o
+    let n = str.len(t)
+    let bang = (str.byte_at(t, n - 1) ?? 0) == 0x21          // trailing !
+    let body = if bang then str.slice(t, 0, n - 1) else t
+    let neg = str.len(body) >= 2 and str.slice(body, 0, 2) == "no"
+    let name = if neg then str.slice(body, 2, str.len(body)) else body
+    if name == "number" or name == "nu"
+        return Options { number: if bang then (not o.number) elif neg then false else true, relativenumber: o.relativenumber, hlsearch: o.hlsearch, wrap: o.wrap, tabstop: o.tabstop }
+    elif name == "relativenumber" or name == "rnu"
+        return Options { number: o.number, relativenumber: if bang then (not o.relativenumber) elif neg then false else true, hlsearch: o.hlsearch, wrap: o.wrap, tabstop: o.tabstop }
+    elif name == "hlsearch" or name == "hls"
+        return Options { number: o.number, relativenumber: o.relativenumber, hlsearch: if bang then (not o.hlsearch) elif neg then false else true, wrap: o.wrap, tabstop: o.tabstop }
+    elif name == "wrap"
+        return Options { number: o.number, relativenumber: o.relativenumber, hlsearch: o.hlsearch, wrap: if bang then (not o.wrap) elif neg then false else true, tabstop: o.tabstop }
+    else
+        o
+
+// Apply a `:set a b c` command (space-separated tokens) to the options.
+fn apply_set(o: Options, cmd: Str) -> Options
+    let c = str.trim(cmd)
+    if str.len(c) <= 3
+        return o
+    let args = str.slice(c, 4, str.len(c))
+    var result = o
+    var tok = ""
+    var i = 0
+    let m = str.len(args)
+    while i < m
+        let b = str.byte_at(args, i) ?? 0
+        if b == 32
+            if str.len(tok) > 0
+                result = apply_set_token(result, tok)
+                tok = ""
+        else
+            tok = tok + str.from_char(b)
+        i = i + 1
+    if str.len(tok) > 0
+        result = apply_set_token(result, tok)
+    result
 
 // ── Search (/pattern, n / N) — slice 10 ─────────────────────────
 
@@ -3682,7 +3746,7 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
     var es = edit_new()
     let km = load_keymaps(cfg_path)
     let cs = load_colorscheme(cfg_path)
-    let opts = load_options(cfg_path)
+    var opts = load_options(cfg_path)
     var rows = term_rows()
     var cols = term_cols()
     var top = 0
@@ -3720,6 +3784,9 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                             ed = ex_global(ed, cmd_buf)
                         elif is_goto(cmd_buf)
                             ed = ex_goto(ed, cmd_buf)
+                        elif is_set(cmd_buf)
+                            opts = apply_set(opts, cmd_buf)
+                            left = hscroll_for(left, ed, opts, cols)
                         else
                             let r = exec_ex(cmd_buf)
                             if r.save
