@@ -3680,7 +3680,7 @@ fn ends_with_nv(p: Str) -> Bool
     let n = str.len(p)
     n >= 3 and str.slice(p, n - 3, n) == ".nv"
 
-fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str]) [io]
+fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str) [io]
     csi()
     emit("?25l")         // hide cursor while we repaint
     let body = rows - 1
@@ -3782,10 +3782,13 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode
     // Base status (path/pos/mode/count) is emitted in full — only the on-cursor
     // diagnostic message is bounded to the remaining width so it can't wrap.
     var statusln = " " + path + "  " + str.from_int(ed.cy + 1) + ":" + str.from_int(ed.cx + 1) + "  " + modestr + dsum
+    // An explicit `info` line (a gd/K result) wins over the passive on-cursor
+    // diagnostic message; either is bounded to the remaining width.
     let cmsg = diag_msg_for_line(diag_li, diag_msgs, ed.cy)
+    let showmsg = if str.len(info) > 0 then info else cmsg
     let room = cols - 1 - str.len(statusln)
-    if str.len(cmsg) > 0 and room > 6
-        let mm = if str.len(cmsg) > room - 2 then str.slice(cmsg, 0, room - 2) else cmsg
+    if str.len(showmsg) > 0 and room > 6
+        let mm = if str.len(showmsg) > room - 2 then str.slice(showmsg, 0, room - 2) else showmsg
         statusln = statusln + "  " + mm
     emit(statusln)
     el()                 // fill the rest of the status bar with the status bg
@@ -3954,6 +3957,9 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
     var lsp_lasttext = ""
     var diag_li: [Int] = []
     var diag_msgs: [Str] = []
+    var lsp_reqid = 1                    // monotonic id for gd/K requests (init used 1)
+    var lsp_info = ""                    // transient status message (gd/K result)
+    var gpend = false                    // awaiting the 2nd byte of a `g` command (gd)
     if ends_with_nv(path)
         lsp_pid = lsp_spawn()
         if lsp_pid >= 0
@@ -3966,7 +3972,7 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
             lsp_send(lsp_in, lsp_didopen(lsp_uri, lsp_lasttext))
     clear_screen()       // one-time clear of whatever was on screen before
     left = hscroll_for(left, ed, opts, cols)
-    render(ed, rows, cols, path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs)
+    render(ed, rows, cols, path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, lsp_info)
     var running = true
     while running
         // Short stdin poll keeps the editor responsive while leaving slack to
@@ -3974,6 +3980,7 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
         let m = novo_pty_poll_h(0, 50)       // poll host stdin (fd 0)
         var changed = false
         if m % 2 == 1
+            lsp_info = ""                 // a transient gd/K message lasts until the next key
             var done = false
             while not done
                 let b = novo_pty_stdin_read_byte_h()
@@ -4032,6 +4039,45 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                     let zk = scroll_z_kind(b)
                     if zk >= 0
                         top = scroll_new_top(ed.cy, top, rows, zk)
+                elif gpend                            // 2nd byte of a `g` (gd intercept)
+                    gpend = false
+                    if b == 0x64 and lsp_pid >= 0      // `gd` — go to definition
+                        lsp_reqid = lsp_reqid + 1
+                        lsp_send(lsp_in, lsp_pos_req(lsp_reqid, "textDocument/definition", lsp_uri, ed.cy, ed.cx))
+                        let resp = lsp_pump(lsp_out, lsp_reqid, 20)
+                        if str.len(resp) == 0
+                            lsp_info = "definition: no response"
+                        else
+                            let dpos = lsp_def_pos(resp)
+                            if list.len(dpos) >= 2
+                                let duri = lsp_def_uri(resp)
+                                if duri == lsp_uri or duri == ""
+                                    ed = clamp(Editor { lines: ed.lines, cy: dpos[0], cx: dpos[1] })
+                                    lsp_info = "definition"
+                                else
+                                    lsp_info = "def: " + duri + ":" + str.from_int(dpos[0] + 1)
+                            else
+                                lsp_info = "no definition found"
+                    else                              // not `gd` — replay g + this byte
+                        let g1 = feed_edit(ed, st, km, es, 0x67)
+                        ed = g1.ed
+                        st = g1.st
+                        es = g1.es
+                        let g2 = feed_edit(ed, st, km, es, b)
+                        ed = g2.ed
+                        st = g2.st
+                        es = g2.es
+                elif lsp_pid >= 0 and scroll_idle(st, es) and key_free(km, 0x67) and b == 0x67   // 'g' — await d (gd)
+                    gpend = true
+                elif lsp_pid >= 0 and scroll_idle(st, es) and key_free(km, 0x4B) and b == 0x4B   // K — hover
+                    lsp_reqid = lsp_reqid + 1
+                    lsp_send(lsp_in, lsp_pos_req(lsp_reqid, "textDocument/hover", lsp_uri, ed.cy, ed.cx))
+                    let hresp = lsp_pump(lsp_out, lsp_reqid, 20)
+                    if str.len(hresp) == 0
+                        lsp_info = "hover: no response"
+                    else
+                        let htext = hover_oneline(lsp_hover_text(hresp))
+                        lsp_info = if str.len(htext) > 0 then htext else "no hover info"
                 elif scroll_idle(st, es) and key_free(km, b) and b == 0x7A   // 'z' — await z/t/b
                     zpend = true
                 elif scroll_idle(st, es) and key_free(km, b) and scroll_ctrl_kind(b) >= 0   // Ctrl-D/U/F/B
@@ -4099,7 +4145,7 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
         if changed
             top = scroll_to(top, ed.cy, rows - 1)
             left = hscroll_for(left, ed, opts, cols)
-            render(ed, rows, cols, path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs)
+            render(ed, rows, cols, path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, lsp_info)
             if cmd_mode
                 cup(rows, 1)
                 csi()
@@ -4116,7 +4162,7 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
             top = scroll_to(top, ed.cy, rows - 1)
             left = hscroll_for(left, ed, opts, cols)
             clear_screen()   // dimensions changed — clear stale content once
-            render(ed, rows, cols, path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs)
+            render(ed, rows, cols, path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, lsp_info)
     if lsp_pid >= 0                       // tear the language server down
         let _ = proc.kill(lsp_pid, 15)
         proc.close(lsp_pid)
@@ -4404,6 +4450,129 @@ fn diag_msg_for_line(diag_li: [Int], diag_msgs: [Str], line: Int) -> Str
         k = k + 1
         i = i + 2
     ""
+
+// ── Phase C — go-to-definition (gd) + hover (K) ─────────────────────────────
+//
+// A position request (definition / hover share the same params shape).
+fn lsp_pos_req(id: Int, method: Str, uri: Str, line: Int, char: Int) -> Str
+    "{" + lsp_q("jsonrpc") + ":" + lsp_q("2.0") + "," + lsp_q("id") + ":" + str.from_int(id) + "," + lsp_q("method") + ":" + lsp_q(method) + "," + lsp_q("params") + ":{" + lsp_q("textDocument") + ":{" + lsp_q("uri") + ":" + lsp_q(uri) + "}," + lsp_q("position") + ":{" + lsp_q("line") + ":" + str.from_int(line) + "," + lsp_q("character") + ":" + str.from_int(char) + "}}}"
+
+// The JSON-RPC `id` of a message, or -1 for a notification (no id).
+fn lsp_msg_id(msg: Str) -> Int
+    match json.parse(msg)
+        None => 0 - 1
+        Some(doc) => json.get_int(doc, "id") ?? (0 - 1)
+
+// Bounded pump: read framed messages until the response with `want_id` arrives
+// or the deadline (iters × 50 ms) lapses.  Returns the matching body, or "".
+// Diagnostics that land meanwhile are dropped — gd/K don't change the buffer,
+// so the server has no fresh diagnostics to send during the pump.
+fn lsp_pump(out_fd: Int, want_id: Int, iters: Int) -> Str [io, time]
+    var got = ""
+    var i = 0
+    while i < iters and str.len(got) == 0
+        let msg = lsp_poll_message(out_fd, 50)
+        if str.len(msg) > 0 and lsp_msg_id(msg) == want_id
+            got = msg
+        i = i + 1
+    got
+
+// ── definition: result is a Location (or Location[]); pull start pos + uri ──
+fn lsp_loc_pos(loc: JsonValueH) -> [Int]
+    match json.get(loc, "range")
+        None => []
+        Some(rng) =>
+            match json.get(rng, "start")
+                None => []
+                Some(st) =>
+                    let ln = json.get_int(st, "line") ?? (0 - 1)
+                    let ch = json.get_int(st, "character") ?? (0 - 1)
+                    [ln, ch]
+
+fn lsp_loc_uri(loc: JsonValueH) -> Str
+    json.get_str(loc, "uri") ?? ""
+
+fn lsp_def_pos_obj(doc: JsonValueH) -> [Int]
+    match json.get(doc, "result")
+        None => []
+        Some(loc) => lsp_loc_pos(loc)
+
+fn lsp_def_pos_arr(locs: [JsonValueH]) -> [Int]
+    if list.len(locs) == 0 then [] else lsp_loc_pos(locs[0])
+
+fn lsp_def_pos_doc(doc: JsonValueH) -> [Int]
+    match json.get_list(doc, "result")
+        None => lsp_def_pos_obj(doc)
+        Some(locs) => lsp_def_pos_arr(locs)
+
+// [line, character] of the definition target, or [] when there is none.
+fn lsp_def_pos(msg: Str) -> [Int]
+    match json.parse(msg)
+        None => []
+        Some(doc) => lsp_def_pos_doc(doc)
+
+fn lsp_def_uri_obj(doc: JsonValueH) -> Str
+    match json.get(doc, "result")
+        None => ""
+        Some(loc) => lsp_loc_uri(loc)
+
+fn lsp_def_uri_arr(locs: [JsonValueH]) -> Str
+    if list.len(locs) == 0 then "" else lsp_loc_uri(locs[0])
+
+fn lsp_def_uri_doc(doc: JsonValueH) -> Str
+    match json.get_list(doc, "result")
+        None => lsp_def_uri_obj(doc)
+        Some(locs) => lsp_def_uri_arr(locs)
+
+// The definition target's document URI, or "".
+fn lsp_def_uri(msg: Str) -> Str
+    match json.parse(msg)
+        None => ""
+        Some(doc) => lsp_def_uri_doc(doc)
+
+// ── hover: result.contents is a MarkupContent { value } (markdown) ──
+fn lsp_hover_of_result(res: JsonValueH) -> Str
+    match json.get(res, "contents")
+        None => ""
+        Some(cont) =>
+            let v = json.get_str(cont, "value") ?? ""
+            v
+
+fn lsp_hover_doc(doc: JsonValueH) -> Str
+    match json.get(doc, "result")
+        None => ""
+        Some(res) => lsp_hover_of_result(res)
+
+fn lsp_hover_text(msg: Str) -> Str
+    match json.parse(msg)
+        None => ""
+        Some(doc) => lsp_hover_doc(doc)
+
+// True when `s` opens a markdown code fence (```).
+fn starts_with_fence(s: Str) -> Bool
+    str.len(s) >= 3 and (str.byte_at(s, 0) ?? 0) == 0x60 and (str.byte_at(s, 1) ?? 0) == 0x60 and (str.byte_at(s, 2) ?? 0) == 0x60
+
+// First meaningful line of a hover markdown blob (skipping ``` fences and
+// blank lines) — the one line that fits the status bar.
+fn hover_oneline(s: Str) -> Str
+    var i = 0
+    let n = str.len(s)
+    var line = ""
+    var out = ""
+    var done = false
+    while i < n and not done
+        let b = str.byte_at(s, i) ?? 0
+        if b == 10
+            if str.len(line) > 0 and not starts_with_fence(line)
+                out = line
+                done = true
+            line = ""
+        else
+            line = line + str.from_char(b)
+        i = i + 1
+    if not done and str.len(line) > 0 and not starts_with_fence(line)
+        out = line
+    out
 
 // `--lsp-diag <file>`: spawn novols, open the file, print its diagnostics.
 // Deterministic transport smoke test for Phase A.
