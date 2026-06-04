@@ -114,6 +114,15 @@ fn first_nonblank(line: Str) -> Int
         i = i + 1
     0
 
+// The leading whitespace (tabs + spaces) of a line, for auto-indent.  Returns
+// the whole line when it is blank.
+fn leading_ws(line: Str) -> Str
+    let n = str.len(line)
+    var i = 0
+    while i < n and ((str.byte_at(line, i) ?? 0) == 32 or (str.byte_at(line, i) ?? 0) == 9)
+        i = i + 1
+    str.slice(line, 0, i)
+
 // One h/j/k/l step (clamped).
 fn motion_hjkl(ed: Editor, b: Int) -> Editor
     if b == 0x68          // 'h' — left
@@ -337,22 +346,27 @@ fn insert_char(ed: Editor, b: Int) -> Editor
     let merged = before + str.from_char(b) + after
     Editor { lines: set_line(ed.lines, ed.cy, merged), cy: ed.cy, cx: ed.cx + 1 }
 
-// Split the current line at the cursor (Enter in insert mode).
+// Split the current line at the cursor (Enter in insert mode).  Auto-indent:
+// the new line inherits the current line's leading whitespace and the cursor
+// lands just past it.
 fn insert_newline(ed: Editor) -> Editor
     let line = line_at(ed, ed.cy)
     let before = str.slice(line, 0, ed.cx)
     let after = str.slice(line, ed.cx, str.len(line))
+    let indent = leading_ws(line)
+    let ilen = str.len(indent)            // snapshot before the concat (see bugs/codegen-llvm)
+    let newafter = indent + after
     var ls: [Str] = []
     let mut i = 0
     let n = list.len(ed.lines)
     while i < n
         if i == ed.cy
             ls = list.append(ls, [before])
-            ls = list.append(ls, [after])
+            ls = list.append(ls, [newafter])
         else
             ls = list.append(ls, [ed.lines[i]])
         i = i + 1
-    Editor { lines: ls, cy: ed.cy + 1, cx: 0 }
+    Editor { lines: ls, cy: ed.cy + 1, cx: ilen }
 
 // Backspace: delete the glyph before the cursor, or join with the line
 // above when at column 0.
@@ -381,20 +395,23 @@ fn backspace(ed: Editor) -> Editor
     else
         ed
 
-// Open a fresh empty line below (`o`) or above (`O`) and enter it.
+// Open a fresh line below (`o`) or above (`O`) and enter it.  Auto-indent: the
+// new line inherits the current line's leading whitespace; the cursor lands
+// just past it so typing begins at the matching indent.
 fn open_line(ed: Editor, below: Bool) -> Editor
     let at = if below then ed.cy + 1 else ed.cy
+    let indent = leading_ws(line_at(ed, ed.cy))
     var ls: [Str] = []
     let mut i = 0
     let n = list.len(ed.lines)
     while i < n
         if i == at
-            ls = list.append(ls, [""])
+            ls = list.append(ls, [indent])
         ls = list.append(ls, [ed.lines[i]])
         i = i + 1
     if at >= n          // opening below the last line
-        ls = list.append(ls, [""])
-    Editor { lines: ls, cy: at, cx: 0 }
+        ls = list.append(ls, [indent])
+    Editor { lines: ls, cy: at, cx: str.len(indent) }
 
 // Delete the glyph under the cursor (`x`); cursor clamps onto the new
 // last glyph if it ran off the end.
