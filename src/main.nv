@@ -2342,6 +2342,7 @@ fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
     var cmd_buf = ""
     var search_mode = false
     var search_buf = ""
+    var search_back = false
     var quit = false
     let n = str.len(decoded)
     let mut i = 0
@@ -2374,7 +2375,7 @@ fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
         elif search_mode
             if b == 13 or b == 10            // Enter — run the search
                 st = ist_set_search(st, search_buf)
-                ed = find_next(ed, search_buf, true)
+                ed = find_next(ed, search_buf, not search_back)
                 search_mode = false
                 search_buf = ""
             elif b == 27                     // Esc — cancel
@@ -2388,9 +2389,14 @@ fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
         elif b == 58 and st.mode == 0        // ':' — open the Ex line
             cmd_mode = true
             cmd_buf = ""
-        elif b == 47 and st.mode == 0        // '/' — open the search line
+        elif b == 47 and st.mode == 0        // '/' — search forward
             search_mode = true
             search_buf = ""
+            search_back = false
+        elif b == 63 and st.mode == 0        // '?' — search backward
+            search_mode = true
+            search_buf = ""
+            search_back = true
         else
             let estep = feed_edit(ed, st, km, es, b)
             ed = estep.ed
@@ -2629,6 +2635,7 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
     var cmd_buf = ""
     var search_mode = false
     var search_buf = ""
+    var search_back = false
     clear_screen()       // one-time clear of whatever was on screen before
     left = hscroll_for(left, ed, opts, cols)
     render(ed, rows, cols, path, top, left, st.mode, st.avy, st.avx, cs, opts)
@@ -2672,7 +2679,7 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                 elif search_mode
                     if b == 13 or b == 10
                         st = ist_set_search(st, search_buf)
-                        ed = find_next(ed, search_buf, true)
+                        ed = find_next(ed, search_buf, not search_back)
                         search_mode = false
                         search_buf = ""
                     elif b == 27
@@ -2686,9 +2693,14 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                 elif b == 58 and st.mode == 0        // ':' — open the Ex line
                     cmd_mode = true
                     cmd_buf = ""
-                elif b == 47 and st.mode == 0        // '/' — open the search line
+                elif b == 47 and st.mode == 0        // '/' — search forward
                     search_mode = true
                     search_buf = ""
+                    search_back = false
+                elif b == 63 and st.mode == 0        // '?' — search backward
+                    search_mode = true
+                    search_buf = ""
+                    search_back = true
                 else
                     let estep = feed_edit(ed, st, km, es, b)
                     ed = estep.ed
