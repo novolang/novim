@@ -1604,6 +1604,49 @@ fn ex_substitute(ed: Editor, cmd: Str) -> Editor
     else
         clamp(Editor { lines: set_line(ed.lines, ed.cy, replace_in_line(line_at(ed, ed.cy), pat, repl, global)), cy: ed.cy, cx: 0 })
 
+// ── :g / :v global delete (slice 30) ────────────────────────────────────
+// `:g/pat/d` deletes every line containing `pat`; `:v/pat/d` (or `:g!/pat/d`)
+// deletes every line NOT containing it.  Only the `d` command is supported.
+
+fn is_global(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    let n = str.len(c)
+    let c0 = if n > 0 then str.byte_at(c, 0) ?? 0 else 0
+    if n >= 2 and (c0 == 0x67 or c0 == 0x76)                    // g or v
+        let p = if c0 == 0x67 and (str.byte_at(c, 1) ?? 0) == 0x21 then 2 else 1   // g!
+        if p < n then char_class_of(str.byte_at(c, p) ?? 0) == 2 else false
+    else
+        false
+
+fn ex_global(ed: Editor, cmd: Str) -> Editor
+    let c = str.trim(cmd)
+    let c0 = str.byte_at(c, 0) ?? 0
+    let bang = c0 == 0x67 and (str.byte_at(c, 1) ?? 0) == 0x21
+    let invert = c0 == 0x76 or bang                            // v / g! → keep matching
+    let p = if bang then 2 else 1
+    let delim = str.byte_at(c, p) ?? 0
+    let body = str.slice(c, p + 1, str.len(c))
+    let d1 = index_of_byte(body, delim)
+    let pat = if d1 < 0 then body else str.slice(body, 0, d1)
+    let cmdpart = if d1 < 0 then "" else str.trim(str.slice(body, d1 + 1, str.len(body)))
+    if cmdpart != "d" or str.len(pat) == 0
+        return ed                                             // only :…/d supported
+    var ls: [Str] = []
+    let total = list.len(ed.lines)
+    let mut i = 0
+    while i < total
+        let matches = find_in_line(ed.lines[i], pat, 0) >= 0
+        let keep = if invert then matches else not matches
+        if keep
+            ls = list.append(ls, [ed.lines[i]])
+        i = i + 1
+    if list.len(ls) == 0
+        ls = list.append(ls, [""])                            // buffer keeps one line
+    var ncy = ed.cy
+    if ncy >= list.len(ls)
+        ncy = list.len(ls) - 1
+    clamp(Editor { lines: ls, cy: ncy, cx: 0 })
+
 // Serialise the line buffer to file text (one trailing newline per line).
 fn buf_to_str(lines: [Str]) -> Str
     var s = ""
@@ -2278,6 +2321,9 @@ fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
                 if is_substitute(cmd_buf)
                     es = edit_push_undo(es, ed)
                     ed = ex_substitute(ed, cmd_buf)
+                elif is_global(cmd_buf)
+                    es = edit_push_undo(es, ed)
+                    ed = ex_global(ed, cmd_buf)
                 else
                     let r = exec_ex(cmd_buf)
                     if r.save
@@ -2567,6 +2613,9 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                         if is_substitute(cmd_buf)
                             es = edit_push_undo(es, ed)
                             ed = ex_substitute(ed, cmd_buf)
+                        elif is_global(cmd_buf)
+                            es = edit_push_undo(es, ed)
+                            ed = ex_global(ed, cmd_buf)
                         else
                             let r = exec_ex(cmd_buf)
                             if r.save
