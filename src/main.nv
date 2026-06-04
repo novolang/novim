@@ -696,6 +696,14 @@ fn scan_match_bwd(ed: Editor, sy: Int, sx: Int, open_ch: Int, close_ch: Int) -> 
             x = str.len(line_at(ed, y)) - 1
     ed
 
+// The (inner) word under the cursor, for `*` / `#`.
+fn word_under_cursor(ed: Editor) -> Str
+    let to = textobj_word(ed, false)
+    if to.ok and to.vr.sy == to.vr.ey
+        str.slice(line_at(ed, to.vr.sy), to.vr.sx, to.vr.ex + 1)
+    else
+        ""
+
 // `%` — jump to the bracket matching the one at/after the cursor on the line.
 fn match_pair(ed: Editor) -> Editor
     let line = line_at(ed, ed.cy)
@@ -1417,6 +1425,11 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
         return Step { ed: find_next(ed, st.search, true), st: ist_done(st) }
     if b == 0x4E                       // 'N' — repeat search backward
         return Step { ed: find_next(ed, st.search, false), st: ist_done(st) }
+    if b == 0x2A or b == 0x23          // '*' / '#' — search the word under the cursor
+        let w = word_under_cursor(ed)
+        if str.len(w) == 0
+            return Step { ed: ed, st: ist_done(st) }
+        return Step { ed: find_next(ed, w, b == 0x2A), st: ist_set_search(st, w) }
     if b == 0x47                       // 'G' — go to line (count or last)
         let tgt = if st.count > 0 then st.count - 1 else list.len(ed.lines) - 1
         return Step { ed: clamp(Editor { lines: ed.lines, cy: tgt, cx: ed.cx }), st: ist_done(st) }
