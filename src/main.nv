@@ -1985,6 +1985,9 @@ struct EditState
     reglw:    [Bool]       // named registers a-z: linewise flag
     rreg:     Int          // register selected for the current command (0 = none, 1-26 = a-z)
     awaitreg: Bool         // true after `"`, awaiting the register letter
+    marky:    [Int]        // marks a-z (slice 28): line (-1 = unset)
+    markx:    [Int]        // marks a-z: column
+    awaitmark: Int         // 0 none, 1 set (m), 2 jump-exact (`), 3 jump-line (')
 
 struct EditStep
     ed: Editor
@@ -2047,13 +2050,34 @@ fn set_bool_at(xs: [Bool], idx: Int, v: Bool) -> [Bool]
         i = i + 1
     out
 
+// 26 unset marks (a-z), value -1.
+fn marks_empty() -> [Int]
+    var x: [Int] = []
+    let mut i = 0
+    while i < 26
+        x = list.append(x, [0 - 1])
+        i = i + 1
+    x
+
+fn set_int_at(xs: [Int], idx: Int, v: Int) -> [Int]
+    var out: [Int] = []
+    let n = list.len(xs)
+    let mut i = 0
+    while i < n
+        if i == idx
+            out = list.append(out, [v])
+        else
+            out = list.append(out, [xs[i]])
+        i = i + 1
+    out
+
 fn edit_new() -> EditState
-    EditState { last: "", cur: "", snaptxt: "", active: false, snaped: snap_empty(), undos: snaps_empty(), redos: snaps_empty(), regs: regs_empty(), reglw: reglw_empty(), rreg: 0, awaitreg: false }
+    EditState { last: "", cur: "", snaptxt: "", active: false, snaped: snap_empty(), undos: snaps_empty(), redos: snaps_empty(), regs: regs_empty(), reglw: reglw_empty(), rreg: 0, awaitreg: false, marky: marks_empty(), markx: marks_empty(), awaitmark: 0 }
 
 // Push a manual undo snapshot (for buffer-changing Ex commands like :s, which
 // run in the driver outside the feed/feed_edit recording path) and clear redo.
 fn edit_push_undo(es: EditState, ed: Editor) -> EditState
-    EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: list.append(es.undos, [snap_of(ed)]), redos: snaps_empty(), regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg }
+    EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: list.append(es.undos, [snap_of(ed)]), redos: snaps_empty(), regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark }
 
 // First `k` snapshots of `xs` (the stack minus its top).
 fn take_snaps(xs: [Snapshot], k: Int) -> [Snapshot]
@@ -2067,7 +2091,7 @@ fn take_snaps(xs: [Snapshot], k: Int) -> [Snapshot]
 // Begin recording a command: snapshot the buffer text (for change detection)
 // and the full editor (for undo).
 fn edit_start(es: EditState, ed: Editor) -> EditState
-    EditState { last: es.last, cur: "", snaptxt: buf_text(ed), active: true, snaped: snap_of(ed), undos: es.undos, redos: es.redos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg }
+    EditState { last: es.last, cur: "", snaptxt: buf_text(ed), active: true, snaped: snap_of(ed), undos: es.undos, redos: es.redos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark }
 
 // Feed one byte mid/within a tracked command; on completion record the dot
 // `last` and push the pre-change snapshot onto the undo stack if it changed.
@@ -2082,7 +2106,7 @@ fn edit_record(ed: Editor, st: InputState, km: Keymap, es: EditState, b: Int) ->
     let newsnaptxt = if done then "" else es.snaptxt
     let newundos   = if push then list.append(es.undos, [es.snaped]) else es.undos
     let newredos   = if push then snaps_empty() else es.redos
-    EditStep { ed: step.ed, st: s2, es: EditState { last: newlast, cur: newcur, snaptxt: newsnaptxt, active: not done, snaped: es.snaped, undos: newundos, redos: newredos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg } }
+    EditStep { ed: step.ed, st: s2, es: EditState { last: newlast, cur: newcur, snaptxt: newsnaptxt, active: not done, snaped: es.snaped, undos: newundos, redos: newredos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark } }
 
 // Untracked byte (pure motion / navigation): feed without touching dot/undo.
 fn edit_pass(ed: Editor, st: InputState, km: Keymap, es: EditState, b: Int) -> EditStep
@@ -2097,7 +2121,7 @@ fn edit_undo(ed: Editor, st: InputState, es: EditState) -> EditStep
     let undos2 = if can then take_snaps(es.undos, nu - 1) else es.undos
     let redos2 = if can then list.append(es.redos, [snap_of(ed)]) else es.redos
     let nede = if can then clamp(Editor { lines: snap.lines, cy: snap.cy, cx: snap.cx }) else ed
-    EditStep { ed: nede, st: ist_done(st), es: EditState { last: es.last, cur: "", snaptxt: "", active: false, snaped: es.snaped, undos: undos2, redos: redos2, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg } }
+    EditStep { ed: nede, st: ist_done(st), es: EditState { last: es.last, cur: "", snaptxt: "", active: false, snaped: es.snaped, undos: undos2, redos: redos2, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark } }
 
 // Ctrl-R — pop the redo stack onto the undo stack and restore the buffer.
 fn edit_redo(ed: Editor, st: InputState, es: EditState) -> EditStep
@@ -2107,7 +2131,7 @@ fn edit_redo(ed: Editor, st: InputState, es: EditState) -> EditStep
     let redos2 = if can then take_snaps(es.redos, nr - 1) else es.redos
     let undos2 = if can then list.append(es.undos, [snap_of(ed)]) else es.undos
     let nede = if can then clamp(Editor { lines: snap.lines, cy: snap.cy, cx: snap.cx }) else ed
-    EditStep { ed: nede, st: ist_done(st), es: EditState { last: es.last, cur: "", snaptxt: "", active: false, snaped: es.snaped, undos: undos2, redos: redos2, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg } }
+    EditStep { ed: nede, st: ist_done(st), es: EditState { last: es.last, cur: "", snaptxt: "", active: false, snaped: es.snaped, undos: undos2, redos: redos2, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark } }
 
 // `.` — replay the last change `count` times; it is itself an undoable change,
 // so snapshot the pre-replay buffer and push it on the undo stack if it changed.
@@ -2126,7 +2150,7 @@ fn edit_dot(ed: Editor, st: InputState, km: Keymap, es: EditState) -> EditStep
     let push = buf_text(e) != pretxt
     let newundos = if push then list.append(es.undos, [presnap]) else es.undos
     let newredos = if push then snaps_empty() else es.redos
-    EditStep { ed: e, st: s, es: EditState { last: es.last, cur: "", snaptxt: "", active: false, snaped: es.snaped, undos: newundos, redos: newredos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg } }
+    EditStep { ed: e, st: s, es: EditState { last: es.last, cur: "", snaptxt: "", active: false, snaped: es.snaped, undos: newundos, redos: newredos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark } }
 
 // Drive one input byte with dot-repeat + undo/redo around feed_mapped.
 // feed_edit only ever early-returns the result of a HELPER call (safe), and
@@ -2153,7 +2177,7 @@ fn feed_edit_inner(ed: Editor, st: InputState, km: Keymap, es: EditState, b: Int
 
 // Begin a `"` register prefix — await the register letter.
 fn edit_await_reg(ed: Editor, st: InputState, es: EditState) -> EditStep
-    EditStep { ed: ed, st: st, es: EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: true } }
+    EditStep { ed: ed, st: st, es: EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: true, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark } }
 
 // The byte after `"`: a-z selects that register (loaded into the unnamed
 // register for reads); anything else cancels.
@@ -2161,9 +2185,9 @@ fn edit_select_reg(ed: Editor, st: InputState, es: EditState, b: Int) -> EditSte
     if b >= 0x61 and b <= 0x7A
         let idx = b - 0x61
         let loaded = InputState { count: st.count, pending: st.pending, mode: st.mode, reg: es.regs[idx], reg_lw: es.reglw[idx], search: st.search, avy: st.avy, avx: st.avx }
-        EditStep { ed: ed, st: loaded, es: EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: es.regs, reglw: es.reglw, rreg: idx + 1, awaitreg: false } }
+        EditStep { ed: ed, st: loaded, es: EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: es.regs, reglw: es.reglw, rreg: idx + 1, awaitreg: false, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark } }
     else
-        EditStep { ed: ed, st: st, es: EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: false } }
+        EditStep { ed: ed, st: st, es: EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: false, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark } }
 
 // After a command completes with a register selected, persist the unnamed
 // register into the named slot, then clear the selection.
@@ -2172,11 +2196,38 @@ fn edit_persist_reg(step: EditStep) -> EditStep
         let idx = step.es.rreg - 1
         let regs2 = set_str_at(step.es.regs, idx, step.st.reg)
         let lw2 = set_bool_at(step.es.reglw, idx, step.st.reg_lw)
-        EditStep { ed: step.ed, st: step.st, es: EditState { last: step.es.last, cur: step.es.cur, snaptxt: step.es.snaptxt, active: step.es.active, snaped: step.es.snaped, undos: step.es.undos, redos: step.es.redos, regs: regs2, reglw: lw2, rreg: 0, awaitreg: step.es.awaitreg } }
+        EditStep { ed: step.ed, st: step.st, es: EditState { last: step.es.last, cur: step.es.cur, snaptxt: step.es.snaptxt, active: step.es.active, snaped: step.es.snaped, undos: step.es.undos, redos: step.es.redos, regs: regs2, reglw: lw2, rreg: 0, awaitreg: step.es.awaitreg, marky: step.es.marky, markx: step.es.markx, awaitmark: step.es.awaitmark } }
     else
         step
 
+// ── Marks (slice 28): m<a-z> set, `<a-z> jump exact, '<a-z> jump line ────────
+
+// Begin a mark prefix (op: 1 set, 2 jump-exact, 3 jump-line).
+fn edit_await_mark(ed: Editor, st: InputState, es: EditState, op: Int) -> EditStep
+    EditStep { ed: ed, st: st, es: EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: op } }
+
+// The mark letter after m / ` / ' — set or jump.
+fn edit_mark_op(ed: Editor, st: InputState, es: EditState, b: Int) -> EditStep
+    if b >= 0x61 and b <= 0x7A
+        let idx = b - 0x61
+        if es.awaitmark == 1                                    // set mark at cursor
+            EditStep { ed: ed, st: st, es: EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: set_int_at(es.marky, idx, ed.cy), markx: set_int_at(es.markx, idx, ed.cx), awaitmark: 0 } }
+        else                                                    // jump to mark
+            let ly = es.marky[idx]
+            let nede = if ly < 0 then ed elif es.awaitmark == 2 then clamp(Editor { lines: ed.lines, cy: ly, cx: es.markx[idx] }) else clamp(Editor { lines: ed.lines, cy: ly, cx: first_nonblank(line_at(ed, ly)) })
+            EditStep { ed: nede, st: st, es: EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: 0 } }
+    else
+        EditStep { ed: ed, st: st, es: EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: 0 } }
+
 fn feed_edit(ed: Editor, st: InputState, km: Keymap, es: EditState, b: Int) -> EditStep
+    if es.awaitmark != 0                                        // byte after m / ` / '
+        return edit_mark_op(ed, st, es, b)
+    if st.mode == 0 and st.pending == 0 and b == 0x6D           // 'm' — set mark
+        return edit_await_mark(ed, st, es, 1)
+    if st.mode == 0 and st.pending == 0 and b == 0x60           // ` — jump to mark (exact)
+        return edit_await_mark(ed, st, es, 2)
+    if st.mode == 0 and st.pending == 0 and b == 0x27           // ' — jump to mark (line)
+        return edit_await_mark(ed, st, es, 3)
     if es.awaitreg                                              // byte after `"`
         return edit_select_reg(ed, st, es, b)
     if st.mode == 0 and st.pending == 0 and b == 0x22           // `"` — register prefix
