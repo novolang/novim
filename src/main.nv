@@ -638,6 +638,23 @@ fn op_indent(ed: Editor, st: InputState, n: Int, right: Bool) -> Step
     let fnb = first_nonblank(if ed.cy < list.len(ls) then ls[ed.cy] else "")
     Step { ed: clamp(Editor { lines: ls, cy: ed.cy, cx: fnb }), st: ist_done(st) }
 
+// Indent/dedent the line range [lo, hi] (used by `>`/`<` over a motion).
+fn op_indent_lines(ed: Editor, st: InputState, lo: Int, hi: Int, right: Bool) -> Step
+    op_indent(Editor { lines: ed.lines, cy: lo, cx: 0 }, st, hi - lo + 1, right)
+
+// Second key of a `>` / `<` operator: doubled → line(s), a linewise motion →
+// that line range (slice 37).
+fn feed_indent(ed: Editor, st: InputState, right: Bool, b: Int) -> Step
+    let trigger = if right then 0x3E else 0x3C
+    if b == trigger                              // >> / <<
+        return op_indent(ed, st, if st.count > 0 then st.count else 1, right)
+    let tgt = motion_target(ed, b, st.count)
+    if tgt.ok and tgt.linewise
+        let lo = if ed.cy < tgt.ty then ed.cy else tgt.ty
+        let hi = if ed.cy < tgt.ty then tgt.ty else ed.cy
+        return op_indent_lines(ed, st, lo, hi, right)
+    feed(ed, ist_clear_pending(st), b)           // not a linewise motion — cancel
+
 // ── Find-char motions f/F/t/T (slice 17) ───────────────────────────────
 
 // Index of the `count`-th `ch` strictly after `from` in `line`, or -1.
@@ -1487,14 +1504,10 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
         if b == 27                     // Esc cancels the replace
             return Step { ed: ed, st: ist_done(st) }
         return Step { ed: op_replace_char(ed, b, if st.count > 0 then st.count else 1), st: ist_done(st) }
-    if st.pending == 5                 // `>>` — indent right
-        if b == 0x3E
-            return op_indent(ed, st, if st.count > 0 then st.count else 1, true)
-        return feed(ed, ist_clear_pending(st), b)
-    if st.pending == 6                 // `<<` — indent left
-        if b == 0x3C
-            return op_indent(ed, st, if st.count > 0 then st.count else 1, false)
-        return feed(ed, ist_clear_pending(st), b)
+    if st.pending == 5                 // `>` — indent right (>> or >motion)
+        return feed_indent(ed, st, true, b)
+    if st.pending == 6                 // `<` — indent left (<< or <motion)
+        return feed_indent(ed, st, false, b)
     // Find-char motions (slice 17): pending 8=f 9=F 10=t 11=T await the target.
     if st.pending == 8                 // f<char>
         if b == 27
