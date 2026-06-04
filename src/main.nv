@@ -1401,6 +1401,36 @@ fn case_line_span(ed: Editor, st: InputState, kind: Int, lo: Int, hi: Int) -> St
         i = i + 1
     Step { ed: clamp(Editor { lines: ls, cy: if lo < 0 then 0 else lo, cx: 0 }), st: ist_done(st) }
 
+// Apply a case map over a CHARWISE range `vr` (may span lines), like visual_case.
+fn case_char_vr(ed: Editor, vr: VRange, kind: Int) -> [Str]
+    let total = list.len(ed.lines)
+    var ls: [Str] = []
+    let mut i = 0
+    while i < total
+        if i >= vr.sy and i <= vr.ey
+            let line = ed.lines[i]
+            let lo = if i == vr.sy then vr.sx else 0
+            let hi = if i == vr.ey then vr.ex + 1 else str.len(line)
+            ls = list.append(ls, [case_line_range(line, lo, hi, kind)])
+        else
+            ls = list.append(ls, [ed.lines[i]])
+        i = i + 1
+    ls
+
+// gu/gU/g~ over a text object (giw / gUi" / g~ip, ...).
+fn apply_case_textobj(ed: Editor, st: InputState, kind: Int, obj: Int, around: Bool) -> Step
+    let to = text_object(ed, obj, around)
+    if not to.ok
+        return Step { ed: ed, st: ist_done(st) }
+    let vsy = to.vr.sy
+    let vsx = to.vr.sx
+    let vey = to.vr.ey
+    let vex = to.vr.ex
+    if to.linewise
+        return case_line_span(ed, st, kind, vsy, vey)
+    let ls = case_char_vr(ed, VRange { sy: vsy, sx: vsx, ey: vey, ex: vex }, kind)
+    Step { ed: clamp(Editor { lines: ls, cy: vsy, cx: vsx }), st: ist_done(st) }
+
 // The second part of a gu/gU/g~ command (pcode keeps the operator pending
 // across a count).  Doubled (guu/gUU/g~~) → line; a charwise motion → that
 // span; a linewise motion → those lines.
@@ -1413,6 +1443,10 @@ fn feed_case(ed: Editor, st: InputState, kind: Int, pcode: Int, b: Int) -> Step
         return Step { ed: ed, st: InputState { count: st.count * 10 + (b - 0x30), pending: pcode, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
     if b == 0x30 and st.count > 0
         return Step { ed: ed, st: InputState { count: st.count * 10, pending: pcode, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
+    if b == 0x69                                 // i — inner text object (pending 53/55/57)
+        return Step { ed: ed, st: InputState { count: st.count, pending: 53 + kind * 2 + 0, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
+    if b == 0x61                                 // a — around text object (pending 54/56/58)
+        return Step { ed: ed, st: InputState { count: st.count, pending: 53 + kind * 2 + 1, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
     let tgt = motion_target(ed, b, st.count)
     if tgt.ok and tgt.linewise
         let lo = if ed.cy < tgt.ty then ed.cy else tgt.ty
@@ -1599,6 +1633,11 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
         return feed_case(ed, st, 1, 51, b)
     if st.pending == 52                // gU<motion> — uppercase
         return feed_case(ed, st, 2, 52, b)
+    if st.pending >= 53 and st.pending <= 58   // g~/gu/gU + text object; byte = object char
+        let code = st.pending - 53
+        let ckind = code / 2
+        let around = (code - ckind * 2) == 1
+        return apply_case_textobj(ed, st, ckind, b, around)
     if st.pending == 2                 // `d` — operator awaiting a motion (or dd)
         return feed_operator(ed, st, 0x64, 2, b)
     if st.pending == 3                 // `y` — operator awaiting a motion (or yy)
