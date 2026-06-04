@@ -2206,10 +2206,11 @@ fn status_sgr(cs: Colorscheme) -> Str
 struct Options
     number:         Bool
     relativenumber: Bool
+    hlsearch:       Bool
     tabstop:        Int
 
 fn options_default() -> Options
-    Options { number: false, relativenumber: false, tabstop: 8 }
+    Options { number: false, relativenumber: false, hlsearch: true, tabstop: 8 }
 
 fn parse_bool_val(s: Str) -> Bool
     str.trim(strip_quotes(str.trim(s))) == "true"
@@ -2220,6 +2221,7 @@ fn load_options(cfg_path: Str) -> Options [io]
         Some(content) =>
             var number = false
             var relativenumber = false
+            var hlsearch = true
             var tabstop = 8
             let lines = str.split_lines(content)
             var in_opt = false
@@ -2239,12 +2241,14 @@ fn load_options(cfg_path: Str) -> Options [io]
                                 number = parse_bool_val(valr)
                             elif key == "relativenumber" or key == "rnu"
                                 relativenumber = parse_bool_val(valr)
+                            elif key == "hlsearch" or key == "hls"
+                                hlsearch = parse_bool_val(valr)
                             elif key == "tabstop"
                                 let tv = parse_color_val(valr)
                                 if tv > 0
                                     tabstop = tv
                 i = i + 1
-            Options { number: number, relativenumber: relativenumber, tabstop: tabstop }
+            Options { number: number, relativenumber: relativenumber, hlsearch: hlsearch, tabstop: tabstop }
 
 // Right-align `n` in a `width`-char field (space-padded).
 fn pad_num(n: Int, width: Int) -> Str
@@ -2554,6 +2558,22 @@ fn re_find_in_line(atoms: [ReAtom], line: Str, from: Int) -> Int
             return i
         i = i + 1
     0 - 1
+
+// Byte ranges of every non-overlapping match on `line`, as a flat list
+// [start0, end0, start1, end1, …] (for search highlighting).
+fn re_match_ranges(atoms: [ReAtom], line: Str) -> [Int]
+    var out: [Int] = []
+    let n = str.len(line)
+    var i = 0
+    while i <= n
+        let e = re_match_here(atoms, 0, line, i, caps_empty()).end
+        if e > i
+            out = list.append(out, [i])
+            out = list.append(out, [e])
+            i = e                    // non-overlapping: skip past this match
+        else
+            i = i + 1
+    out
 
 // Last match start strictly before `before` (before < 0 → whole line).
 fn re_find_last_in_line(atoms: [ReAtom], line: Str, before: Int) -> Int
@@ -3427,11 +3447,56 @@ fn emit_line_hl(expanded: Str, left: Int, width: Int, vlo: Int, vhi: Int) [io]
     if insel
         sgr("0")
 
-fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, cs: Colorscheme, opts: Options) [io]
+// Is visual column `c` inside any [start,end) range of the flat list `sr`?
+fn col_in_ranges(sr: [Int], c: Int) -> Bool
+    var k = 0
+    let m = list.len(sr)
+    while k + 1 < m
+        if c >= sr[k] and c < sr[k + 1]
+            return true
+        k = k + 2
+    false
+
+// Convert a regex match's byte ranges on `raw` to visual-column ranges.
+fn search_vis_ranges(atoms: [ReAtom], raw: Str, ts: Int) -> [Int]
+    let br = re_match_ranges(atoms, raw)
+    var out: [Int] = []
+    var k = 0
+    let m = list.len(br)
+    while k + 1 < m
+        out = list.append(out, [vis_col(raw, br[k], ts)])
+        out = list.append(out, [vis_col(raw, br[k + 1], ts)])
+        k = k + 2
+    out
+
+// Like emit_line_hl but also paints search matches (`sr` = flat visual ranges)
+// with `scol`.  Selection (reverse) wins over a search match on the same column.
+fn emit_line_search(expanded: Str, left: Int, width: Int, vlo: Int, vhi: Int, sr: [Int], scol: Str) [io]
+    let elen = str.len(expanded)
+    let endc = if left + width < elen then left + width else elen
+    var c = left
+    var cur = 0                      // 0 none, 1 selection, 2 search
+    while c < endc
+        let want = if c >= vlo and c < vhi then 1 elif col_in_ranges(sr, c) then 2 else 0
+        if want != cur
+            sgr("0")
+            if want == 1
+                sgr("7")
+            elif want == 2
+                sgr(scol)
+            cur = want
+        emit_byte(str.byte_at(expanded, c) ?? 32)
+        c = c + 1
+    if cur != 0
+        sgr("0")
+
+fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options) [io]
     csi()
     emit("?25l")         // hide cursor while we repaint
     let body = rows - 1
     let nl = list.len(ed.lines)
+    let dohl = opts.hlsearch and str.len(search) > 0     // search highlighting
+    let satoms = if dohl then re_compile(search) else []
     let numbered = opts.number or opts.relativenumber
     let gutter = if numbered then 4 else 0          // "NNN " line-number column
     let width = if cols - gutter > 0 then cols - gutter else 1   // text area width
@@ -3472,7 +3537,8 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode
                     let bhi = if li == sey then sex + 1 else str.len(raw)
                     vlo = vis_col(raw, blo, opts.tabstop)
                     vhi = vis_col(raw, bhi, opts.tabstop)
-            emit_line_hl(expanded, left, width, vlo, vhi)
+            let sr = if dohl then search_vis_ranges(satoms, raw, opts.tabstop) else []
+            emit_line_search(expanded, left, width, vlo, vhi, sr, "30;43")
         elif cs.tilde_fg >= 0
             sgr("38;5;" + str.from_int(cs.tilde_fg))
             emit("~")
@@ -3630,7 +3696,7 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
     var last_subst = ""                  // last :s command, for `&`
     clear_screen()       // one-time clear of whatever was on screen before
     left = hscroll_for(left, ed, opts, cols)
-    render(ed, rows, cols, path, top, left, st.mode, st.avy, st.avx, cs, opts)
+    render(ed, rows, cols, path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts)
     var running = true
     while running
         let m = novo_pty_poll_h(0, 100)      // poll host stdin (fd 0)
@@ -3733,7 +3799,7 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                     es = estep.es
             top = scroll_to(top, ed.cy, rows - 1)
             left = hscroll_for(left, ed, opts, cols)
-            render(ed, rows, cols, path, top, left, st.mode, st.avy, st.avx, cs, opts)
+            render(ed, rows, cols, path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts)
             if cmd_mode
                 cup(rows, 1)
                 csi()
@@ -3750,7 +3816,7 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
             top = scroll_to(top, ed.cy, rows - 1)
             left = hscroll_for(left, ed, opts, cols)
             clear_screen()   // dimensions changed — clear stale content once
-            render(ed, rows, cols, path, top, left, st.mode, st.avy, st.avx, cs, opts)
+            render(ed, rows, cols, path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts)
     novo_pty_restore_mode_h()
     csi()
     emit("0 q")          // restore the terminal's default cursor shape
