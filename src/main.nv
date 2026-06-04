@@ -1271,6 +1271,47 @@ fn visual_case(ed: Editor, st: InputState, kind: Int) -> Step
         i = i + 1
     Step { ed: clamp(Editor { lines: ls, cy: vr.sy, cx: vr.sx }), st: ist_done(st) }
 
+// ── Case operators gu / gU / g~ + motion (slice 35) ─────────────────────
+// kind: 0 toggle, 1 lower, 2 upper.
+
+// Apply a case map to whole lines [lo, hi].
+fn case_line_span(ed: Editor, st: InputState, kind: Int, lo: Int, hi: Int) -> Step
+    let total = list.len(ed.lines)
+    var ls: [Str] = []
+    let mut i = 0
+    while i < total
+        if i >= lo and i <= hi
+            ls = list.append(ls, [case_line_range(ed.lines[i], 0, str.len(ed.lines[i]), kind)])
+        else
+            ls = list.append(ls, [ed.lines[i]])
+        i = i + 1
+    Step { ed: clamp(Editor { lines: ls, cy: if lo < 0 then 0 else lo, cx: 0 }), st: ist_done(st) }
+
+// The second part of a gu/gU/g~ command (pcode keeps the operator pending
+// across a count).  Doubled (guu/gUU/g~~) → line; a charwise motion → that
+// span; a linewise motion → those lines.
+fn feed_case(ed: Editor, st: InputState, kind: Int, pcode: Int, b: Int) -> Step
+    let trigger = if kind == 1 then 0x75 elif kind == 2 then 0x55 else 0x7E
+    if b == trigger                              // guu / gUU / g~~ — line(s)
+        let cnt = if st.count > 0 then st.count else 1
+        return case_line_span(ed, st, kind, ed.cy, ed.cy + cnt - 1)
+    if b >= 0x31 and b <= 0x39
+        return Step { ed: ed, st: InputState { count: st.count * 10 + (b - 0x30), pending: pcode, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
+    if b == 0x30 and st.count > 0
+        return Step { ed: ed, st: InputState { count: st.count * 10, pending: pcode, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
+    let tgt = motion_target(ed, b, st.count)
+    if tgt.ok and tgt.linewise
+        let lo = if ed.cy < tgt.ty then ed.cy else tgt.ty
+        let hi = if ed.cy < tgt.ty then tgt.ty else ed.cy
+        return case_line_span(ed, st, kind, lo, hi)
+    if tgt.ok
+        let lo = if ed.cx < tgt.tx then ed.cx else tgt.tx
+        var hi = if ed.cx < tgt.tx then tgt.tx else ed.cx
+        if tgt.inclusive
+            hi = hi + 1
+        return Step { ed: clamp(Editor { lines: set_line(ed.lines, ed.cy, case_line_range(line_at(ed, ed.cy), lo, hi, kind)), cy: ed.cy, cx: lo }), st: ist_done(st) }
+    feed(ed, ist_clear_pending(st), b)           // invalid — cancel + reprocess
+
 // `J` joins the selected lines → back to Normal.
 fn visual_join(ed: Editor, st: InputState) -> Step
     let vr = visual_range(st, ed)
@@ -1399,7 +1440,19 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
         if b == 0x67                   // `gg` — go to line (count or 1)
             let tgt = if st.count > 0 then st.count - 1 else 0
             return Step { ed: clamp(Editor { lines: ed.lines, cy: tgt, cx: ed.cx }), st: ist_done(st) }
-        return feed(ed, ist_clear_pending(st), b)     // not gg — reprocess fresh
+        if b == 0x75                   // `gu` — lowercase operator
+            return Step { ed: ed, st: InputState { count: st.count, pending: 51, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
+        if b == 0x55                   // `gU` — uppercase operator
+            return Step { ed: ed, st: InputState { count: st.count, pending: 52, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
+        if b == 0x7E                   // `g~` — toggle-case operator
+            return Step { ed: ed, st: InputState { count: st.count, pending: 50, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
+        return feed(ed, ist_clear_pending(st), b)     // not g-command — reprocess fresh
+    if st.pending == 50                // g~<motion> — toggle case
+        return feed_case(ed, st, 0, 50, b)
+    if st.pending == 51                // gu<motion> — lowercase
+        return feed_case(ed, st, 1, 51, b)
+    if st.pending == 52                // gU<motion> — uppercase
+        return feed_case(ed, st, 2, 52, b)
     if st.pending == 2                 // `d` — operator awaiting a motion (or dd)
         return feed_operator(ed, st, 0x64, 2, b)
     if st.pending == 3                 // `y` — operator awaiting a motion (or yy)
