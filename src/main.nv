@@ -157,20 +157,26 @@ fn class_at(ed: Editor, y: Int, x: Int) -> Int
     else
         0
 
+// Like `class_at`, but for WORD motions (`W`/`E`/`B`): `big` collapses
+// punctuation into the word class, so a WORD is any whitespace-delimited run.
+fn class_at_w(ed: Editor, y: Int, x: Int, big: Bool) -> Int
+    let c = class_at(ed, y, x)
+    if big and c == 2 then 1 else c
+
 // `w` — forward to the start of the next word.  Skips the rest of the
 // current run, then skips whitespace (crossing line boundaries), landing
 // on the next non-blank; clamps at end-of-buffer.
-fn motion_w(ed: Editor) -> Editor
+fn motion_w(ed: Editor, big: Bool) -> Editor
     let nlines = list.len(ed.lines)
     var y = ed.cy
     var x = ed.cx
-    let cc0 = class_at(ed, y, x)
+    let cc0 = class_at_w(ed, y, x, big)
     if cc0 != 0
         var go = true
         var g = 0
         while go and g < 1000000
             g = g + 1
-            if x < str.len(line_at(ed, y)) and class_at(ed, y, x) == cc0
+            if x < str.len(line_at(ed, y)) and class_at_w(ed, y, x, big) == cc0
                 x = x + 1
             else
                 go = false
@@ -180,7 +186,7 @@ fn motion_w(ed: Editor) -> Editor
         g2 = g2 + 1
         let ll = str.len(line_at(ed, y))
         if x < ll
-            if class_at(ed, y, x) == 0
+            if class_at_w(ed, y, x, big) == 0
                 x = x + 1
             else
                 done = true
@@ -193,7 +199,7 @@ fn motion_w(ed: Editor) -> Editor
     clamp(Editor { lines: ed.lines, cy: y, cx: x })
 
 // `e` — forward to the end of the next word.
-fn motion_e(ed: Editor) -> Editor
+fn motion_e(ed: Editor, big: Bool) -> Editor
     let nlines = list.len(ed.lines)
     var y = ed.cy
     var x = ed.cx
@@ -210,7 +216,7 @@ fn motion_e(ed: Editor) -> Editor
         g = g + 1
         let ll = str.len(line_at(ed, y))
         if x < ll
-            if class_at(ed, y, x) == 0
+            if class_at_w(ed, y, x, big) == 0
                 x = x + 1
             else
                 done = true
@@ -220,20 +226,20 @@ fn motion_e(ed: Editor) -> Editor
         else
             done = true
     // advance to the end of this run
-    let cc = class_at(ed, y, x)
+    let cc = class_at_w(ed, y, x, big)
     if cc != 0
         var go = true
         var g2 = 0
         while go and g2 < 1000000
             g2 = g2 + 1
-            if x + 1 < str.len(line_at(ed, y)) and class_at(ed, y, x + 1) == cc
+            if x + 1 < str.len(line_at(ed, y)) and class_at_w(ed, y, x + 1, big) == cc
                 x = x + 1
             else
                 go = false
     clamp(Editor { lines: ed.lines, cy: y, cx: x })
 
 // `b` — backward to the start of the current/previous word.
-fn motion_b(ed: Editor) -> Editor
+fn motion_b(ed: Editor, big: Bool) -> Editor
     var y = ed.cy
     var x = ed.cx
     // step one position back
@@ -248,7 +254,7 @@ fn motion_b(ed: Editor) -> Editor
     var g = 0
     while not done and g < 1000000
         g = g + 1
-        if class_at(ed, y, x) == 0 and not (y == 0 and x == 0)
+        if class_at_w(ed, y, x, big) == 0 and not (y == 0 and x == 0)
             if x > 0
                 x = x - 1
             elif y > 0
@@ -260,29 +266,33 @@ fn motion_b(ed: Editor) -> Editor
         else
             done = true
     // skip back to the start of this run (within the line)
-    let cc = class_at(ed, y, x)
+    let cc = class_at_w(ed, y, x, big)
     if cc != 0
         var go = true
         var g2 = 0
         while go and g2 < 1000000
             g2 = g2 + 1
-            if x > 0 and class_at(ed, y, x - 1) == cc
+            if x > 0 and class_at_w(ed, y, x - 1, big) == cc
                 x = x - 1
             else
                 go = false
     clamp(Editor { lines: ed.lines, cy: y, cx: x })
 
+// kind: 0=w 1=b 2=e (word, alnum/punct runs); 3=W 4=B 5=E (WORD, whitespace-
+// delimited).
 fn repeat_word(ed: Editor, kind: Int, times: Int) -> Editor
     var e = ed
-    let mut k = 0
-    while k < times
-        if kind == 0
-            e = motion_w(e)
-        elif kind == 1
-            e = motion_b(e)
+    let big = kind >= 3
+    let k = kind % 3
+    let mut i = 0
+    while i < times
+        if k == 0
+            e = motion_w(e, big)
+        elif k == 1
+            e = motion_b(e, big)
         else
-            e = motion_e(e)
-        k = k + 1
+            e = motion_e(e, big)
+        i = i + 1
     e
 
 // ── Editing (insert mode) ───────────────────────────────────────
@@ -779,6 +789,15 @@ fn motion_target(ed: Editor, b: Int, rawcount: Int) -> MTarget
     if b == 0x62                                  // b
         let e = repeat_word(ed, 1, count)
         return mt(ed.cy, if e.cy < ed.cy then 0 else e.cx, false, false)
+    if b == 0x57                                  // W
+        let e = repeat_word(ed, 3, count)
+        return mt(ed.cy, if e.cy > ed.cy then llen else e.cx, false, false)
+    if b == 0x45                                  // E (inclusive)
+        let e = repeat_word(ed, 5, count)
+        return mt(ed.cy, if e.cy > ed.cy then (if llen > 0 then llen - 1 else 0) else e.cx, false, true)
+    if b == 0x42                                  // B
+        let e = repeat_word(ed, 4, count)
+        return mt(ed.cy, if e.cy < ed.cy then 0 else e.cx, false, false)
     if b == 0x6A                                  // j — linewise down
         return mt(ed.cy + count, 0, true, false)
     if b == 0x6B                                  // k — linewise up
@@ -1157,6 +1176,12 @@ fn visual_motion(ed: Editor, b: Int, cnt: Int) -> Editor
         repeat_word(ed, 1, cnt)
     elif b == 0x65
         repeat_word(ed, 2, cnt)
+    elif b == 0x57
+        repeat_word(ed, 3, cnt)
+    elif b == 0x42
+        repeat_word(ed, 4, cnt)
+    elif b == 0x45
+        repeat_word(ed, 5, cnt)
     elif b == 0x30
         clamp(Editor { lines: ed.lines, cy: ed.cy, cx: 0 })
     elif b == 0x24
@@ -1427,6 +1452,12 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
         return Step { ed: repeat_word(ed, 1, cnt), st: ist_done(st) }
     if b == 0x65                       // 'e' — next word end
         return Step { ed: repeat_word(ed, 2, cnt), st: ist_done(st) }
+    if b == 0x57                       // 'W' — next WORD start (whitespace-delimited)
+        return Step { ed: repeat_word(ed, 3, cnt), st: ist_done(st) }
+    if b == 0x42                       // 'B' — previous WORD start
+        return Step { ed: repeat_word(ed, 4, cnt), st: ist_done(st) }
+    if b == 0x45                       // 'E' — next WORD end
+        return Step { ed: repeat_word(ed, 5, cnt), st: ist_done(st) }
     if b == 0x30                       // '0' — first column
         return Step { ed: clamp(Editor { lines: ed.lines, cy: ed.cy, cx: 0 }), st: ist_done(st) }
     if b == 0x24                       // '$' — end of line
