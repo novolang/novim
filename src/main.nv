@@ -2319,6 +2319,24 @@ fn pad_num(n: Int, width: Int) -> Str
         s = " " + s
     s
 
+// Decimal digit count of a non-negative Int (min 1).
+fn num_digits(n: Int) -> Int
+    var v = if n < 0 then 0 - n else n
+    var d = 1
+    while v >= 10
+        v = v / 10
+        d = d + 1
+    d
+
+// A run of `n` spaces.
+fn nspaces(n: Int) -> Str
+    var s = ""
+    var i = 0
+    while i < n
+        s = s + " "
+        i = i + 1
+    s
+
 // ── `:set` (runtime options) ────────────────────────────────────────────
 // `:set number`, `:set nonumber`, `:set rnu!`, `:set tabstop=4`, and several
 // space-separated at once.  Booleans: `<opt>` on, `no<opt>` off, `<opt>!`
@@ -3693,7 +3711,11 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode
     let syncmt = cs_or(cs.cmt_fg, 245)
     let synnum = cs_or(cs.num_fg, 215)
     let numbered = opts.number or opts.relativenumber
-    let gutter = if numbered then 4 else 0          // "NNN " line-number column
+    // Gutter width tracks the largest line number (min 3 digits) so the text
+    // column stays put when the cursor crosses a digit boundary on a 1000+
+    // line file — numbers are right-aligned (least-significant digit fixed).
+    let numw = if num_digits(nl) > 3 then num_digits(nl) else 3
+    let gutter = if numbered then numw + 1 else 0
     let width = if cols - gutter > 0 then cols - gutter else 1   // text area width
     // Normalised visual selection bounds (start <= end), used for highlighting.
     let a_first = avy < ed.cy or (avy == ed.cy and avx <= ed.cx)
@@ -3743,18 +3765,18 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode
                         let dsev = diag_sev_for_line(diag_li, li)
                         if dsev == 1
                             sgr("38;5;9")
-                            emit(pad_num(gnum, 3))
+                            emit(pad_num(gnum, numw))
                             sgr("0")
                             emit(" ")
                         elif dsev >= 2
                             sgr("38;5;11")
-                            emit(pad_num(gnum, 3))
+                            emit(pad_num(gnum, numw))
                             sgr("0")
                             emit(" ")
                         else
-                            emit(pad_num(gnum, 3) + " ")
+                            emit(pad_num(gnum, numw) + " ")
                     else
-                        emit("    ")           // blank gutter on continuation rows
+                        emit(nspaces(numw + 1))   // blank gutter on continuation rows
                 let segleft = if opts.wrap then seg * width else left
                 emit_line_styled(expanded, segleft, width, vlo, vhi, srng, "30;43", syncols)
                 el()
@@ -3826,7 +3848,9 @@ fn term_cols() -> Int [io]
 fn hscroll_for(left: Int, ed: Editor, opts: Options, cols: Int) -> Int
     if opts.wrap                                  // wrapped lines never scroll horizontally
         return 0
-    let gutter = if opts.number or opts.relativenumber then 4 else 0
+    let nl = list.len(ed.lines)
+    let numw = if num_digits(nl) > 3 then num_digits(nl) else 3
+    let gutter = if opts.number or opts.relativenumber then numw + 1 else 0
     hscroll_to(left, vis_col(line_at(ed, ed.cy), ed.cx, opts.tabstop), cols - gutter)
 
 // Adjust the viewport top so the cursor line is visible in `body` rows.
@@ -3960,16 +3984,17 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
     var lsp_reqid = 1                    // monotonic id for gd/K requests (init used 1)
     var lsp_info = ""                    // transient status message (gd/K result)
     var gpend = false                    // awaiting the 2nd byte of a `g` command (gd)
+    var lsp_phase = 0                    // 0 none · 1 init sent (awaiting result) · 2 ready
     if ends_with_nv(path)
         lsp_pid = lsp_spawn()
         if lsp_pid >= 0
             lsp_in = proc.stdin_fd(lsp_pid)
             lsp_out = proc.stdout_fd(lsp_pid)
+            // Fire `initialize` and move on — the handshake completes
+            // asynchronously in the loop so a big file appears instantly
+            // instead of blocking on novols' (slow) initialize result.
             lsp_send(lsp_in, lsp_init_req(lsp_uri))
-            let _ = lsp_poll_message(lsp_out, 2000)           // initialize result
-            lsp_send(lsp_in, lsp_initialized())
-            lsp_lasttext = buf_text(ed)
-            lsp_send(lsp_in, lsp_didopen(lsp_uri, lsp_lasttext))
+            lsp_phase = 1
     clear_screen()       // one-time clear of whatever was on screen before
     left = hscroll_for(left, ed, opts, cols)
     render(ed, rows, cols, path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, lsp_info)
@@ -4041,7 +4066,7 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                         top = scroll_new_top(ed.cy, top, rows, zk)
                 elif gpend                            // 2nd byte of a `g` (gd intercept)
                     gpend = false
-                    if b == 0x64 and lsp_pid >= 0      // `gd` — go to definition
+                    if b == 0x64 and lsp_phase == 2      // `gd` — go to definition
                         lsp_reqid = lsp_reqid + 1
                         lsp_send(lsp_in, lsp_pos_req(lsp_reqid, "textDocument/definition", lsp_uri, ed.cy, ed.cx))
                         let resp = lsp_pump(lsp_out, lsp_reqid, 20)
@@ -4067,9 +4092,9 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                         ed = g2.ed
                         st = g2.st
                         es = g2.es
-                elif lsp_pid >= 0 and scroll_idle(st, es) and key_free(km, 0x67) and b == 0x67   // 'g' — await d (gd)
+                elif lsp_phase == 2 and scroll_idle(st, es) and key_free(km, 0x67) and b == 0x67   // 'g' — await d (gd)
                     gpend = true
-                elif lsp_pid >= 0 and scroll_idle(st, es) and key_free(km, 0x4B) and b == 0x4B   // K — hover
+                elif lsp_phase == 2 and scroll_idle(st, es) and key_free(km, 0x4B) and b == 0x4B   // K — hover
                     lsp_reqid = lsp_reqid + 1
                     lsp_send(lsp_in, lsp_pos_req(lsp_reqid, "textDocument/hover", lsp_uri, ed.cy, ed.cx))
                     let hresp = lsp_pump(lsp_out, lsp_reqid, 20)
@@ -4123,21 +4148,28 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
         // Live document sync: an edit can only have come from stdin this
         // iteration.  Debounce on the actual buffer text (reused from the
         // undo/dot change-detection) so insert-mode keystrokes that don't
-        // alter the buffer don't spam didChange.
-        if lsp_pid >= 0 and m % 2 == 1
+        // alter the buffer don't spam didChange.  Only once the doc is open.
+        if lsp_phase == 2 and m % 2 == 1
             let cur = buf_text(ed)
             if cur != lsp_lasttext
                 lsp_lasttext = cur
                 lsp_ver = lsp_ver + 1
                 lsp_send(lsp_in, lsp_didchange(lsp_uri, lsp_ver, cur))
-        // Drain whatever novols has sent (non-blocking): publishDiagnostics
-        // notifications rebuild the diagnostics store.
+        // Drain whatever novols has sent (non-blocking).  The init result
+        // (id 1) completes the handshake asynchronously — initialized +
+        // didOpen (with the buffer's current text, edits-during-init included);
+        // publishDiagnostics notifications rebuild the diagnostics store.
         if lsp_pid >= 0
             var more = true
             while more
                 let msg = lsp_poll_message(lsp_out, 0)
                 if str.len(msg) == 0
                     more = false
+                elif lsp_phase == 1 and lsp_msg_id(msg) == 1
+                    lsp_send(lsp_in, lsp_initialized())
+                    lsp_lasttext = buf_text(ed)
+                    lsp_send(lsp_in, lsp_didopen(lsp_uri, lsp_lasttext))
+                    lsp_phase = 2
                 elif lsp_is_diag(msg)
                     diag_li = lsp_collect_diag_ints(msg)
                     diag_msgs = lsp_collect_diag_msgs(msg)
