@@ -27,10 +27,12 @@ struct Editor
 struct InputState
     count:   Int
     pending: Int
-    mode:    Int          // 0 = Normal, 1 = Insert
+    mode:    Int          // 0 Normal, 1 Insert, 2 Visual-char, 3 Visual-line
     reg:     Str
     reg_lw:  Bool
     search:  Str          // last `/pattern` (slice 10), for n / N
+    avy:     Int          // visual-mode selection anchor (slice 21): line / col
+    avx:     Int
 
 // feed()'s result: the new editor + the new input state.
 struct Step
@@ -39,20 +41,20 @@ struct Step
 
 // The clean initial state (empty register).  Used once at editor start.
 fn ist_new() -> InputState
-    InputState { count: 0, pending: 0, mode: 0, reg: "", reg_lw: false, search: "" }
+    InputState { count: 0, pending: 0, mode: 0, reg: "", reg_lw: false, search: "", avy: 0, avx: 0 }
 
 // End-of-command reset: clear count/pending, return to Normal, but PRESERVE
 // the register so a later `p` can paste an earlier `yy`/`dd`.
 fn ist_done(st: InputState) -> InputState
-    InputState { count: 0, pending: 0, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search }
+    InputState { count: 0, pending: 0, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx }
 
 // Enter Insert mode, preserving the register.
 fn ist_insert(st: InputState) -> InputState
-    InputState { count: 0, pending: 0, mode: 1, reg: st.reg, reg_lw: st.reg_lw, search: st.search }
+    InputState { count: 0, pending: 0, mode: 1, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx }
 
 // Record the last search pattern (after `/pattern<Enter>`).
 fn ist_set_search(st: InputState, pat: Str) -> InputState
-    InputState { count: 0, pending: 0, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: pat }
+    InputState { count: 0, pending: 0, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: pat, avy: st.avy, avx: st.avx }
 
 // ── Buffer ──────────────────────────────────────────────────────
 
@@ -412,7 +414,7 @@ fn delete_to_eol(ed: Editor) -> Editor
 // Clear a pending operator but keep the count + register (used when the
 // second key of d/y/g isn't the doubling key — reprocess it fresh).
 fn ist_clear_pending(st: InputState) -> InputState
-    InputState { count: st.count, pending: 0, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search }
+    InputState { count: st.count, pending: 0, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx }
 
 // Join `n` lines starting at cy into a single Str with '\n' separators —
 // the linewise register payload (round-trips through str.split_lines).
@@ -431,7 +433,7 @@ fn join_lines(ed: Editor, n: Int) -> Str
 
 // `yy` / `Nyy` — yank `n` lines into the (linewise) register; cursor stays.
 fn op_yank_lines(ed: Editor, st: InputState, n: Int) -> Step
-    Step { ed: ed, st: InputState { count: 0, pending: 0, mode: 0, reg: join_lines(ed, n), reg_lw: true, search: st.search } }
+    Step { ed: ed, st: InputState { count: 0, pending: 0, mode: 0, reg: join_lines(ed, n), reg_lw: true, search: st.search, avy: st.avy, avx: st.avx } }
 
 // `dd` / `Ndd` — yank `n` lines into the register, then remove them.
 fn op_delete_lines(ed: Editor, st: InputState, n: Int) -> Step
@@ -448,7 +450,7 @@ fn op_delete_lines(ed: Editor, st: InputState, n: Int) -> Step
     var ncy = ed.cy
     if ncy >= list.len(ls)
         ncy = list.len(ls) - 1
-    Step { ed: clamp(Editor { lines: ls, cy: ncy, cx: 0 }), st: InputState { count: 0, pending: 0, mode: 0, reg: payload, reg_lw: true, search: st.search } }
+    Step { ed: clamp(Editor { lines: ls, cy: ncy, cx: 0 }), st: InputState { count: 0, pending: 0, mode: 0, reg: payload, reg_lw: true, search: st.search, avy: st.avy, avx: st.avx } }
 
 // `p` / `P` — paste the register after/before the cursor.  Linewise inserts
 // whole lines below/above; characterwise inserts text at the cursor.
@@ -705,7 +707,7 @@ fn motion_target(ed: Editor, b: Int, rawcount: Int) -> MTarget
 // End-of-command state carrying a fresh CHARWISE register (used by d/c/y over
 // a charwise motion).  `ins` selects Insert mode (the `c` operator).
 fn ist_reg_cw(st: InputState, text: Str, ins: Bool) -> InputState
-    InputState { count: 0, pending: 0, mode: if ins then 1 else 0, reg: text, reg_lw: false, search: st.search }
+    InputState { count: 0, pending: 0, mode: if ins then 1 else 0, reg: text, reg_lw: false, search: st.search, avy: st.avy, avx: st.avx }
 
 // Apply operator `opb` (d/c/y) over a LINEWISE range [cur, ty].
 fn apply_linewise_op(ed: Editor, st: InputState, opb: Int, ty: Int) -> Step
@@ -724,7 +726,7 @@ fn apply_linewise_op(ed: Editor, st: InputState, opb: Int, ty: Int) -> Step
         payload = payload + ed.lines[i]
         i = i + 1
     if opb == 0x79                                // y — yank, cursor to lo
-        return Step { ed: clamp(Editor { lines: ed.lines, cy: lo, cx: 0 }), st: InputState { count: 0, pending: 0, mode: 0, reg: payload, reg_lw: true, search: st.search } }
+        return Step { ed: clamp(Editor { lines: ed.lines, cy: lo, cx: 0 }), st: InputState { count: 0, pending: 0, mode: 0, reg: payload, reg_lw: true, search: st.search, avy: st.avy, avx: st.avx } }
     // d / c — remove lines lo..hi; c leaves one blank line and enters Insert.
     var ls: [Str] = []
     let mut j = 0
@@ -741,7 +743,7 @@ fn apply_linewise_op(ed: Editor, st: InputState, opb: Int, ty: Int) -> Step
     if ncy >= list.len(ls)
         ncy = list.len(ls) - 1
     let ins = opb == 0x63
-    Step { ed: clamp_insert(Editor { lines: ls, cy: ncy, cx: 0 }), st: InputState { count: 0, pending: 0, mode: if ins then 1 else 0, reg: payload, reg_lw: true, search: st.search } }
+    Step { ed: clamp_insert(Editor { lines: ls, cy: ncy, cx: 0 }), st: InputState { count: 0, pending: 0, mode: if ins then 1 else 0, reg: payload, reg_lw: true, search: st.search, avy: st.avy, avx: st.avx } }
 
 // Apply operator `opb` over a resolved motion target.
 fn apply_motion_op(ed: Editor, st: InputState, opb: Int, tgt: MTarget) -> Step
@@ -777,28 +779,181 @@ fn feed_operator(ed: Editor, st: InputState, opb: Int, pcode: Int, b: Int) -> St
     if b == opb                                   // dd / cc / yy — linewise
         return apply_linewise_op(ed, st, opb, ed.cy + (if st.count > 1 then st.count - 1 else 0))
     if b >= 0x31 and b <= 0x39                    // count digit after the operator
-        return Step { ed: ed, st: InputState { count: st.count * 10 + (b - 0x30), pending: pcode, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
+        return Step { ed: ed, st: InputState { count: st.count * 10 + (b - 0x30), pending: pcode, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
     if b == 0x30 and st.count > 0                 // '0' continues a count
-        return Step { ed: ed, st: InputState { count: st.count * 10, pending: pcode, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
+        return Step { ed: ed, st: InputState { count: st.count * 10, pending: pcode, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
     // Multi-key motions: f/F/t/T await a target char, g awaits a second g.
     // Encode (operator, motion) in a paired pending code so the char/second-g
     // handler knows which operator to apply (df{c}, dt{c}, dgg, ...).
     let opidx = if opb == 0x64 then 0 elif opb == 0x63 then 1 else 2
     if b == 0x66                                  // f — pending 20/24/28
-        return Step { ed: ed, st: InputState { count: st.count, pending: 20 + opidx * 4 + 0, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
+        return Step { ed: ed, st: InputState { count: st.count, pending: 20 + opidx * 4 + 0, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
     if b == 0x46                                  // F — pending 21/25/29
-        return Step { ed: ed, st: InputState { count: st.count, pending: 20 + opidx * 4 + 1, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
+        return Step { ed: ed, st: InputState { count: st.count, pending: 20 + opidx * 4 + 1, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
     if b == 0x74                                  // t — pending 22/26/30
-        return Step { ed: ed, st: InputState { count: st.count, pending: 20 + opidx * 4 + 2, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
+        return Step { ed: ed, st: InputState { count: st.count, pending: 20 + opidx * 4 + 2, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
     if b == 0x54                                  // T — pending 23/27/31
-        return Step { ed: ed, st: InputState { count: st.count, pending: 20 + opidx * 4 + 3, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
+        return Step { ed: ed, st: InputState { count: st.count, pending: 20 + opidx * 4 + 3, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
     if b == 0x67                                  // g — await second g (dgg): pending 32/33/34
-        return Step { ed: ed, st: InputState { count: st.count, pending: 32 + opidx, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
+        return Step { ed: ed, st: InputState { count: st.count, pending: 32 + opidx, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
     let mb = if opb == 0x63 and b == 0x77 then 0x65 else b   // cw behaves like ce
     let tgt = motion_target(ed, mb, st.count)               // raw count (0 = none)
     if tgt.ok
         return apply_motion_op(ed, st, opb, tgt)
     feed(ed, ist_clear_pending(st), b)            // not a motion — cancel + reprocess
+
+// ── Visual mode (slice 21): v / V + motions + operators on a selection ──────
+
+// Normalised selection bounds (start <= end) between the anchor (avy,avx) and
+// the cursor.
+struct VRange
+    sy: Int
+    sx: Int
+    ey: Int
+    ex: Int
+
+fn visual_range(st: InputState, ed: Editor) -> VRange
+    let a_first = st.avy < ed.cy or (st.avy == ed.cy and st.avx <= ed.cx)
+    if a_first
+        VRange { sy: st.avy, sx: st.avx, ey: ed.cy, ex: ed.cx }
+    else
+        VRange { sy: ed.cy, sx: ed.cx, ey: st.avy, ex: st.avx }
+
+// Selected text for the register (charwise, inclusive of the end glyph).
+fn vyank_char_text(ed: Editor, vr: VRange) -> Str
+    if vr.sy == vr.ey
+        let line = line_at(ed, vr.sy)
+        let hi = if vr.ex + 1 > str.len(line) then str.len(line) else vr.ex + 1
+        str.slice(line, vr.sx, hi)
+    else
+        let first = line_at(ed, vr.sy)
+        var acc = str.slice(first, vr.sx, str.len(first))
+        var i = vr.sy + 1
+        while i < vr.ey
+            acc = acc + str.from_char(10) + line_at(ed, i)
+            i = i + 1
+        let last = line_at(ed, vr.ey)
+        let hi = if vr.ex + 1 > str.len(last) then str.len(last) else vr.ex + 1
+        acc + str.from_char(10) + str.slice(last, 0, hi)
+
+// Buffer after deleting a charwise selection (first/last partial line merged,
+// middle lines removed).
+fn vdelete_char_lines(ed: Editor, vr: VRange) -> [Str]
+    if vr.sy == vr.ey
+        let line = line_at(ed, vr.sy)
+        let hi = if vr.ex + 1 > str.len(line) then str.len(line) else vr.ex + 1
+        set_line(ed.lines, vr.sy, str.slice(line, 0, vr.sx) + str.slice(line, hi, str.len(line)))
+    else
+        let first = line_at(ed, vr.sy)
+        let last = line_at(ed, vr.ey)
+        let hi = if vr.ex + 1 > str.len(last) then str.len(last) else vr.ex + 1
+        let merged = str.slice(first, 0, vr.sx) + str.slice(last, hi, str.len(last))
+        let total = list.len(ed.lines)
+        var ls: [Str] = []
+        let mut i = 0
+        while i < total
+            if i < vr.sy
+                ls = list.append(ls, [ed.lines[i]])
+            elif i == vr.sy
+                ls = list.append(ls, [merged])
+            elif i > vr.ey
+                ls = list.append(ls, [ed.lines[i]])
+            i = i + 1
+        ls
+
+// Apply d / y / c (opb byte) to a CHARWISE selection.  Single trailing return.
+fn visual_apply_char(ed: Editor, st: InputState, opb: Int) -> Step
+    let vr = visual_range(st, ed)
+    let txt = vyank_char_text(ed, vr)
+    let is_yank = opb == 0x79
+    let ins = opb == 0x63
+    let nls = if is_yank then ed.lines else vdelete_char_lines(ed, vr)
+    let ne = if ins then clamp_insert(Editor { lines: nls, cy: vr.sy, cx: vr.sx }) else clamp(Editor { lines: nls, cy: vr.sy, cx: vr.sx })
+    Step { ed: ne, st: ist_reg_cw(st, txt, ins) }
+
+// Apply d / y / c to a LINEWISE selection by delegating to apply_linewise_op
+// over [sy, ey].
+fn visual_apply_line(ed: Editor, st: InputState, opb: Int) -> Step
+    let vr = visual_range(st, ed)
+    apply_linewise_op(Editor { lines: ed.lines, cy: vr.sy, cx: 0 }, st, opb, vr.ey)
+
+fn visual_apply(ed: Editor, st: InputState, opb: Int) -> Step
+    if st.mode == 3
+        return visual_apply_line(ed, st, opb)
+    visual_apply_char(ed, st, opb)
+
+// `>` / `<` over the selected lines, then back to Normal on the first line.
+fn visual_indent(ed: Editor, st: InputState, right: Bool) -> Step
+    let vr = visual_range(st, ed)
+    let total = list.len(ed.lines)
+    var ls: [Str] = []
+    let mut i = 0
+    while i < total
+        if i >= vr.sy and i <= vr.ey
+            ls = list.append(ls, [if right then indent_one(ed.lines[i]) else dedent_one(ed.lines[i])])
+        else
+            ls = list.append(ls, [ed.lines[i]])
+        i = i + 1
+    let fnb = first_nonblank(if vr.sy < list.len(ls) then ls[vr.sy] else "")
+    Step { ed: clamp(Editor { lines: ls, cy: vr.sy, cx: fnb }), st: ist_done(st) }
+
+// Move the cursor for a (single-byte) motion in visual mode.
+fn visual_motion(ed: Editor, b: Int, cnt: Int) -> Editor
+    if b == 0x68 or b == 0x6C or b == 0x6A or b == 0x6B
+        repeat_hjkl(ed, b, cnt)
+    elif b == 0x77
+        repeat_word(ed, 0, cnt)
+    elif b == 0x62
+        repeat_word(ed, 1, cnt)
+    elif b == 0x65
+        repeat_word(ed, 2, cnt)
+    elif b == 0x30
+        clamp(Editor { lines: ed.lines, cy: ed.cy, cx: 0 })
+    elif b == 0x24
+        let ll = str.len(line_at(ed, ed.cy))
+        clamp(Editor { lines: ed.lines, cy: ed.cy, cx: if ll > 0 then ll - 1 else 0 })
+    elif b == 0x5E
+        clamp(Editor { lines: ed.lines, cy: ed.cy, cx: first_nonblank(line_at(ed, ed.cy)) })
+    elif b == 0x47
+        clamp(Editor { lines: ed.lines, cy: list.len(ed.lines) - 1, cx: ed.cx })
+    else
+        ed
+
+// State that stays in visual mode (preserve anchor + register, reset count).
+fn ist_visual_keep(st: InputState, mode: Int) -> InputState
+    InputState { count: 0, pending: 0, mode: mode, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx }
+
+// Handle one byte in Visual mode (mode 2 = charwise, 3 = linewise).
+fn feed_visual(ed: Editor, st: InputState, b: Int) -> Step
+    if b == 27                                   // Esc — leave visual
+        return Step { ed: ed, st: ist_done(st) }
+    if b == 0x76                                 // v
+        if st.mode == 2
+            return Step { ed: ed, st: ist_done(st) }
+        return Step { ed: ed, st: ist_visual_keep(st, 2) }
+    if b == 0x56                                 // V
+        if st.mode == 3
+            return Step { ed: ed, st: ist_done(st) }
+        return Step { ed: ed, st: ist_visual_keep(st, 3) }
+    if b == 0x6F                                 // o — swap anchor and cursor
+        return Step { ed: clamp(Editor { lines: ed.lines, cy: st.avy, cx: st.avx }), st: InputState { count: 0, pending: 0, mode: st.mode, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: ed.cy, avx: ed.cx } }
+    if b >= 0x31 and b <= 0x39                    // count digit
+        return Step { ed: ed, st: InputState { count: st.count * 10 + (b - 0x30), pending: 0, mode: st.mode, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
+    if b == 0x30 and st.count > 0
+        return Step { ed: ed, st: InputState { count: st.count * 10, pending: 0, mode: st.mode, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
+    if b == 0x64 or b == 0x78                     // d / x — delete selection
+        return visual_apply(ed, st, 0x64)
+    if b == 0x79                                  // y — yank selection
+        return visual_apply(ed, st, 0x79)
+    if b == 0x63 or b == 0x73                      // c / s — change selection
+        return visual_apply(ed, st, 0x63)
+    if b == 0x3E                                  // > — indent selection
+        return visual_indent(ed, st, true)
+    if b == 0x3C                                  // < — dedent selection
+        return visual_indent(ed, st, false)
+    // Motion: move the cursor, stay in visual mode (anchor fixed).
+    let cnt = if st.count > 0 then st.count else 1
+    Step { ed: visual_motion(ed, b, cnt), st: ist_visual_keep(st, st.mode) }
 
 // Handle one byte while in Insert mode.
 fn feed_insert(ed: Editor, st: InputState, b: Int) -> Step
@@ -820,6 +975,9 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
     // Insert mode owns every byte until Esc.  (slice 4)
     if st.mode == 1
         return feed_insert(ed, st, b)
+    // Visual mode (slice 21): charwise (2) / linewise (3).
+    if st.mode == 2 or st.mode == 3
+        return feed_visual(ed, st, b)
     // Operators awaiting a second key (pending: 1=g, 2=d, 3=y).
     if st.pending == 1
         if b == 0x67                   // `gg` — go to line (count or 1)
@@ -884,9 +1042,9 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
     // Count digits.  `0` is a count digit only when a count is already
     // building; otherwise `0` is the "first column" motion.
     if b >= 0x31 and b <= 0x39         // '1'-'9'
-        return Step { ed: ed, st: InputState { count: st.count * 10 + (b - 0x30), pending: 0, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
+        return Step { ed: ed, st: InputState { count: st.count * 10 + (b - 0x30), pending: 0, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
     if b == 0x30 and st.count > 0      // '0' continues a count
-        return Step { ed: ed, st: InputState { count: st.count * 10, pending: 0, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
+        return Step { ed: ed, st: InputState { count: st.count * 10, pending: 0, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
     let cnt = if st.count > 0 then st.count else 1
     if b == 0x68 or b == 0x6C or b == 0x6A or b == 0x6B      // h l j k
         return Step { ed: repeat_hjkl(ed, b, cnt), st: ist_done(st) }
@@ -905,11 +1063,11 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
     if b == 0x5E                       // '^' — first non-blank
         return Step { ed: clamp(Editor { lines: ed.lines, cy: ed.cy, cx: first_nonblank(line_at(ed, ed.cy)) }), st: ist_done(st) }
     if b == 0x67                       // 'g' — await second g
-        return Step { ed: ed, st: InputState { count: st.count, pending: 1, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
+        return Step { ed: ed, st: InputState { count: st.count, pending: 1, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
     if b == 0x64                       // 'd' — await operator target (dd)
-        return Step { ed: ed, st: InputState { count: st.count, pending: 2, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
+        return Step { ed: ed, st: InputState { count: st.count, pending: 2, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
     if b == 0x79                       // 'y' — await operator target (yy)
-        return Step { ed: ed, st: InputState { count: st.count, pending: 3, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
+        return Step { ed: ed, st: InputState { count: st.count, pending: 3, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
     if b == 0x70                       // 'p' — paste after
         return Step { ed: paste(ed, st, true), st: ist_done(st) }
     if b == 0x50                       // 'P' — paste before
@@ -940,29 +1098,34 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
         return Step { ed: repeat_delete_char(ed, cnt), st: ist_done(st) }
     if b == 0x44                       // 'D' — delete to end of line
         return Step { ed: delete_to_eol(ed), st: ist_done(st) }
+    // Visual mode entry (slice 21): anchor the selection at the cursor.
+    if b == 0x76                       // 'v' — charwise visual
+        return Step { ed: ed, st: InputState { count: 0, pending: 0, mode: 2, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: ed.cy, avx: ed.cx } }
+    if b == 0x56                       // 'V' — linewise visual
+        return Step { ed: ed, st: InputState { count: 0, pending: 0, mode: 3, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: ed.cy, avx: ed.cx } }
     // Char-level edits (slice 14).
     if b == 0x7E                       // '~' — toggle case (count chars), advance
         return Step { ed: op_toggle_case(ed, cnt), st: ist_done(st) }
     if b == 0x4A                       // 'J' — join line(s)
         return Step { ed: op_join_lines(ed, cnt), st: ist_done(st) }
     if b == 0x72                       // 'r' — await the replacement byte
-        return Step { ed: ed, st: InputState { count: st.count, pending: 4, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
+        return Step { ed: ed, st: InputState { count: st.count, pending: 4, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
     if b == 0x3E                       // '>' — await second '>' (indent right)
-        return Step { ed: ed, st: InputState { count: st.count, pending: 5, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
+        return Step { ed: ed, st: InputState { count: st.count, pending: 5, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
     if b == 0x3C                       // '<' — await second '<' (indent left)
-        return Step { ed: ed, st: InputState { count: st.count, pending: 6, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
+        return Step { ed: ed, st: InputState { count: st.count, pending: 6, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
     // Operator + motion (slice 17): c awaits a motion (like d/y); f/F/t/T
     // await a target char.
     if b == 0x63                       // 'c' — change operator (awaits motion)
-        return Step { ed: ed, st: InputState { count: st.count, pending: 7, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
+        return Step { ed: ed, st: InputState { count: st.count, pending: 7, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
     if b == 0x66                       // 'f' — find char forward
-        return Step { ed: ed, st: InputState { count: st.count, pending: 8, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
+        return Step { ed: ed, st: InputState { count: st.count, pending: 8, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
     if b == 0x46                       // 'F' — find char backward
-        return Step { ed: ed, st: InputState { count: st.count, pending: 9, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
+        return Step { ed: ed, st: InputState { count: st.count, pending: 9, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
     if b == 0x74                       // 't' — till char forward
-        return Step { ed: ed, st: InputState { count: st.count, pending: 10, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
+        return Step { ed: ed, st: InputState { count: st.count, pending: 10, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
     if b == 0x54                       // 'T' — till char backward
-        return Step { ed: ed, st: InputState { count: st.count, pending: 11, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search } }
+        return Step { ed: ed, st: InputState { count: st.count, pending: 11, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
     if b == 0x43                       // 'C' — change to end of line
         let cline = line_at(ed, ed.cy)
         let tail = str.slice(cline, ed.cx, str.len(cline))
@@ -1676,13 +1839,41 @@ fn clear_screen() [io]
 // stale glyphs from a longer previous line survive.  Draws up to (rows-1)
 // buffer lines (a `~` past end-of-buffer), a reverse-video status line on the
 // last row, then places the hardware cursor at the editor cursor.
-fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode: Int, cs: Colorscheme, opts: Options) [io]
+// Emit visual columns [left, left+width) of an (already tab-expanded) line,
+// reverse-videoing the selected visual-column span [vlo, vhi) (vlo>=vhi → no
+// highlight, e.g. outside visual mode).
+fn emit_line_hl(expanded: Str, left: Int, width: Int, vlo: Int, vhi: Int) [io]
+    let elen = str.len(expanded)
+    let endc = if left + width < elen then left + width else elen
+    var c = left
+    var insel = false
+    while c < endc
+        let want = c >= vlo and c < vhi
+        if want and not insel
+            sgr("7")
+            insel = true
+        if not want and insel
+            sgr("0")
+            insel = false
+        emit_byte(str.byte_at(expanded, c) ?? 32)
+        c = c + 1
+    if insel
+        sgr("0")
+
+fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, cs: Colorscheme, opts: Options) [io]
     csi()
     emit("?25l")         // hide cursor while we repaint
     let body = rows - 1
     let nl = list.len(ed.lines)
     let gutter = if opts.number then 4 else 0      // "NNN " line-number column
     let width = if cols - gutter > 0 then cols - gutter else 1   // text area width
+    // Normalised visual selection bounds (start <= end), used for highlighting.
+    let a_first = avy < ed.cy or (avy == ed.cy and avx <= ed.cx)
+    let ssy = if a_first then avy else ed.cy
+    let ssx = if a_first then avx else ed.cx
+    let sey = if a_first then ed.cy else avy
+    let sex = if a_first then ed.cx else avx
+    let vis = mode == 2 or mode == 3
     let mut r = 0
     while r < body
         cup(r + 1, 1)
@@ -1690,12 +1881,22 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode
         if li < nl
             if opts.number
                 emit(pad_num(li + 1, 3) + " ")
-            // Tab-expand to visual columns, then show only [left, left+width).
-            let expanded = expand_tabs(ed.lines[li], opts.tabstop)
-            let elen = str.len(expanded)
-            if left < elen
-                let endc = if left + width < elen then left + width else elen
-                emit(str.slice(expanded, left, endc))
+            // Tab-expand to visual columns, then show only [left, left+width),
+            // reverse-videoing any selected span.
+            let raw = ed.lines[li]
+            let expanded = expand_tabs(raw, opts.tabstop)
+            var vlo = 0
+            var vhi = 0
+            if vis and li >= ssy and li <= sey
+                if mode == 3
+                    vlo = 0
+                    vhi = str.len(expanded)
+                else
+                    let blo = if li == ssy then ssx else 0
+                    let bhi = if li == sey then sex + 1 else str.len(raw)
+                    vlo = vis_col(raw, blo, opts.tabstop)
+                    vhi = vis_col(raw, bhi, opts.tabstop)
+            emit_line_hl(expanded, left, width, vlo, vhi)
         elif cs.tilde_fg >= 0
             sgr("38;5;" + str.from_int(cs.tilde_fg))
             emit("~")
@@ -1706,7 +1907,7 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode
         r = r + 1
     cup(rows, 1)
     sgr(status_sgr(cs))
-    let modestr = if mode == 1 then "-- INSERT -- " else "-- NORMAL -- "
+    let modestr = if mode == 1 then "-- INSERT -- " elif mode == 2 then "-- VISUAL -- " elif mode == 3 then "-- VISUAL LINE -- " else "-- NORMAL -- "
     emit(" " + path + "  " + str.from_int(ed.cy + 1) + ":" + str.from_int(ed.cx + 1) + "  " + modestr)
     el()                 // fill the rest of the status bar with the status bg
     sgr("0")
@@ -1761,7 +1962,7 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
     var search_buf = ""
     clear_screen()       // one-time clear of whatever was on screen before
     left = hscroll_for(left, ed, opts, cols)
-    render(ed, rows, cols, path, top, left, st.mode, cs, opts)
+    render(ed, rows, cols, path, top, left, st.mode, st.avy, st.avx, cs, opts)
     var running = true
     while running
         let m = novo_pty_poll_h(0, 100)      // poll host stdin (fd 0)
@@ -1819,7 +2020,7 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                     es = estep.es
             top = scroll_to(top, ed.cy, rows - 1)
             left = hscroll_for(left, ed, opts, cols)
-            render(ed, rows, cols, path, top, left, st.mode, cs, opts)
+            render(ed, rows, cols, path, top, left, st.mode, st.avy, st.avx, cs, opts)
             if cmd_mode
                 cup(rows, 1)
                 csi()
@@ -1836,7 +2037,7 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
             top = scroll_to(top, ed.cy, rows - 1)
             left = hscroll_for(left, ed, opts, cols)
             clear_screen()   // dimensions changed — clear stale content once
-            render(ed, rows, cols, path, top, left, st.mode, cs, opts)
+            render(ed, rows, cols, path, top, left, st.mode, st.avy, st.avx, cs, opts)
     novo_pty_restore_mode_h()
     csi()
     emit("2J")
