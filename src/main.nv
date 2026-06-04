@@ -103,6 +103,25 @@ fn index_of_byte(s: Str, b: Int) -> Int
         i = i + 1
     0 - 1
 
+// First byte offset of substring `needle` in `s`, or -1 if absent.
+fn index_of_str(s: Str, needle: Str) -> Int
+    let n = str.len(s)
+    let m = str.len(needle)
+    if m == 0
+        return 0
+    let mut i = 0
+    while i + m <= n
+        var j = 0
+        var ok = true
+        while j < m and ok
+            if (str.byte_at(s, i + j) ?? 0) != (str.byte_at(needle, j) ?? 0)
+                ok = false
+            j = j + 1
+        if ok
+            return i
+        i = i + 1
+    0 - 1
+
 // Column of the first non-blank glyph on `line` (0 if all blank/empty).
 fn first_nonblank(line: Str) -> Int
     let n = str.len(line)
@@ -4046,6 +4065,182 @@ fn default_config_path() -> Str [io]
     let home = process.env("HOME") ?? ""
     home + "/.config/novim/config.toml"
 
+// ── LSP (novols) client — transport (Phase A) ───────────────────────────────
+// novim talks JSON-RPC over stdio to `novols`.  All of this lives outside the
+// pure `feed`; see orbit/novim/docs/LSP-DESIGN.md.
+
+// Write a whole string to a fd.
+fn lsp_write_fd(fd: Int, s: Str) [io]
+    var i = 0
+    let n = str.len(s)
+    while i < n
+        let _ = novo_unix_write_byte_h(fd, str.byte_at(s, i) ?? 0)
+        i = i + 1
+
+// Send a JSON-RPC message: `Content-Length: N\r\n\r\n<body>`.
+fn lsp_send(fd: Int, body: Str) [io]
+    let cr = str.from_char(13)
+    let lf = str.from_char(10)
+    lsp_write_fd(fd, "Content-Length: " + str.from_int(str.len(body)) + cr + lf + cr + lf)
+    lsp_write_fd(fd, body)
+
+// Content-Length from a header blob (digits after the colon).
+fn lsp_content_length(hdr: Str) -> Int
+    let key = "Content-Length:"
+    let at = index_of_str(hdr, key)
+    if at < 0
+        return 0
+    var i = at + str.len(key)
+    let n = str.len(hdr)
+    while i < n and (str.byte_at(hdr, i) ?? 0) == 32          // skip spaces
+        i = i + 1
+    var v = 0
+    while i < n and (str.byte_at(hdr, i) ?? 0) >= 0x30 and (str.byte_at(hdr, i) ?? 0) <= 0x39
+        v = v * 10 + ((str.byte_at(hdr, i) ?? 0) - 0x30)
+        i = i + 1
+    v
+
+// Read one framed message body (blocking; the server sends complete frames).
+// Returns "" on EOF/error.
+fn lsp_read_message(fd: Int) -> Str [io]
+    var hdr = ""
+    var hdone = false
+    while not hdone
+        let b = novo_unix_read_byte_h(fd)
+        if b < 0
+            return ""
+        hdr = hdr + str.from_char(b)
+        let m = str.len(hdr)
+        if m >= 4 and (str.byte_at(hdr, m - 4) ?? 0) == 13 and (str.byte_at(hdr, m - 3) ?? 0) == 10 and (str.byte_at(hdr, m - 2) ?? 0) == 13 and (str.byte_at(hdr, m - 1) ?? 0) == 10
+            hdone = true
+        if m > 4096
+            return ""
+    let clen = lsp_content_length(hdr)
+    var body = ""
+    var k = 0
+    while k < clen
+        let b = novo_unix_read_byte_h(fd)
+        if b < 0
+            return body
+        body = body + str.from_char(b)
+        k = k + 1
+    body
+
+// Poll-gated read: returns "" if nothing arrives within `timeout` ms.
+fn lsp_poll_message(fd: Int, timeout: Int) -> Str [io, time]
+    if novo_unix_poll_h(fd, timeout) == 1
+        lsp_read_message(fd)
+    else
+        ""
+
+// Escape a string for a JSON string value.
+fn json_escape(s: Str) -> Str
+    let bs = str.from_char(92)
+    var out = ""
+    var i = 0
+    let n = str.len(s)
+    while i < n
+        let b = str.byte_at(s, i) ?? 0
+        if b == 34
+            out = out + bs + str.from_char(34)
+        elif b == 92
+            out = out + bs + str.from_char(92)
+        elif b == 10
+            out = out + bs + str.from_char(110)
+        elif b == 13
+            out = out + bs + str.from_char(114)
+        elif b == 9
+            out = out + bs + str.from_char(116)
+        else
+            out = out + str.from_char(b)
+        i = i + 1
+    out
+
+fn lsp_q(s: Str) -> Str
+    str.from_char(34) + s + str.from_char(34)
+
+// Request / notification builders.
+fn lsp_init_req(uri: Str) -> Str
+    "{" + lsp_q("jsonrpc") + ":" + lsp_q("2.0") + "," + lsp_q("id") + ":1," + lsp_q("method") + ":" + lsp_q("initialize") + "," + lsp_q("params") + ":{" + lsp_q("processId") + ":null," + lsp_q("rootUri") + ":null," + lsp_q("capabilities") + ":{}}}"
+
+fn lsp_initialized() -> Str
+    "{" + lsp_q("jsonrpc") + ":" + lsp_q("2.0") + "," + lsp_q("method") + ":" + lsp_q("initialized") + "," + lsp_q("params") + ":{}}"
+
+fn lsp_didopen(uri: Str, text: Str) -> Str
+    "{" + lsp_q("jsonrpc") + ":" + lsp_q("2.0") + "," + lsp_q("method") + ":" + lsp_q("textDocument/didOpen") + "," + lsp_q("params") + ":{" + lsp_q("textDocument") + ":{" + lsp_q("uri") + ":" + lsp_q(uri) + "," + lsp_q("languageId") + ":" + lsp_q("novo") + "," + lsp_q("version") + ":1," + lsp_q("text") + ":" + lsp_q(json_escape(text)) + "}}}"
+
+// Diagnostic's start line (range.start.line), or -1.
+fn lsp_diag_line(d: JsonValueH) -> Int
+    match json.get(d, "range")
+        None => 0 - 1
+        Some(rng) =>
+            match json.get(rng, "start")
+                None => 0 - 1
+                Some(st) => json.get_int(st, "line") ?? (0 - 1)
+
+// If `doc` is a publishDiagnostics notification, print its diagnostics and
+// return true; otherwise return false.  Flattens the nesting that the parser
+// chokes on when inlined into run_lsp_diag's poll loop.
+fn lsp_print_diag_list(ds: [JsonValueH])
+    println("diagnostics: " + str.from_int(list.len(ds)))
+    var di = 0
+    while di < list.len(ds)
+        let d = ds[di]
+        println("  line " + str.from_int(lsp_diag_line(d) + 1) + " sev " + str.from_int(json.get_int(d, "severity") ?? 0) + ": " + (json.get_str(d, "message") ?? ""))
+        di = di + 1
+
+fn lsp_print_diags(doc: JsonValueH) -> Bool
+    if (json.get_str(doc, "method") ?? "") != "textDocument/publishDiagnostics"
+        return false
+    match json.get(doc, "params")
+        None => return false
+        Some(params) =>
+            match json.get_list(params, "diagnostics")
+                None => println("diagnostics: 0")
+                Some(ds) => lsp_print_diag_list(ds)
+    return true
+
+// Parse one framed message and, if it is a publishDiagnostics notification,
+// print it.  Returns true once diagnostics have been shown.
+fn lsp_msg_diags(msg: Str) -> Bool
+    if str.len(msg) == 0
+        return false
+    match json.parse(msg)
+        None => return false
+        Some(doc) =>
+            // NB: `return lsp_print_diags(doc)` directly miscompiles on LLVM —
+            // the match-subject drop is emitted before the call, so `doc` is a
+            // freed handle inside the callee.  Bind first, then return.
+            // See bugs/codegen-llvm/llvm-return-call-in-match-arm-drops-subject.md
+            let r = lsp_print_diags(doc)
+            return r
+
+// `--lsp-diag <file>`: spawn novols, open the file, print its diagnostics.
+// Deterministic transport smoke test for Phase A.
+fn run_lsp_diag(path: Str) [io, time]
+    match Subprocess.spawn(["novols"])
+        None => println("novols: spawn failed")
+        Some(p) =>
+            let in_fd = p.stdin_fd()
+            let out_fd = p.stdout_fd()
+            let uri = "file://" + path
+            lsp_send(in_fd, lsp_init_req(uri))
+            let _ = lsp_poll_message(out_fd, 2000)               // initialize result
+            lsp_send(in_fd, lsp_initialized())
+            let text = buf_text(Editor { lines: buf_load(path), cy: 0, cx: 0 })
+            lsp_send(in_fd, lsp_didopen(uri, text))
+            var iters = 0
+            var shown = false
+            while iters < 40 and not shown
+                let msg = lsp_poll_message(out_fd, 500)
+                if lsp_msg_diags(msg)
+                    shown = true
+                iters = iters + 1
+            if not shown
+                println("diagnostics: (none received)")
+            let _ = p.kill(15)
+            p.close()
+
 fn main() [io, time]
     let argv = env.args()
     let n = list.len(argv)
@@ -4053,6 +4248,7 @@ fn main() [io, time]
     var batch_keys = ""
     var file = ""
     var cfg = ""
+    var lsp_diag = false
     let mut i = 1
     while i < n
         let a = argv[i]
@@ -4063,12 +4259,17 @@ fn main() [io, time]
         elif a == "--config" and i + 1 < n
             cfg = argv[i + 1]
             i = i + 2
+        elif a == "--lsp-diag"
+            lsp_diag = true
+            i = i + 1
         else
             file = a
             i = i + 1
     let cfg_path = if cfg != "" then cfg else default_config_path()
     if file == ""
-        println("usage: novim [--config <toml>] [--batch <keys>] <file>")
+        println("usage: novim [--config <toml>] [--batch <keys>] [--lsp-diag] <file>")
+    elif lsp_diag
+        run_lsp_diag(file)
     elif is_batch
         run_batch(batch_keys, cfg_path, file)
     else
