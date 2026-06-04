@@ -2075,7 +2075,8 @@ fn find_last_in_line(hay: Str, needle: Str, before: Int) -> Int
 // supports `&` (whole match).  Powers `/`, `?`, `n`, `*`, `#`, `:s`, `:g`.
 
 struct ReAtom
-    kind:  Int      // 0 literal, 1 any, 2 class, 3 ^, 4 $, 5 (group, 6 )group
+    kind:  Int      // 0 lit, 1 any, 2 class, 3 ^, 4 $, 5 (grp, 6 )grp, 7 split, 8 jmp
+                    // for kind 7/8, `ch` is a forward offset (relative to this atom's index)
     ch:    Int      // literal byte
     cls:   Str      // class members (raw; `a-z` ranges interpreted at match time)
     neg:   Bool     // negated class
@@ -2101,16 +2102,6 @@ fn caps_empty() -> [Int]
         xs = list.append(xs, [0 - 1])
         i = i + 1
     xs
-
-// Drop the last element of an [Int] (group-stack pop during compile).
-fn list_drop_last(xs: [Int]) -> [Int]
-    var out: [Int] = []
-    let n = list.len(xs)
-    var i = 0
-    while i < n - 1
-        out = list.append(out, [xs[i]])
-        i = i + 1
-    out
 
 // Class members for a \d \w \s shortcut letter.
 fn re_shortcut_cls(letter: Int) -> Str
@@ -2186,6 +2177,13 @@ fn re_match_here(atoms: [ReAtom], ai: Int, s: Str, si: Int, caps: [Int]) -> ReRe
         return re_match_here(atoms, ai + 1, s, si, set_int_at(caps, 2 * a.ch, si))
     if a.kind == 6                                   // ) group end — zero-width
         return re_match_here(atoms, ai + 1, s, si, set_int_at(caps, 2 * a.ch + 1, si))
+    if a.kind == 7                                   // split (alternation) — try branch 1, then 2
+        let r = re_match_here(atoms, ai + 1, s, si, caps)
+        if r.end >= 0
+            return r
+        return re_match_here(atoms, ai + a.ch, s, si, caps)
+    if a.kind == 8                                   // jump (skip 2nd alternative)
+        return re_match_here(atoms, ai + a.ch, s, si, caps)
     if a.quant == 1                                  // *
         return re_match_star(atoms, ai, s, si, 0, caps)
     if a.quant == 2                                  // +
@@ -2200,8 +2198,10 @@ fn re_match_here(atoms: [ReAtom], ai: Int, s: Str, si: Int, caps: [Int]) -> ReRe
         return re_match_here(atoms, ai + 1, s, si + 1, caps)
     re_fail()
 
-// Compile a pattern into atoms.
-fn re_compile(pat: Str) -> [ReAtom]
+// Compile a single alternative (no top-level `\|`) into atoms.  Handles
+// literals, `.`, `[..]`/`[^..]` classes, `\d\w\s\D\W\S`, `\(..\)` capture
+// groups, `\x` escapes, `^`/`$` anchors, and `*`/`\+`/`\?` quantifiers.
+fn re_compile_one(pat: Str) -> [ReAtom]
     var atoms: [ReAtom] = []
     let n = str.len(pat)
     var i = 0
@@ -2250,7 +2250,7 @@ fn re_compile(pat: Str) -> [ReAtom]
             elif nx == 0x29                                  // \) group end
                 kind = 6
                 ch = if list.len(gstack) > 0 then gstack[list.len(gstack) - 1] else 0
-                gstack = list_drop_last(gstack)
+                gstack = if list.len(gstack) > 0 then list.slice(gstack, 0, list.len(gstack) - 1) else gstack
             else                                             // \x → literal x
                 kind = 0
                 ch = nx
@@ -2272,6 +2272,61 @@ fn re_compile(pat: Str) -> [ReAtom]
                 i = i + 2
         atoms = list.append(atoms, [re_atom(kind, ch, cls, neg, quant)])
     atoms
+
+// Split a pattern into top-level alternatives at `\|` (depth 0 — `\|` inside
+// `\(..\)` or `[..]` does not split).  Other `\x` escapes are skipped whole.
+fn re_split_top(pat: Str) -> [Str]
+    var parts: [Str] = []
+    let n = str.len(pat)
+    var start = 0
+    var i = 0
+    var depth = 0
+    var inclass = false
+    while i < n
+        let c = str.byte_at(pat, i) ?? 0
+        let nx = if i + 1 < n then str.byte_at(pat, i + 1) ?? 0 else 0
+        if inclass
+            if c == 0x5D                             // ]
+                inclass = false
+            i = i + 1
+        elif c == 0x5B                               // [
+            inclass = true
+            i = i + 1
+        elif c == 0x5C and nx == 0x28                // \(
+            depth = depth + 1
+            i = i + 2
+        elif c == 0x5C and nx == 0x29                // \)
+            depth = depth - 1
+            i = i + 2
+        elif c == 0x5C and nx == 0x7C and depth == 0 // top-level \|
+            parts = list.append(parts, [str.slice(pat, start, i)])
+            i = i + 2
+            start = i
+        elif c == 0x5C and i + 1 < n                 // other escape — skip both
+            i = i + 2
+        else
+            i = i + 1
+    list.append(parts, [str.slice(pat, start, n)])
+
+// Compile a pattern into atoms.  Top-level alternation `a\|b\|c` lowers to a
+// relative-offset split/jump NFA (folded iteratively, no recursion); a pattern
+// with no top-level `\|` compiles straight through `re_compile_one`.
+fn re_compile(pat: Str) -> [ReAtom]
+    let parts = re_split_top(pat)
+    let np = list.len(parts)
+    var acc = re_compile_one(parts[np - 1])
+    var idx = np - 2
+    while idx >= 0
+        let fi = re_compile_one(parts[idx])
+        let l1 = list.len(fi)
+        let lacc = list.len(acc)
+        var out: [ReAtom] = [re_atom(7, l1 + 2, "", false, 0)]   // split → branch2
+        out = list.append(out, fi)
+        out = list.append(out, [re_atom(8, lacc + 1, "", false, 0)])   // jmp over branch2
+        out = list.append(out, acc)
+        acc = out
+        idx = idx - 1
+    acc
 
 // First match start at/after `from` (-1 if none).
 fn re_find_in_line(atoms: [ReAtom], line: Str, from: Int) -> Int
