@@ -823,6 +823,32 @@ fn find_target(ed: Editor, ch: Int, forward: Bool, till: Bool, count: Int) -> MT
         let idx = find_char_bwd(line, ch, ed.cx, count)
         if idx < 0 then mt_none(ed) else mt(ed.cy, if till then idx + 1 else idx, false, false)
 
+// Row of the `count`-th paragraph boundary (an empty line) below the cursor.
+// Stops at the last line when the buffer ends first.
+fn para_fwd(ed: Editor, count: Int) -> Int
+    let n = list.len(ed.lines)
+    var cy = ed.cy
+    var c = 0
+    while c < count
+        var i = cy + 1
+        while i < n and str.len(line_at(ed, i)) != 0
+            i = i + 1
+        cy = if i >= n then n - 1 else i
+        c = c + 1
+    cy
+
+// Row of the `count`-th paragraph boundary above the cursor (or the first line).
+fn para_bwd(ed: Editor, count: Int) -> Int
+    var cy = ed.cy
+    var c = 0
+    while c < count
+        var i = cy - 1
+        while i >= 0 and str.len(line_at(ed, i)) != 0
+            i = i - 1
+        cy = if i < 0 then 0 else i
+        c = c + 1
+    cy
+
 // Resolve a motion byte to an operator target relative to the cursor.
 // `rawcount` is 0 when no count was typed; per-step motions default it to 1,
 // but `G` needs the raw value (no count → last line, not line 1).
@@ -864,6 +890,10 @@ fn motion_target(ed: Editor, b: Int, rawcount: Int) -> MTarget
         return mt(ed.cy - count, 0, true, false)
     if b == 0x47                                  // G — linewise to line
         return mt(if rawcount > 0 then rawcount - 1 else list.len(ed.lines) - 1, 0, true, false)
+    if b == 0x7D                                  // } — paragraph forward (linewise)
+        return mt(para_fwd(ed, count), 0, true, false)
+    if b == 0x7B                                  // { — paragraph backward (linewise)
+        return mt(para_bwd(ed, count), 0, true, false)
     MTarget { ty: ed.cy, tx: ed.cx, ok: false, linewise: false, inclusive: false }
 
 // End-of-command state carrying a fresh CHARWISE register (used by d/c/y over
@@ -1265,6 +1295,10 @@ fn visual_motion(ed: Editor, b: Int, cnt: Int) -> Editor
         clamp(Editor { lines: ed.lines, cy: list.len(ed.lines) - 1, cx: ed.cx })
     elif b == 0x25
         match_pair(ed)
+    elif b == 0x7D
+        clamp(Editor { lines: ed.lines, cy: para_fwd(ed, cnt), cx: 0 })
+    elif b == 0x7B
+        clamp(Editor { lines: ed.lines, cy: para_bwd(ed, cnt), cx: 0 })
     else
         ed
 
@@ -1611,6 +1645,10 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
         return Step { ed: clamp(Editor { lines: ed.lines, cy: ed.cy, cx: ex }), st: ist_done(st) }
     if b == 0x5E                       // '^' — first non-blank
         return Step { ed: clamp(Editor { lines: ed.lines, cy: ed.cy, cx: first_nonblank(line_at(ed, ed.cy)) }), st: ist_done(st) }
+    if b == 0x7D                       // '}' — next paragraph (blank line)
+        return Step { ed: clamp(Editor { lines: ed.lines, cy: para_fwd(ed, cnt), cx: 0 }), st: ist_done(st) }
+    if b == 0x7B                       // '{' — previous paragraph (blank line)
+        return Step { ed: clamp(Editor { lines: ed.lines, cy: para_bwd(ed, cnt), cx: 0 }), st: ist_done(st) }
     if b == 0x67                       // 'g' — await second g
         return Step { ed: ed, st: InputState { count: st.count, pending: 1, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
     if b == 0x64                       // 'd' — await operator target (dd)
