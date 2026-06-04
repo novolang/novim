@@ -1981,6 +1981,16 @@ fn is_fmt(cmd: Str) -> Bool
     let c = str.trim(cmd)
     c == "fmt" or c == "format"
 
+// `:sym <name>` — jump to a document symbol whose name contains <name>.
+fn is_sym(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    c == "sym" or (str.len(c) > 4 and str.slice(c, 0, 4) == "sym ")
+
+// The query fragment after `:sym` (trimmed; "" jumps to the first symbol).
+fn sym_query(cmd: Str) -> Str
+    let c = str.trim(cmd)
+    if str.len(c) <= 4 then "" else str.trim(str.slice(c, 4, str.len(c)))
+
 fn ex_goto(ed: Editor, cmd: Str) -> Editor
     let c = str.trim(cmd)
     let nl = list.len(ed.lines)
@@ -4055,6 +4065,30 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                                         lsp_info = "formatted"
                             else
                                 lsp_info = "format: LSP not ready"
+                        elif is_sym(cmd_buf)
+                            if lsp_phase == 2
+                                let q = sym_query(cmd_buf)
+                                lsp_reqid = lsp_reqid + 1
+                                lsp_send(lsp_in, lsp_documentsymbol_req(lsp_reqid, lsp_uri))
+                                let sresp = lsp_pump(lsp_out, lsp_reqid, 40)
+                                if str.len(sresp) == 0
+                                    lsp_info = "sym: no response"
+                                else
+                                    let snames = lsp_sym_names(sresp)
+                                    let spos = lsp_sym_pos(sresp)
+                                    var found = 0 - 1
+                                    var si = 0
+                                    while si < list.len(snames) and found < 0
+                                        if str.len(q) == 0 or index_of_str(snames[si], q) >= 0
+                                            found = si
+                                        si = si + 1
+                                    if found >= 0 and found * 2 + 1 < list.len(spos)
+                                        ed = clamp(Editor { lines: ed.lines, cy: spos[found * 2], cx: spos[found * 2 + 1] })
+                                        lsp_info = "sym: " + snames[found]
+                                    else
+                                        lsp_info = "sym: no match"
+                            else
+                                lsp_info = "sym: LSP not ready"
                         else
                             let r = exec_ex(cmd_buf)
                             if r.save
@@ -4650,31 +4684,101 @@ fn lsp_fmt_newtext(msg: Str) -> Str
         None => ""
         Some(doc) => lsp_fmt_newtext_doc(doc)
 
+// ── document symbols (:sym <name>) ──────────────────────────────────────────
+fn lsp_documentsymbol_req(id: Int, uri: Str) -> Str
+    "{" + lsp_q("jsonrpc") + ":" + lsp_q("2.0") + "," + lsp_q("id") + ":" + str.from_int(id) + "," + lsp_q("method") + ":" + lsp_q("textDocument/documentSymbol") + "," + lsp_q("params") + ":{" + lsp_q("textDocument") + ":{" + lsp_q("uri") + ":" + lsp_q(uri) + "}}}"
+
+// [line, character] of a Range node's start, or [].
+fn range_start_pos(rng: JsonValueH) -> [Int]
+    match json.get(rng, "start")
+        None => []
+        Some(st) =>
+            let ln = json.get_int(st, "line") ?? 0
+            let ch = json.get_int(st, "character") ?? 0
+            [ln, ch]
+
+// A symbol's name location ([line, char]) from selectionRange (the name span).
+fn lsp_sym_pos_of(s: JsonValueH) -> [Int]
+    match json.get(s, "selectionRange")
+        None => []
+        Some(sr) => range_start_pos(sr)
+
+// Parallel name + position stores for the document's top-level symbols.  (The
+// novols response is flat SymbolInformation — no nested children — so no
+// recursion is needed.)
+fn lsp_sym_names_arr(syms: [JsonValueH]) -> [Str]
+    var out: [Str] = []
+    var i = 0
+    while i < list.len(syms)
+        out = list.push(out, json.get_str(syms[i], "name") ?? "")
+        i = i + 1
+    out
+
+fn lsp_sym_names_doc(doc: JsonValueH) -> [Str]
+    match json.get_list(doc, "result")
+        None => []
+        Some(syms) => lsp_sym_names_arr(syms)
+
+fn lsp_sym_names(msg: Str) -> [Str]
+    match json.parse(msg)
+        None => []
+        Some(doc) => lsp_sym_names_doc(doc)
+
+fn lsp_sym_pos_arr(syms: [JsonValueH]) -> [Int]
+    var out: [Int] = []
+    var i = 0
+    while i < list.len(syms)
+        let p = lsp_sym_pos_of(syms[i])
+        if list.len(p) >= 2
+            out = list.push(out, p[0])
+            out = list.push(out, p[1])
+        else
+            out = list.push(out, 0)
+            out = list.push(out, 0)
+        i = i + 1
+    out
+
+fn lsp_sym_pos_doc(doc: JsonValueH) -> [Int]
+    match json.get_list(doc, "result")
+        None => []
+        Some(syms) => lsp_sym_pos_arr(syms)
+
+// Flat [line0, char0, line1, char1, …] index-aligned with `lsp_sym_names`.
+fn lsp_sym_pos(msg: Str) -> [Int]
+    match json.parse(msg)
+        None => []
+        Some(doc) => lsp_sym_pos_doc(doc)
+
 // `--lsp-diag <file>`: spawn novols, open the file, print its diagnostics.
 // Deterministic transport smoke test for Phase A.
 fn run_lsp_diag(path: Str) [io, time]
-    match Subprocess.spawn(["novols"])
-        None => println("novols: spawn failed")
-        Some(p) =>
-            let in_fd = p.stdin_fd()
-            let out_fd = p.stdout_fd()
-            let uri = "file://" + path
-            lsp_send(in_fd, lsp_init_req(uri))
-            let _ = lsp_poll_message(out_fd, 2000)               // initialize result
-            lsp_send(in_fd, lsp_initialized())
-            let text = buf_text(Editor { lines: buf_load(path), cy: 0, cx: 0 })
-            lsp_send(in_fd, lsp_didopen(uri, text))
-            var iters = 0
-            var shown = false
-            while iters < 40 and not shown
-                let msg = lsp_poll_message(out_fd, 500)
-                if lsp_msg_diags(msg)
-                    shown = true
-                iters = iters + 1
-            if not shown
-                println("diagnostics: (none received)")
-            let _ = p.kill(15)
-            p.close()
+    // Use the free `proc.*` surface (pid-keyed) rather than the Subprocess
+    // methods: the method-return slot-type inference is fragile (an fd binder
+    // gets a ptr slot for the i64 return) and breaks the build as unrelated
+    // code shifts inference.  The free fns are what run_interactive uses.
+    let pid = lsp_spawn()
+    if pid < 0
+        println("novols: spawn failed")
+    else
+        let in_fd = proc.stdin_fd(pid)
+        let out_fd = proc.stdout_fd(pid)
+        let uri = "file://" + path
+        lsp_send(in_fd, lsp_init_req(uri))
+        let _ = lsp_poll_message(out_fd, 2000)               // initialize result
+        lsp_send(in_fd, lsp_initialized())
+        let text = buf_text(Editor { lines: buf_load(path), cy: 0, cx: 0 })
+        lsp_send(in_fd, lsp_didopen(uri, text))
+        var iters = 0
+        var shown = false
+        while iters < 40 and not shown
+            let msg = lsp_poll_message(out_fd, 500)
+            if lsp_msg_diags(msg)
+                shown = true
+            iters = iters + 1
+        if not shown
+            println("diagnostics: (none received)")
+        let _ = proc.kill(pid, 15)
+        proc.close(pid)
 
 fn main() [io, time]
     let argv = env.args()
