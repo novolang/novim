@@ -2950,7 +2950,8 @@ fn edit_repeat_find(ed: Editor, st: InputState, es: EditState, reverse: Bool) ->
     let fwd0 = es.findt == 8 or es.findt == 10
     let till = es.findt == 10 or es.findt == 11
     let fwd = if reverse then not fwd0 else fwd0
-    EditStep { ed: move_find(ed, es.findc, fwd, till, cnt), st: ist_done(st), es: es }
+    // ; / , is motion-only; reset any recording a leading count digit started.
+    EditStep { ed: move_find(ed, es.findc, fwd, till, cnt), st: ist_done(st), es: EditState { last: es.last, cur: "", snaptxt: "", active: false, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: es.recording, macrobuf: es.macrobuf, awaitmac: es.awaitmac, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt, giy: es.giy, gix: es.gix } }
 
 // `u` — pop the undo stack onto the redo stack and restore the buffer.
 fn edit_undo(ed: Editor, st: InputState, es: EditState) -> EditStep
@@ -3005,7 +3006,7 @@ fn feed_edit_inner(ed: Editor, st: InputState, km: Keymap, es: EditState, b: Int
         return edit_regv(ed, st, es)
     if st.pending == 1 and b == 0x69 and es.giy >= 0            // `gi` — resume Insert at the last position
         return edit_gi(ed, st, es)
-    if st.mode == 0 and st.pending == 0 and (not es.active) and (b == 0x3B or b == 0x2C) and es.findt >= 8   // ; / , — repeat find
+    if st.mode == 0 and st.pending == 0 and (b == 0x3B or b == 0x2C) and es.findt >= 8   // ; / , — repeat find (count ok)
         return edit_repeat_find(ed, st, es, b == 0x2C)
     if es.active                                                // mid-command
         return edit_record(ed, st, km, es, b)
