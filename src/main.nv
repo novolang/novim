@@ -1425,6 +1425,27 @@ fn feed_insert(ed: Editor, st: InputState, b: Int) -> Step
         return Step { ed: insert_char(ed, b), st: st }
     Step { ed: ed, st: st }            // ignore other control bytes
 
+// Overtype the char at the cursor (Replace mode), advancing one column;
+// appends when already at end-of-line.
+fn overtype_char(ed: Editor, b: Int) -> Editor
+    let line = line_at(ed, ed.cy)
+    let n = str.len(line)
+    let newline = if ed.cx < n then str.slice(line, 0, ed.cx) + str.from_char(b) + str.slice(line, ed.cx + 1, n) else line + str.from_char(b)
+    clamp_insert(Editor { lines: set_line(ed.lines, ed.cy, newline), cy: ed.cy, cx: ed.cx + 1 })
+
+// Handle one byte in Replace mode (`R`): printables overwrite instead of
+// insert.  Backspace just steps left (no original-char restore in v1).
+fn feed_replace(ed: Editor, st: InputState, b: Int) -> Step
+    if b == 27                         // Esc → Normal (cursor steps left)
+        return Step { ed: clamp(Editor { lines: ed.lines, cy: ed.cy, cx: ed.cx - 1 }), st: ist_done(st) }
+    if b == 13 or b == 10              // Enter → split line
+        return Step { ed: insert_newline(ed), st: st }
+    if b == 127 or b == 8              // Backspace → step left
+        return Step { ed: clamp_insert(Editor { lines: ed.lines, cy: ed.cy, cx: ed.cx - 1 }), st: st }
+    if b == 9 or (b >= 32 and b < 127) // printable → overwrite
+        return Step { ed: overtype_char(ed, b), st: st }
+    Step { ed: ed, st: st }
+
 // Feed one byte through the Normal-mode handler, threading InputState.
 // Counts (`5j`, `10G`), line motions (`0 $ ^`), and buffer motions
 // (`gg G`) join the slice-1 `h j k l`.  (slices 1-2)
@@ -1435,6 +1456,9 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
     // Visual mode (slice 21): charwise (2) / linewise (3).
     if st.mode == 2 or st.mode == 3
         return feed_visual(ed, st, b)
+    // Replace mode (slice 36): overtype.
+    if st.mode == 4
+        return feed_replace(ed, st, b)
     // Operators awaiting a second key (pending: 1=g, 2=d, 3=y).
     if st.pending == 1
         if b == 0x67                   // `gg` — go to line (count or 1)
@@ -1569,6 +1593,8 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
         return Step { ed: clamp(Editor { lines: ed.lines, cy: tgt, cx: ed.cx }), st: ist_done(st) }
     if b == 0x25                       // '%' — jump to the matching bracket
         return Step { ed: match_pair(ed), st: ist_done(st) }
+    if b == 0x52                       // 'R' — enter Replace (overtype) mode
+        return Step { ed: ed, st: InputState { count: 0, pending: 0, mode: 4, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
     // Insert-mode entry (slice 4).  Position the cursor (insert-clamped so
     // it may sit at end-of-line) and switch to Insert.
     if b == 0x69                       // 'i' — insert before cursor
@@ -2112,7 +2138,7 @@ fn is_edit_start(b: Int) -> Bool
     if b >= 0x30 and b <= 0x39                               // count digit (may precede an edit)
         return true
     // i a I A  o O  x X D  J ~ r  s S c C  p P  d > <
-    let edits = [0x69, 0x61, 0x49, 0x41, 0x6F, 0x4F, 0x78, 0x58, 0x44, 0x4A, 0x7E, 0x72, 0x73, 0x53, 0x63, 0x43, 0x70, 0x50, 0x64, 0x3E, 0x3C]
+    let edits = [0x69, 0x61, 0x49, 0x41, 0x6F, 0x4F, 0x78, 0x58, 0x44, 0x4A, 0x7E, 0x72, 0x73, 0x53, 0x63, 0x43, 0x70, 0x50, 0x64, 0x3E, 0x3C, 0x52, 0x01, 0x18]
     var found = false
     let mut i = 0
     let n = list.len(edits)
@@ -2665,7 +2691,7 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode
         r = r + 1
     cup(rows, 1)
     sgr(status_sgr(cs))
-    let modestr = if mode == 1 then "-- INSERT -- " elif mode == 2 then "-- VISUAL -- " elif mode == 3 then "-- VISUAL LINE -- " else "-- NORMAL -- "
+    let modestr = if mode == 1 then "-- INSERT -- " elif mode == 2 then "-- VISUAL -- " elif mode == 3 then "-- VISUAL LINE -- " elif mode == 4 then "-- REPLACE -- " else "-- NORMAL -- "
     emit(" " + path + "  " + str.from_int(ed.cy + 1) + ":" + str.from_int(ed.cx + 1) + "  " + modestr)
     el()                 // fill the rest of the status bar with the status bg
     sgr("0")
