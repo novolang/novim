@@ -640,6 +640,81 @@ fn move_find(ed: Editor, ch: Int, forward: Bool, till: Bool, count: Int) -> Edit
         let idx = find_char_bwd(line, ch, ed.cx, count)
         if idx < 0 then ed else clamp(Editor { lines: ed.lines, cy: ed.cy, cx: if till then idx + 1 else idx })
 
+// ── % matching pair (slice 26) ──────────────────────────────────────────
+
+fn is_open_bracket(ch: Int) -> Bool
+    ch == 0x28 or ch == 0x5B or ch == 0x7B            // ( [ {
+
+fn is_close_bracket(ch: Int) -> Bool
+    ch == 0x29 or ch == 0x5D or ch == 0x7D            // ) ] }
+
+fn bracket_close_of(ch: Int) -> Int
+    if ch == 0x28 then 0x29 elif ch == 0x5B then 0x5D else 0x7D       // ( [ {  → ) ] }
+
+fn bracket_open_of(ch: Int) -> Int
+    if ch == 0x29 then 0x28 elif ch == 0x5D then 0x5B else 0x7B       // ) ] }  → ( [ {
+
+// Walk forward from (sy,sx) to the close that matches `open_ch`/`close_ch`.
+fn scan_match_fwd(ed: Editor, sy: Int, sx: Int, open_ch: Int, close_ch: Int) -> Editor
+    var depth = 0
+    var y = sy
+    var x = sx
+    let ny = list.len(ed.lines)
+    while y < ny
+        let line = line_at(ed, y)
+        let n = str.len(line)
+        while x < n
+            let ch = str.byte_at(line, x) ?? 0
+            if ch == open_ch
+                depth = depth + 1
+            elif ch == close_ch
+                if depth == 0
+                    return clamp(Editor { lines: ed.lines, cy: y, cx: x })
+                depth = depth - 1
+            x = x + 1
+        y = y + 1
+        x = 0
+    ed
+
+// Walk backward from (sy,sx) to the open that matches.
+fn scan_match_bwd(ed: Editor, sy: Int, sx: Int, open_ch: Int, close_ch: Int) -> Editor
+    var depth = 0
+    var y = sy
+    var x = sx
+    while y >= 0
+        while x >= 0
+            let ch = str.byte_at(line_at(ed, y), x) ?? 0
+            if ch == close_ch
+                depth = depth + 1
+            elif ch == open_ch
+                if depth == 0
+                    return clamp(Editor { lines: ed.lines, cy: y, cx: x })
+                depth = depth - 1
+            x = x - 1
+        y = y - 1
+        if y >= 0
+            x = str.len(line_at(ed, y)) - 1
+    ed
+
+// `%` — jump to the bracket matching the one at/after the cursor on the line.
+fn match_pair(ed: Editor) -> Editor
+    let line = line_at(ed, ed.cy)
+    let n = str.len(line)
+    var bx = ed.cx
+    var bch = 0
+    while bx < n and bch == 0
+        let ch = str.byte_at(line, bx) ?? 0
+        if is_open_bracket(ch) or is_close_bracket(ch)
+            bch = ch
+        else
+            bx = bx + 1
+    if bch == 0
+        return ed
+    if is_open_bracket(bch)
+        scan_match_fwd(ed, ed.cy, bx + 1, bch, bracket_close_of(bch))
+    else
+        scan_match_bwd(ed, ed.cy, bx - 1, bracket_open_of(bch), bch)
+
 // ── Operator + motion (slice 17): d / c / y over a motion ───────────────
 
 // A motion's resolved destination, as an operator target.  Charwise targets
@@ -800,6 +875,13 @@ fn feed_operator(ed: Editor, st: InputState, opb: Int, pcode: Int, b: Int) -> St
         return Step { ed: ed, st: InputState { count: st.count, pending: 40 + opidx * 2 + 0, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
     if b == 0x61                                  // a — around text object: pending 41/43/45
         return Step { ed: ed, st: InputState { count: st.count, pending: 40 + opidx * 2 + 1, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
+    if b == 0x25                                  // % — to the matching bracket (inclusive, may span lines)
+        let m = match_pair(ed)
+        if m.cy == ed.cy and m.cx == ed.cx
+            return Step { ed: ed, st: ist_done(st) }   // no match — cancel
+        let before = m.cy < ed.cy or (m.cy == ed.cy and m.cx < ed.cx)
+        let vr = if before then VRange { sy: m.cy, sx: m.cx, ey: ed.cy, ex: ed.cx } else VRange { sy: ed.cy, sx: ed.cx, ey: m.cy, ex: m.cx }
+        return apply_char_vr(ed, st, opb, vr)
     let mb = if opb == 0x63 and b == 0x77 then 0x65 else b   // cw behaves like ce
     let tgt = motion_target(ed, mb, st.count)               // raw count (0 = none)
     if tgt.ok
@@ -1052,6 +1134,8 @@ fn visual_motion(ed: Editor, b: Int, cnt: Int) -> Editor
         clamp(Editor { lines: ed.lines, cy: ed.cy, cx: first_nonblank(line_at(ed, ed.cy)) })
     elif b == 0x47
         clamp(Editor { lines: ed.lines, cy: list.len(ed.lines) - 1, cx: ed.cx })
+    elif b == 0x25
+        match_pair(ed)
     else
         ed
 
@@ -1336,6 +1420,8 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
     if b == 0x47                       // 'G' — go to line (count or last)
         let tgt = if st.count > 0 then st.count - 1 else list.len(ed.lines) - 1
         return Step { ed: clamp(Editor { lines: ed.lines, cy: tgt, cx: ed.cx }), st: ist_done(st) }
+    if b == 0x25                       // '%' — jump to the matching bracket
+        return Step { ed: match_pair(ed), st: ist_done(st) }
     // Insert-mode entry (slice 4).  Position the cursor (insert-clamped so
     // it may sit at end-of-line) and switch to Insert.
     if b == 0x69                       // 'i' — insert before cursor
