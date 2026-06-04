@@ -3550,24 +3550,90 @@ fn search_vis_ranges(atoms: [ReAtom], raw: Str, ts: Int) -> [Int]
 
 // Like emit_line_hl but also paints search matches (`sr` = flat visual ranges)
 // with `scol`.  Selection (reverse) wins over a search match on the same column.
-fn emit_line_search(expanded: Str, left: Int, width: Int, vlo: Int, vhi: Int, sr: [Int], scol: Str) [io]
+// ── Novo syntax highlighting (.nv files) ────────────────────────────────────
+fn nv_ident_start(b: Int) -> Bool
+    (b >= 0x61 and b <= 0x7A) or (b >= 0x41 and b <= 0x5A) or b == 0x5F
+
+fn nv_ident_char(b: Int) -> Bool
+    nv_ident_start(b) or (b >= 0x30 and b <= 0x39)
+
+fn nv_keyword(w: Str) -> Bool
+    w == "fn" or w == "let" or w == "var" or w == "mut" or w == "if" or w == "elif" or w == "else" or w == "while" or w == "for" or w == "in" or w == "return" or w == "struct" or w == "enum" or w == "trait" or w == "impl" or w == "match" or w == "and" or w == "or" or w == "not" or w == "true" or w == "false" or w == "async" or w == "await" or w == "import" or w == "type" or w == "break" or w == "continue" or w == "then" or w == "pub" or w == "as" or w == "None" or w == "Some"
+
+// Per-column 256-colour fg index for a (tab-expanded) Novo line.  0 = default.
+// Colours: keyword 170, string 150, comment 245, number 215.
+fn syntax_colors(s: Str) -> [Int]
+    var col: [Int] = []
+    let n = str.len(s)
+    var i = 0
+    while i < n
+        let b = str.byte_at(s, i) ?? 0
+        if b == 0x2F and i + 1 < n and (str.byte_at(s, i + 1) ?? 0) == 0x2F   // // comment
+            while i < n
+                col = list.append(col, [245])
+                i = i + 1
+        elif b == 0x22                                                       // " string
+            col = list.append(col, [150])
+            i = i + 1
+            while i < n and (str.byte_at(s, i) ?? 0) != 0x22
+                col = list.append(col, [150])
+                i = i + 1
+            if i < n
+                col = list.append(col, [150])
+                i = i + 1
+        elif nv_ident_start(b)                                              // identifier / keyword
+            let start = i
+            while i < n and nv_ident_char(str.byte_at(s, i) ?? 0)
+                i = i + 1
+            let c = if nv_keyword(str.slice(s, start, i)) then 170 else 0
+            var j = start
+            while j < i
+                col = list.append(col, [c])
+                j = j + 1
+        elif b >= 0x30 and b <= 0x39                                        // number
+            while i < n and ((str.byte_at(s, i) ?? 0) >= 0x30 and (str.byte_at(s, i) ?? 0) <= 0x39 or (str.byte_at(s, i) ?? 0) == 0x2E or (str.byte_at(s, i) ?? 0) == 0x5F)
+                col = list.append(col, [215])
+                i = i + 1
+        else
+            col = list.append(col, [0])
+            i = i + 1
+    col
+
+// Paint a line: syntax colours (`syncols`, per-column fg index) as the base,
+// search matches (`sr`/`scol`) over them, the Visual selection (reverse) on top.
+fn emit_line_styled(expanded: Str, left: Int, width: Int, vlo: Int, vhi: Int, sr: [Int], scol: Str, syncols: [Int]) [io]
     let elen = str.len(expanded)
     let endc = if left + width < elen then left + width else elen
+    let sn = list.len(syncols)
     var c = left
-    var cur = 0                      // 0 none, 1 selection, 2 search
+    var cur = 0                      // 0 none, 1 selection, 2 search, 1000+idx syntax
     while c < endc
-        let want = if c >= vlo and c < vhi then 1 elif col_in_ranges(sr, c) then 2 else 0
+        let want = if c >= vlo and c < vhi
+            1
+        elif col_in_ranges(sr, c)
+            2
+        elif c < sn and syncols[c] > 0
+            1000 + syncols[c]
+        else
+            0
         if want != cur
             sgr("0")
             if want == 1
                 sgr("7")
             elif want == 2
                 sgr(scol)
+            elif want >= 1000
+                sgr("38;5;" + str.from_int(want - 1000))
             cur = want
         emit_byte(str.byte_at(expanded, c) ?? 32)
         c = c + 1
     if cur != 0
         sgr("0")
+
+// Highlight Novo source (`.nv`).
+fn ends_with_nv(p: Str) -> Bool
+    let n = str.len(p)
+    n >= 3 and str.slice(p, n - 3, n) == ".nv"
 
 fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options) [io]
     csi()
@@ -3576,6 +3642,7 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode
     let nl = list.len(ed.lines)
     let dohl = opts.hlsearch and str.len(search) > 0     // search highlighting
     let satoms = if dohl then re_compile(search) else []
+    let dosyn = ends_with_nv(path)                        // Novo syntax highlighting
     let numbered = opts.number or opts.relativenumber
     let gutter = if numbered then 4 else 0          // "NNN " line-number column
     let width = if cols - gutter > 0 then cols - gutter else 1   // text area width
@@ -3607,6 +3674,7 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode
                     vlo = vis_col(raw, blo, opts.tabstop)
                     vhi = vis_col(raw, bhi, opts.tabstop)
             let srng = if dohl then search_vis_ranges(satoms, raw, opts.tabstop) else []
+            let syncols = if dosyn then syntax_colors(expanded) else []
             let segs = if opts.wrap and vlen > width then (vlen + width - 1) / width else 1
             var seg = 0
             while seg < segs and r < body
@@ -3625,7 +3693,7 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode
                     else
                         emit("    ")           // blank gutter on continuation rows
                 let segleft = if opts.wrap then seg * width else left
-                emit_line_search(expanded, segleft, width, vlo, vhi, srng, "30;43")
+                emit_line_styled(expanded, segleft, width, vlo, vhi, srng, "30;43", syncols)
                 el()
                 r = r + 1
                 seg = seg + 1
