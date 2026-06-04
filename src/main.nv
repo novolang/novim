@@ -2792,10 +2792,12 @@ fn snap_of(ed: Editor) -> Snapshot
     Snapshot { lines: ed.lines, cy: ed.cy, cx: ed.cx }
 
 // 26 empty named-register slots (a-z).
+// 36 register slots: 0-25 = named a-z, 26-35 = numbered "0-"9 ("0 yank, "1-"9
+// delete ring).
 fn regs_empty() -> [Str]
     var x: [Str] = []
     let mut i = 0
-    while i < 26
+    while i < 36
         x = list.append(x, [""])
         i = i + 1
     x
@@ -2803,7 +2805,7 @@ fn regs_empty() -> [Str]
 fn reglw_empty() -> [Bool]
     var x: [Bool] = []
     let mut i = 0
-    while i < 26
+    while i < 36
         x = list.append(x, [false])
         i = i + 1
     x
@@ -2906,6 +2908,25 @@ fn edit_regv(ed: Editor, st: InputState, es: EditState) -> EditStep
     let ne = clamp(Editor { lines: ed.lines, cy: es.lvey, cx: es.lvex })
     EditStep { ed: ne, st: InputState { count: 0, pending: 0, mode: es.lvmode, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: es.lvy, avx: es.lvx }, es: es }
 
+// A yank → the "0 register (slot 26).
+fn edit_numreg_yank(es: EditState, text: Str, lw: Bool) -> EditState
+    let r = set_str_at(es.regs, 26, text)
+    let w = set_bool_at(es.reglw, 26, lw)
+    EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: r, reglw: w, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: es.recording, macrobuf: es.macrobuf, awaitmac: es.awaitmac, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt }
+
+// A linewise delete → shift the "1-"9 ring (slots 27-35) and store at "1.
+fn edit_numreg_del(es: EditState, text: Str) -> EditState
+    var r = es.regs
+    var w = es.reglw
+    var i = 35
+    while i >= 28
+        r = set_str_at(r, i, r[i - 1])
+        w = set_bool_at(w, i, w[i - 1])
+        i = i - 1
+    r = set_str_at(r, 27, text)
+    w = set_bool_at(w, 27, true)
+    EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: r, reglw: w, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: es.recording, macrobuf: es.macrobuf, awaitmac: es.awaitmac, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt }
+
 // Remember the f/F/t/T that just completed (target `c`, pending `t`) for ; / ,.
 fn edit_save_find(es: EditState, c: Int, t: Int) -> EditState
     EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: es.recording, macrobuf: es.macrobuf, awaitmac: es.awaitmac, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: c, findt: t }
@@ -2992,8 +3013,8 @@ fn edit_await_reg(ed: Editor, st: InputState, es: EditState) -> EditStep
 // The byte after `"`: a-z selects that register (loaded into the unnamed
 // register for reads); anything else cancels.
 fn edit_select_reg(ed: Editor, st: InputState, es: EditState, b: Int) -> EditStep
-    if b >= 0x61 and b <= 0x7A
-        let idx = b - 0x61
+    if (b >= 0x61 and b <= 0x7A) or (b >= 0x30 and b <= 0x39)
+        let idx = if b <= 0x39 then 26 + (b - 0x30) else b - 0x61   // 0-9 → 26-35, a-z → 0-25
         let loaded = InputState { count: st.count, pending: st.pending, mode: st.mode, reg: es.regs[idx], reg_lw: es.reglw[idx], search: st.search, avy: st.avy, avx: st.avx }
         EditStep { ed: ed, st: loaded, es: EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: es.regs, reglw: es.reglw, rreg: idx + 1, awaitreg: false, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: es.recording, macrobuf: es.macrobuf, awaitmac: es.awaitmac, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt } }
     else
@@ -3113,9 +3134,18 @@ fn feed_edit(ed: Editor, st: InputState, km: Keymap, es: EditState, b: Int) -> E
         EditStep { ed: result1.ed, st: result1.st, es: edit_save_visual(result1.es, st, ed) }
     else
         result1
+    // A completed yank → "0; a completed linewise delete → the "1-"9 ring.
+    // (buf_text is only computed when the unnamed register actually changed.)
+    let regchg = str.len(result2.st.reg) > 0 and result2.st.reg != st.reg and result2.st.mode == 0 and result2.st.pending == 0 and result2.st.count == 0
+    let result3 = if regchg and buf_text(result2.ed) == buf_text(ed)
+        EditStep { ed: result2.ed, st: result2.st, es: edit_numreg_yank(result2.es, result2.st.reg, result2.st.reg_lw) }
+    elif regchg and result2.st.reg_lw
+        EditStep { ed: result2.ed, st: result2.st, es: edit_numreg_del(result2.es, result2.st.reg) }
+    else
+        result2
     if es.recording != 0                                       // capture the keystroke
-        return EditStep { ed: result2.ed, st: result2.st, es: macro_capture(result2.es, b) }
-    result2
+        return EditStep { ed: result3.ed, st: result3.st, es: macro_capture(result3.es, b) }
+    result3
 
 fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
     var ed = Editor { lines: buf_load(path), cy: 0, cx: 0 }
