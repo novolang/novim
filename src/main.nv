@@ -2160,9 +2160,17 @@ struct Colorscheme
     status_fg: Int
     status_bg: Int
     tilde_fg:  Int
+    kw_fg:     Int      // syntax: keyword (-1 = built-in default)
+    str_fg:    Int      // syntax: string
+    cmt_fg:    Int      // syntax: comment
+    num_fg:    Int      // syntax: number
 
 fn colorscheme_default() -> Colorscheme
-    Colorscheme { status_fg: 0 - 1, status_bg: 0 - 1, tilde_fg: 0 - 1 }
+    Colorscheme { status_fg: 0 - 1, status_bg: 0 - 1, tilde_fg: 0 - 1, kw_fg: 0 - 1, str_fg: 0 - 1, cmt_fg: 0 - 1, num_fg: 0 - 1 }
+
+// Resolve a colour index, falling back to `dflt` when unset (-1).
+fn cs_or(v: Int, dflt: Int) -> Int
+    if v >= 0 then v else dflt
 
 fn parse_color_val(s: Str) -> Int
     match str.to_int(str.trim(strip_quotes(str.trim(s))))
@@ -2176,6 +2184,10 @@ fn load_colorscheme(cfg_path: Str) -> Colorscheme [io]
             var sfg = 0 - 1
             var sbg = 0 - 1
             var tfg = 0 - 1
+            var kwf = 0 - 1
+            var strf = 0 - 1
+            var cmtf = 0 - 1
+            var numf = 0 - 1
             let lines = str.split_lines(content)
             var in_cs = false
             let mut i = 0
@@ -2196,8 +2208,16 @@ fn load_colorscheme(cfg_path: Str) -> Colorscheme [io]
                                 sbg = cv
                             elif key == "tilde_fg"
                                 tfg = cv
+                            elif key == "keyword"
+                                kwf = cv
+                            elif key == "string"
+                                strf = cv
+                            elif key == "comment"
+                                cmtf = cv
+                            elif key == "number"
+                                numf = cv
                 i = i + 1
-            Colorscheme { status_fg: sfg, status_bg: sbg, tilde_fg: tfg }
+            Colorscheme { status_fg: sfg, status_bg: sbg, tilde_fg: tfg, kw_fg: kwf, str_fg: strf, cmt_fg: cmtf, num_fg: numf }
 
 // SGR parameter string for the status line: 256-colour fg/bg if set, else
 // reverse-video (`7`).
@@ -2223,10 +2243,11 @@ struct Options
     relativenumber: Bool
     hlsearch:       Bool
     wrap:           Bool
+    syntax:         Bool
     tabstop:        Int
 
 fn options_default() -> Options
-    Options { number: false, relativenumber: false, hlsearch: true, wrap: false, tabstop: 8 }
+    Options { number: false, relativenumber: false, hlsearch: true, wrap: false, syntax: true, tabstop: 8 }
 
 fn parse_bool_val(s: Str) -> Bool
     str.trim(strip_quotes(str.trim(s))) == "true"
@@ -2239,6 +2260,7 @@ fn load_options(cfg_path: Str) -> Options [io]
             var relativenumber = false
             var hlsearch = true
             var wrap = false
+            var syntax = true
             var tabstop = 8
             let lines = str.split_lines(content)
             var in_opt = false
@@ -2262,12 +2284,14 @@ fn load_options(cfg_path: Str) -> Options [io]
                                 hlsearch = parse_bool_val(valr)
                             elif key == "wrap"
                                 wrap = parse_bool_val(valr)
+                            elif key == "syntax" or key == "syn"
+                                syntax = parse_bool_val(valr)
                             elif key == "tabstop" or key == "ts"
                                 let tv = parse_color_val(valr)
                                 if tv > 0
                                     tabstop = tv
                 i = i + 1
-            Options { number: number, relativenumber: relativenumber, hlsearch: hlsearch, wrap: wrap, tabstop: tabstop }
+            Options { number: number, relativenumber: relativenumber, hlsearch: hlsearch, wrap: wrap, syntax: syntax, tabstop: tabstop }
 
 // Right-align `n` in a `width`-char field (space-padded).
 fn pad_num(n: Int, width: Int) -> Str
@@ -2295,7 +2319,7 @@ fn apply_set_token(o: Options, tok: Str) -> Options
         let nm = str.trim(str.slice(t, 0, eq))
         let v = parse_color_val(str.slice(t, eq + 1, str.len(t)))
         if (nm == "tabstop" or nm == "ts") and v > 0
-            return Options { number: o.number, relativenumber: o.relativenumber, hlsearch: o.hlsearch, wrap: o.wrap, tabstop: v }
+            return Options { number: o.number, relativenumber: o.relativenumber, hlsearch: o.hlsearch, wrap: o.wrap, syntax: o.syntax, tabstop: v }
         return o
     let n = str.len(t)
     let bang = (str.byte_at(t, n - 1) ?? 0) == 0x21          // trailing !
@@ -2303,13 +2327,15 @@ fn apply_set_token(o: Options, tok: Str) -> Options
     let neg = str.len(body) >= 2 and str.slice(body, 0, 2) == "no"
     let name = if neg then str.slice(body, 2, str.len(body)) else body
     if name == "number" or name == "nu"
-        return Options { number: if bang then (not o.number) elif neg then false else true, relativenumber: o.relativenumber, hlsearch: o.hlsearch, wrap: o.wrap, tabstop: o.tabstop }
+        return Options { number: if bang then (not o.number) elif neg then false else true, relativenumber: o.relativenumber, hlsearch: o.hlsearch, wrap: o.wrap, syntax: o.syntax, tabstop: o.tabstop }
     elif name == "relativenumber" or name == "rnu"
-        return Options { number: o.number, relativenumber: if bang then (not o.relativenumber) elif neg then false else true, hlsearch: o.hlsearch, wrap: o.wrap, tabstop: o.tabstop }
+        return Options { number: o.number, relativenumber: if bang then (not o.relativenumber) elif neg then false else true, hlsearch: o.hlsearch, wrap: o.wrap, syntax: o.syntax, tabstop: o.tabstop }
     elif name == "hlsearch" or name == "hls"
-        return Options { number: o.number, relativenumber: o.relativenumber, hlsearch: if bang then (not o.hlsearch) elif neg then false else true, wrap: o.wrap, tabstop: o.tabstop }
+        return Options { number: o.number, relativenumber: o.relativenumber, hlsearch: if bang then (not o.hlsearch) elif neg then false else true, wrap: o.wrap, syntax: o.syntax, tabstop: o.tabstop }
     elif name == "wrap"
-        return Options { number: o.number, relativenumber: o.relativenumber, hlsearch: o.hlsearch, wrap: if bang then (not o.wrap) elif neg then false else true, tabstop: o.tabstop }
+        return Options { number: o.number, relativenumber: o.relativenumber, hlsearch: o.hlsearch, wrap: if bang then (not o.wrap) elif neg then false else true, syntax: o.syntax, tabstop: o.tabstop }
+    elif name == "syntax" or name == "syn"
+        return Options { number: o.number, relativenumber: o.relativenumber, hlsearch: o.hlsearch, wrap: o.wrap, syntax: if bang then (not o.syntax) elif neg then false else true, tabstop: o.tabstop }
     else
         o
 
@@ -3561,8 +3587,8 @@ fn nv_keyword(w: Str) -> Bool
     w == "fn" or w == "let" or w == "var" or w == "mut" or w == "if" or w == "elif" or w == "else" or w == "while" or w == "for" or w == "in" or w == "return" or w == "struct" or w == "enum" or w == "trait" or w == "impl" or w == "match" or w == "and" or w == "or" or w == "not" or w == "true" or w == "false" or w == "async" or w == "await" or w == "import" or w == "type" or w == "break" or w == "continue" or w == "then" or w == "pub" or w == "as" or w == "None" or w == "Some"
 
 // Per-column 256-colour fg index for a (tab-expanded) Novo line.  0 = default.
-// Colours: keyword 170, string 150, comment 245, number 215.
-fn syntax_colors(s: Str) -> [Int]
+// `kw`/`strc`/`cmt`/`num` are the keyword/string/comment/number colours.
+fn syntax_colors(s: Str, kw: Int, strc: Int, cmt: Int, num: Int) -> [Int]
     var col: [Int] = []
     let n = str.len(s)
     var i = 0
@@ -3570,29 +3596,29 @@ fn syntax_colors(s: Str) -> [Int]
         let b = str.byte_at(s, i) ?? 0
         if b == 0x2F and i + 1 < n and (str.byte_at(s, i + 1) ?? 0) == 0x2F   // // comment
             while i < n
-                col = list.append(col, [245])
+                col = list.append(col, [cmt])
                 i = i + 1
         elif b == 0x22                                                       // " string
-            col = list.append(col, [150])
+            col = list.append(col, [strc])
             i = i + 1
             while i < n and (str.byte_at(s, i) ?? 0) != 0x22
-                col = list.append(col, [150])
+                col = list.append(col, [strc])
                 i = i + 1
             if i < n
-                col = list.append(col, [150])
+                col = list.append(col, [strc])
                 i = i + 1
         elif nv_ident_start(b)                                              // identifier / keyword
             let start = i
             while i < n and nv_ident_char(str.byte_at(s, i) ?? 0)
                 i = i + 1
-            let c = if nv_keyword(str.slice(s, start, i)) then 170 else 0
+            let c = if nv_keyword(str.slice(s, start, i)) then kw else 0
             var j = start
             while j < i
                 col = list.append(col, [c])
                 j = j + 1
         elif b >= 0x30 and b <= 0x39                                        // number
             while i < n and ((str.byte_at(s, i) ?? 0) >= 0x30 and (str.byte_at(s, i) ?? 0) <= 0x39 or (str.byte_at(s, i) ?? 0) == 0x2E or (str.byte_at(s, i) ?? 0) == 0x5F)
-                col = list.append(col, [215])
+                col = list.append(col, [num])
                 i = i + 1
         else
             col = list.append(col, [0])
@@ -3642,7 +3668,11 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode
     let nl = list.len(ed.lines)
     let dohl = opts.hlsearch and str.len(search) > 0     // search highlighting
     let satoms = if dohl then re_compile(search) else []
-    let dosyn = ends_with_nv(path)                        // Novo syntax highlighting
+    let dosyn = opts.syntax and ends_with_nv(path)        // Novo syntax highlighting
+    let synkw = cs_or(cs.kw_fg, 170)
+    let synstr = cs_or(cs.str_fg, 150)
+    let syncmt = cs_or(cs.cmt_fg, 245)
+    let synnum = cs_or(cs.num_fg, 215)
     let numbered = opts.number or opts.relativenumber
     let gutter = if numbered then 4 else 0          // "NNN " line-number column
     let width = if cols - gutter > 0 then cols - gutter else 1   // text area width
@@ -3674,7 +3704,7 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode
                     vlo = vis_col(raw, blo, opts.tabstop)
                     vhi = vis_col(raw, bhi, opts.tabstop)
             let srng = if dohl then search_vis_ranges(satoms, raw, opts.tabstop) else []
-            let syncols = if dosyn then syntax_colors(expanded) else []
+            let syncols = if dosyn then syntax_colors(expanded, synkw, synstr, syncmt, synnum) else []
             let segs = if opts.wrap and vlen > width then (vlen + width - 1) / width else 1
             var seg = 0
             while seg < segs and r < body
