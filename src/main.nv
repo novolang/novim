@@ -769,7 +769,7 @@ fn scan_match_bwd(ed: Editor, sy: Int, sx: Int, open_ch: Int, close_ch: Int) -> 
 
 // The (inner) word under the cursor, for `*` / `#`.
 fn word_under_cursor(ed: Editor) -> Str
-    let to = textobj_word(ed, false)
+    let to = textobj_word(ed, false, false)
     if to.ok and to.vr.sy == to.vr.ey
         str.slice(line_at(ed, to.vr.sy), to.vr.sx, to.vr.ex + 1)
     else
@@ -1116,28 +1116,34 @@ fn tobj_none() -> TObj
 fn tobj_lw(lo: Int, hi: Int) -> TObj
     TObj { vr: VRange { sy: lo, sx: 0, ey: hi, ex: 0 }, ok: true, linewise: true }
 
-// iw / aw — the word (or whitespace run) under the cursor.  `around` adds
-// trailing whitespace, or leading whitespace when there is no trailing.
-fn textobj_word(ed: Editor, around: Bool) -> TObj
+// Char class for word objects; `big` (WORD) folds punctuation into the word
+// class so a WORD is any whitespace-delimited run.
+fn wcls(c: Int, big: Bool) -> Int
+    let k = char_class_of(c)
+    if big and k == 2 then 1 else k
+
+// iw / aw (and iW / aW when `big`) — the word/WORD (or whitespace run) under the
+// cursor.  `around` adds trailing whitespace, or leading when there is none.
+fn textobj_word(ed: Editor, around: Bool, big: Bool) -> TObj
     let line = line_at(ed, ed.cy)
     let n = str.len(line)
     if n == 0
         return tobj_none()
     let cx = if ed.cx >= n then n - 1 else ed.cx
-    let cls = char_class_of(str.byte_at(line, cx) ?? 32)
+    let cls = wcls(str.byte_at(line, cx) ?? 32, big)
     var lo = cx
-    while lo > 0 and char_class_of(str.byte_at(line, lo - 1) ?? 32) == cls
+    while lo > 0 and wcls(str.byte_at(line, lo - 1) ?? 32, big) == cls
         lo = lo - 1
     var hi = cx
-    while hi + 1 < n and char_class_of(str.byte_at(line, hi + 1) ?? 32) == cls
+    while hi + 1 < n and wcls(str.byte_at(line, hi + 1) ?? 32, big) == cls
         hi = hi + 1
     if around
         var added = false
-        while hi + 1 < n and char_class_of(str.byte_at(line, hi + 1) ?? 32) == 0
+        while hi + 1 < n and wcls(str.byte_at(line, hi + 1) ?? 32, big) == 0
             hi = hi + 1
             added = true
         if not added
-            while lo > 0 and char_class_of(str.byte_at(line, lo - 1) ?? 32) == 0
+            while lo > 0 and wcls(str.byte_at(line, lo - 1) ?? 32, big) == 0
                 lo = lo - 1
     tobj(ed.cy, lo, ed.cy, hi)
 
@@ -1259,7 +1265,9 @@ fn text_object(ed: Editor, obj: Int, around: Bool) -> TObj
     if obj == 0x70                                          // p — paragraph (linewise)
         textobj_paragraph(ed, around)
     elif obj == 0x77                                        // w
-        textobj_word(ed, around)
+        textobj_word(ed, around, false)
+    elif obj == 0x57                                        // W — WORD (whitespace-delimited)
+        textobj_word(ed, around, true)
     elif obj == 0x22 or obj == 0x27 or obj == 0x60          // " ' `
         textobj_quote(ed, obj, around)
     elif obj == 0x28 or obj == 0x29 or obj == 0x62          // ( ) b
