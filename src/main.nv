@@ -1976,6 +1976,11 @@ fn is_goto(cmd: Str) -> Bool
         i = i + 1
     true
 
+// `:fmt` / `:format` — reformat the buffer via the language server.
+fn is_fmt(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    c == "fmt" or c == "format"
+
 fn ex_goto(ed: Editor, cmd: Str) -> Editor
     let c = str.trim(cmd)
     let nl = list.len(ed.lines)
@@ -4028,6 +4033,28 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                         elif is_set(cmd_buf)
                             opts = apply_set(opts, cmd_buf)
                             left = hscroll_for(left, ed, opts, cols)
+                        elif is_fmt(cmd_buf)
+                            if lsp_phase == 2
+                                lsp_reqid = lsp_reqid + 1
+                                lsp_send(lsp_in, lsp_formatting_req(lsp_reqid, lsp_uri, opts.tabstop))
+                                let fresp = lsp_pump(lsp_out, lsp_reqid, 40)
+                                if str.len(fresp) == 0
+                                    lsp_info = "format: no response"
+                                else
+                                    let nt = lsp_fmt_newtext(fresp)
+                                    if str.len(nt) == 0
+                                        lsp_info = "format: no changes"
+                                    else
+                                        es = edit_push_undo(es, ed)
+                                        let nls = str.split_lines(nt)
+                                        ed = clamp(Editor { lines: if list.len(nls) == 0 then [""] else nls, cy: ed.cy, cx: ed.cx })
+                                        // refresh diagnostics for the reformatted buffer
+                                        lsp_lasttext = buf_text(ed)
+                                        lsp_ver = lsp_ver + 1
+                                        lsp_send(lsp_in, lsp_didchange(lsp_uri, lsp_ver, lsp_lasttext))
+                                        lsp_info = "formatted"
+                            else
+                                lsp_info = "format: LSP not ready"
                         else
                             let r = exec_ex(cmd_buf)
                             if r.save
@@ -4605,6 +4632,23 @@ fn hover_oneline(s: Str) -> Str
     if not done and str.len(line) > 0 and not starts_with_fence(line)
         out = line
     out
+
+// ── document formatting (:fmt) ──────────────────────────────────────────────
+fn lsp_formatting_req(id: Int, uri: Str, tabsize: Int) -> Str
+    "{" + lsp_q("jsonrpc") + ":" + lsp_q("2.0") + "," + lsp_q("id") + ":" + str.from_int(id) + "," + lsp_q("method") + ":" + lsp_q("textDocument/formatting") + "," + lsp_q("params") + ":{" + lsp_q("textDocument") + ":{" + lsp_q("uri") + ":" + lsp_q(uri) + "}," + lsp_q("options") + ":{" + lsp_q("tabSize") + ":" + str.from_int(tabsize) + "," + lsp_q("insertSpaces") + ":true}}}"
+
+// novols returns a single whole-document TextEdit; its `newText` is the fully
+// formatted buffer.  (Multi-edit/range formatting isn't produced by novols, so
+// v1 just takes the first edit's newText.)
+fn lsp_fmt_newtext_doc(doc: JsonValueH) -> Str
+    match json.get_list(doc, "result")
+        None => ""
+        Some(edits) => if list.len(edits) > 0 then (json.get_str(edits[0], "newText") ?? "") else ""
+
+fn lsp_fmt_newtext(msg: Str) -> Str
+    match json.parse(msg)
+        None => ""
+        Some(doc) => lsp_fmt_newtext_doc(doc)
 
 // `--lsp-diag <file>`: spawn novols, open the file, print its diagnostics.
 // Deterministic transport smoke test for Phase A.
