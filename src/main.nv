@@ -3680,7 +3680,7 @@ fn ends_with_nv(p: Str) -> Bool
     let n = str.len(p)
     n >= 3 and str.slice(p, n - 3, n) == ".nv"
 
-fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options) [io]
+fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str]) [io]
     csi()
     emit("?25l")         // hide cursor while we repaint
     let body = rows - 1
@@ -3738,7 +3738,21 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode
                             0
                         else
                             li + 1
-                        emit(pad_num(gnum, 3) + " ")
+                        // A line with a diagnostic colours its number red (error)
+                        // or yellow (warning) — a zero-width gutter sign.
+                        let dsev = diag_sev_for_line(diag_li, li)
+                        if dsev == 1
+                            sgr("38;5;9")
+                            emit(pad_num(gnum, 3))
+                            sgr("0")
+                            emit(" ")
+                        elif dsev >= 2
+                            sgr("38;5;11")
+                            emit(pad_num(gnum, 3))
+                            sgr("0")
+                            emit(" ")
+                        else
+                            emit(pad_num(gnum, 3) + " ")
                     else
                         emit("    ")           // blank gutter on continuation rows
                 let segleft = if opts.wrap then seg * width else left
@@ -3761,7 +3775,19 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode
     cup(rows, 1)
     sgr(status_sgr(cs))
     let modestr = if mode == 1 then "-- INSERT -- " elif mode == 2 then "-- VISUAL -- " elif mode == 3 then "-- VISUAL LINE -- " elif mode == 4 then "-- REPLACE -- " else "-- NORMAL -- "
-    emit(" " + path + "  " + str.from_int(ed.cy + 1) + ":" + str.from_int(ed.cx + 1) + "  " + modestr)
+    // Diagnostics summary (E:n W:m) plus, when the cursor sits on a diagnostic
+    // line, that diagnostic's message — the low-effort surface before any popup.
+    let ndiag = list.len(diag_li) / 2
+    let dsum = if ndiag > 0 then "  E:" + str.from_int(diag_count(diag_li, 1)) + " W:" + str.from_int(diag_count(diag_li, 2)) else ""
+    // Base status (path/pos/mode/count) is emitted in full — only the on-cursor
+    // diagnostic message is bounded to the remaining width so it can't wrap.
+    var statusln = " " + path + "  " + str.from_int(ed.cy + 1) + ":" + str.from_int(ed.cx + 1) + "  " + modestr + dsum
+    let cmsg = diag_msg_for_line(diag_li, diag_msgs, ed.cy)
+    let room = cols - 1 - str.len(statusln)
+    if str.len(cmsg) > 0 and room > 6
+        let mm = if str.len(cmsg) > room - 2 then str.slice(cmsg, 0, room - 2) else cmsg
+        statusln = statusln + "  " + mm
+    emit(statusln)
     el()                 // fill the rest of the status bar with the status bg
     sgr("0")
     let curline = if ed.cy < nl then ed.lines[ed.cy] else ""
@@ -3918,12 +3944,35 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
     var search_back = false
     var zpend = false                    // awaiting the 2nd byte of a `z` scroll command
     var last_subst = ""                  // last :s command, for `&`
+    // ── LSP (novols) live state — Phase B.  All async I/O lives here in the
+    // driver, never in the pure `feed` path.  `lsp_pid < 0` means no server.
+    var lsp_pid = 0 - 1
+    var lsp_in = 0
+    var lsp_out = 0
+    var lsp_ver = 1
+    var lsp_uri = "file://" + path
+    var lsp_lasttext = ""
+    var diag_li: [Int] = []
+    var diag_msgs: [Str] = []
+    if ends_with_nv(path)
+        lsp_pid = lsp_spawn()
+        if lsp_pid >= 0
+            lsp_in = proc.stdin_fd(lsp_pid)
+            lsp_out = proc.stdout_fd(lsp_pid)
+            lsp_send(lsp_in, lsp_init_req(lsp_uri))
+            let _ = lsp_poll_message(lsp_out, 2000)           // initialize result
+            lsp_send(lsp_in, lsp_initialized())
+            lsp_lasttext = buf_text(ed)
+            lsp_send(lsp_in, lsp_didopen(lsp_uri, lsp_lasttext))
     clear_screen()       // one-time clear of whatever was on screen before
     left = hscroll_for(left, ed, opts, cols)
-    render(ed, rows, cols, path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts)
+    render(ed, rows, cols, path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs)
     var running = true
     while running
-        let m = novo_pty_poll_h(0, 100)      // poll host stdin (fd 0)
+        // Short stdin poll keeps the editor responsive while leaving slack to
+        // drain novols' stdout each iteration (combined two-fd poll).
+        let m = novo_pty_poll_h(0, 50)       // poll host stdin (fd 0)
+        var changed = false
         if m % 2 == 1
             var done = false
             while not done
@@ -4024,9 +4073,33 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                     ed = estep.ed
                     st = estep.st
                     es = estep.es
+            changed = true
+        // Live document sync: an edit can only have come from stdin this
+        // iteration.  Debounce on the actual buffer text (reused from the
+        // undo/dot change-detection) so insert-mode keystrokes that don't
+        // alter the buffer don't spam didChange.
+        if lsp_pid >= 0 and m % 2 == 1
+            let cur = buf_text(ed)
+            if cur != lsp_lasttext
+                lsp_lasttext = cur
+                lsp_ver = lsp_ver + 1
+                lsp_send(lsp_in, lsp_didchange(lsp_uri, lsp_ver, cur))
+        // Drain whatever novols has sent (non-blocking): publishDiagnostics
+        // notifications rebuild the diagnostics store.
+        if lsp_pid >= 0
+            var more = true
+            while more
+                let msg = lsp_poll_message(lsp_out, 0)
+                if str.len(msg) == 0
+                    more = false
+                elif lsp_is_diag(msg)
+                    diag_li = lsp_collect_diag_ints(msg)
+                    diag_msgs = lsp_collect_diag_msgs(msg)
+                    changed = true
+        if changed
             top = scroll_to(top, ed.cy, rows - 1)
             left = hscroll_for(left, ed, opts, cols)
-            render(ed, rows, cols, path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts)
+            render(ed, rows, cols, path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs)
             if cmd_mode
                 cup(rows, 1)
                 csi()
@@ -4043,7 +4116,10 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
             top = scroll_to(top, ed.cy, rows - 1)
             left = hscroll_for(left, ed, opts, cols)
             clear_screen()   // dimensions changed — clear stale content once
-            render(ed, rows, cols, path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts)
+            render(ed, rows, cols, path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs)
+    if lsp_pid >= 0                       // tear the language server down
+        let _ = proc.kill(lsp_pid, 15)
+        proc.close(lsp_pid)
     novo_pty_restore_mode_h()
     csi()
     emit("0 q")          // restore the terminal's default cursor shape
@@ -4214,6 +4290,120 @@ fn lsp_msg_diags(msg: Str) -> Bool
             // See bugs/codegen-llvm/llvm-return-call-in-match-arm-drops-subject.md
             let r = lsp_print_diags(doc)
             return r
+
+// ── Phase B — live diagnostics in run_interactive ───────────────────────────
+//
+// Spawn novols; returns its pid, or -1 on failure.  (A bare-unit `None => ()`
+// arm before a block trips the parser, so this returns a value from each arm.)
+fn lsp_spawn() -> Int [io]
+    match proc.spawn(["novols"])
+        None => 0 - 1
+        Some(pid) => pid
+
+// `textDocument/didChange` (full-document sync; novols files are small).
+fn lsp_didchange(uri: Str, version: Int, text: Str) -> Str
+    "{" + lsp_q("jsonrpc") + ":" + lsp_q("2.0") + "," + lsp_q("method") + ":" + lsp_q("textDocument/didChange") + "," + lsp_q("params") + ":{" + lsp_q("textDocument") + ":{" + lsp_q("uri") + ":" + lsp_q(uri) + "," + lsp_q("version") + ":" + str.from_int(version) + "}," + lsp_q("contentChanges") + ":[{" + lsp_q("text") + ":" + lsp_q(json_escape(text)) + "}]}}"
+
+// True when `msg` is a publishDiagnostics notification (so the diag store is
+// only replaced by a real diagnostics message, never cleared by some other
+// notification/response).
+fn lsp_is_diag(msg: Str) -> Bool
+    match json.parse(msg)
+        None => false
+        Some(doc) =>
+            let mth = json.get_str(doc, "method") ?? ""
+            mth == "textDocument/publishDiagnostics"
+
+// The diagnostics are collected into two parallel stores rebuilt on every
+// publishDiagnostics: `diag_li` = flat [line0, sev0, line1, sev1, …] and
+// `diag_msgs` = [msg0, msg1, …].  The collectors are split into one helper per
+// JSON nesting level: each match arm returns a value (the parser rejects a
+// bare-unit `None => ()` arm before a multi-line `Some` block), and the handle
+// chain stays alive across the tail calls (a direct `return f(payload)` would
+// drop it early — see the bug referenced above).
+fn lsp_ci_ds(ds: [JsonValueH]) -> [Int]
+    var out: [Int] = []
+    var i = 0
+    while i < list.len(ds)
+        let d = ds[i]
+        out = list.push(out, lsp_diag_line(d))
+        out = list.push(out, json.get_int(d, "severity") ?? 1)
+        i = i + 1
+    out
+
+fn lsp_ci_params(params: JsonValueH) -> [Int]
+    match json.get_list(params, "diagnostics")
+        None => []
+        Some(ds) => lsp_ci_ds(ds)
+
+fn lsp_ci_doc(doc: JsonValueH) -> [Int]
+    match json.get(doc, "params")
+        None => []
+        Some(params) => lsp_ci_params(params)
+
+// Flat [line, sev, line, sev, …] for the current document's diagnostics.
+fn lsp_collect_diag_ints(msg: Str) -> [Int]
+    match json.parse(msg)
+        None => []
+        Some(doc) => lsp_ci_doc(doc)
+
+fn lsp_cm_ds(ds: [JsonValueH]) -> [Str]
+    var out: [Str] = []
+    var i = 0
+    while i < list.len(ds)
+        out = list.push(out, json.get_str(ds[i], "message") ?? "")
+        i = i + 1
+    out
+
+fn lsp_cm_params(params: JsonValueH) -> [Str]
+    match json.get_list(params, "diagnostics")
+        None => []
+        Some(ds) => lsp_cm_ds(ds)
+
+fn lsp_cm_doc(doc: JsonValueH) -> [Str]
+    match json.get(doc, "params")
+        None => []
+        Some(params) => lsp_cm_params(params)
+
+// Per-diagnostic messages, index-aligned with `lsp_collect_diag_ints` pairs.
+fn lsp_collect_diag_msgs(msg: Str) -> [Str]
+    match json.parse(msg)
+        None => []
+        Some(doc) => lsp_cm_doc(doc)
+
+// Highest severity (1 = error wins over 2 = warning) on buffer line `line`,
+// or 0 when the line is clean.  `diag_li` is the flat line/sev store.
+fn diag_sev_for_line(diag_li: [Int], line: Int) -> Int
+    var best = 0
+    var i = 0
+    while i + 1 < list.len(diag_li)
+        if diag_li[i] == line
+            let s = diag_li[i + 1]
+            if best == 0 or s < best
+                best = s
+        i = i + 2
+    best
+
+// Count of diagnostics of a given severity.
+fn diag_count(diag_li: [Int], sev: Int) -> Int
+    var c = 0
+    var i = 0
+    while i + 1 < list.len(diag_li)
+        if diag_li[i + 1] == sev
+            c = c + 1
+        i = i + 2
+    c
+
+// The first diagnostic message on buffer line `line`, or "" if none.
+fn diag_msg_for_line(diag_li: [Int], diag_msgs: [Str], line: Int) -> Str
+    var k = 0
+    var i = 0
+    while i + 1 < list.len(diag_li)
+        if diag_li[i] == line and k < list.len(diag_msgs)
+            return diag_msgs[k]
+        k = k + 1
+        i = i + 2
+    ""
 
 // `--lsp-diag <file>`: spawn novols, open the file, print its diagnostics.
 // Deterministic transport smoke test for Phase A.
