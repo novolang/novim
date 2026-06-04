@@ -2893,6 +2893,7 @@ fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
     var st = ist_new()
     var es = edit_new()
     let km = load_keymaps(cfg_path)
+    let batch_rows = term_rows()         // 24 off-tty — makes paging deterministic
     let decoded = decode_escapes(keys)
     var cmd_mode = false
     var cmd_buf = ""
@@ -2953,6 +2954,8 @@ fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
             search_mode = true
             search_buf = ""
             search_back = true
+        elif scroll_idle(st, es) and scroll_ctrl_kind(b) >= 0   // Ctrl-D/U/F/B paging
+            ed = clamp(Editor { lines: ed.lines, cy: scroll_new_cy(ed, batch_rows, scroll_ctrl_kind(b)), cx: ed.cx })
         else
             let estep = feed_edit(ed, st, km, es, b)
             ed = estep.ed
@@ -3188,6 +3191,69 @@ fn scroll_to(top: Int, cy: Int, body: Int) -> Int
         t = 0
     t
 
+// ── Viewport scrolling (slice 45): Ctrl-D/U/F/B + zz/zt/zb ───────────────────
+// These are driver-level (they touch the `top` viewport, which `feed` does not
+// know about).  `kind`: 0 Ctrl-D (½ down), 1 Ctrl-U (½ up), 2 Ctrl-F (page
+// down), 3 Ctrl-B (page up), 4 zz (centre), 5 zt (cursor→top), 6 zb (→bottom).
+
+// Only treat a scroll key as a scroll when input is idle — otherwise `z` would
+// steal the register/mark name from `qz` / `"z` / `mz`, and Ctrl-D a find target.
+fn scroll_idle(st: InputState, es: EditState) -> Bool
+    st.mode == 0 and st.pending == 0 and st.count == 0 and es.awaitmac == 0 and (not es.awaitreg) and es.awaitmark == 0
+
+// New cursor line after a paging command (zz/zt/zb leave the cursor put).
+fn scroll_new_cy(ed: Editor, rows: Int, kind: Int) -> Int
+    let body = rows - 1
+    let half = if body / 2 > 0 then body / 2 else 1
+    let page = if body - 2 > 0 then body - 2 else 1
+    let nl = list.len(ed.lines)
+    var ncy = ed.cy
+    if kind == 0
+        ncy = ed.cy + half
+    elif kind == 1
+        ncy = ed.cy - half
+    elif kind == 2
+        ncy = ed.cy + page
+    elif kind == 3
+        ncy = ed.cy - page
+    if ncy < 0
+        ncy = 0
+    if ncy > nl - 1
+        ncy = nl - 1
+    ncy
+
+// New viewport top after a scroll command.
+fn scroll_new_top(cy: Int, top: Int, rows: Int, kind: Int) -> Int
+    let body = rows - 1
+    let half = if body / 2 > 0 then body / 2 else 1
+    let page = if body - 2 > 0 then body - 2 else 1
+    var t = top
+    if kind == 0
+        t = top + half
+    elif kind == 1
+        t = top - half
+    elif kind == 2
+        t = top + page
+    elif kind == 3
+        t = top - page
+    elif kind == 4                       // zz — centre the cursor
+        t = cy - body / 2
+    elif kind == 5                       // zt — cursor to the top
+        t = cy
+    elif kind == 6                       // zb — cursor to the bottom
+        t = cy - body + 1
+    if t < 0
+        t = 0
+    t
+
+// Decode a z-prefix second byte into a kind (4/5/6), or -1 if not z/t/b.
+fn scroll_z_kind(b: Int) -> Int
+    if b == 0x7A then 4 elif b == 0x74 then 5 elif b == 0x62 then 6 else 0 - 1
+
+// Decode a Ctrl paging byte into a kind (0..3), or -1 if not a paging key.
+fn scroll_ctrl_kind(b: Int) -> Int
+    if b == 0x04 then 0 elif b == 0x15 then 1 elif b == 0x06 then 2 elif b == 0x02 then 3 else 0 - 1
+
 fn run_interactive(cfg_path: Str, path: Str) [io, time]
     let _ = novo_pty_set_raw_mode_h()
     var ed = Editor { lines: buf_load(path), cy: 0, cx: 0 }
@@ -3205,6 +3271,7 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
     var search_mode = false
     var search_buf = ""
     var search_back = false
+    var zpend = false                    // awaiting the 2nd byte of a `z` scroll command
     clear_screen()       // one-time clear of whatever was on screen before
     left = hscroll_for(left, ed, opts, cols)
     render(ed, rows, cols, path, top, left, st.mode, st.avy, st.avx, cs, opts)
@@ -3259,6 +3326,17 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                             search_buf = str.slice(search_buf, 0, str.len(search_buf) - 1)
                     elif b >= 32 and b < 127
                         search_buf = search_buf + str.from_char(b)
+                elif zpend                            // 2nd byte of a `z` command
+                    zpend = false
+                    let zk = scroll_z_kind(b)
+                    if zk >= 0
+                        top = scroll_new_top(ed.cy, top, rows, zk)
+                elif scroll_idle(st, es) and b == 0x7A   // 'z' — await z/t/b
+                    zpend = true
+                elif scroll_idle(st, es) and scroll_ctrl_kind(b) >= 0   // Ctrl-D/U/F/B
+                    let k = scroll_ctrl_kind(b)
+                    ed = clamp(Editor { lines: ed.lines, cy: scroll_new_cy(ed, rows, k), cx: ed.cx })
+                    top = scroll_new_top(ed.cy, top, rows, k)
                 elif b == 58 and st.mode == 0        // ':' — open the Ex line
                     cmd_mode = true
                     cmd_buf = ""
