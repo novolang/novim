@@ -1041,45 +1041,69 @@ fn textobj_quote(ed: Editor, q: Int, around: Bool) -> TObj
     else
         tobj(ed.cy, op + 1, ed.cy, cl - 1)
 
-// i( / a( etc. — the bracket pair on the current line enclosing the cursor
-// (same-line v1; multi-line is a follow-on).
+// A buffer position with a found flag (bracket-pair search).
+struct Pos
+    y:  Int
+    x:  Int
+    ok: Bool
+
+// Scan backward from (sy,sx) for the unmatched open bracket (the one enclosing
+// the cursor), counting matched pairs.
+fn match_open_back(ed: Editor, sy: Int, sx: Int, open_ch: Int, close_ch: Int) -> Pos
+    var depth = 0
+    var y = sy
+    var x = sx
+    while y >= 0
+        while x >= 0
+            let ch = str.byte_at(line_at(ed, y), x) ?? 0
+            if ch == close_ch
+                depth = depth + 1
+            elif ch == open_ch
+                if depth == 0
+                    return Pos { y: y, x: x, ok: true }
+                depth = depth - 1
+            x = x - 1
+        y = y - 1
+        if y >= 0
+            x = str.len(line_at(ed, y)) - 1
+    Pos { y: 0, x: 0, ok: false }
+
+// Scan forward from (sy,sx) for the close matching an already-open bracket.
+fn match_close_fwd(ed: Editor, sy: Int, sx: Int, open_ch: Int, close_ch: Int) -> Pos
+    var depth = 0
+    var y = sy
+    var x = sx
+    let ny = list.len(ed.lines)
+    while y < ny
+        let line = line_at(ed, y)
+        let n = str.len(line)
+        while x < n
+            let ch = str.byte_at(line, x) ?? 0
+            if ch == open_ch
+                depth = depth + 1
+            elif ch == close_ch
+                if depth == 0
+                    return Pos { y: y, x: x, ok: true }
+                depth = depth - 1
+            x = x + 1
+        y = y + 1
+        x = 0
+    Pos { y: 0, x: 0, ok: false }
+
+// i( / a( etc. — the bracket pair enclosing the cursor, spanning lines.
 fn textobj_bracket(ed: Editor, open_ch: Int, close_ch: Int, around: Bool) -> TObj
     let line = line_at(ed, ed.cy)
-    let n = str.len(line)
-    var depth = 0
-    var op = 0 - 1
-    var i = ed.cx
-    while i >= 0 and op < 0
-        let ch = str.byte_at(line, i) ?? 0
-        if ch == close_ch and i != ed.cx
-            depth = depth + 1
-        elif ch == open_ch
-            if depth == 0
-                op = i
-            else
-                depth = depth - 1
-        i = i - 1
-    if op < 0
+    let on_open = ed.cx < str.len(line) and (str.byte_at(line, ed.cx) ?? 0) == open_ch
+    let op = if on_open then Pos { y: ed.cy, x: ed.cx, ok: true } else match_open_back(ed, ed.cy, ed.cx - 1, open_ch, close_ch)
+    if not op.ok
         return tobj_none()
-    var depth2 = 0
-    var cl = 0 - 1
-    var j = op + 1
-    while j < n and cl < 0
-        let ch = str.byte_at(line, j) ?? 0
-        if ch == open_ch
-            depth2 = depth2 + 1
-        elif ch == close_ch
-            if depth2 == 0
-                cl = j
-            else
-                depth2 = depth2 - 1
-        j = j + 1
-    if cl < 0
+    let cl = match_close_fwd(ed, op.y, op.x + 1, open_ch, close_ch)
+    if not cl.ok
         return tobj_none()
     if around
-        tobj(ed.cy, op, ed.cy, cl)
+        tobj(op.y, op.x, cl.y, cl.x)
     else
-        tobj(ed.cy, op + 1, ed.cy, cl - 1)
+        tobj(op.y, op.x + 1, cl.y, cl.x - 1)
 
 // Resolve an object char (the byte after i / a) to a range.
 fn text_object(ed: Editor, obj: Int, around: Bool) -> TObj
