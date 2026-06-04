@@ -2969,6 +2969,18 @@ fn el() [io]                      // ESC [ K — erase from cursor to end of lin
     csi()
     emit("K")
 
+// DECSCUSR — set the cursor shape to match the mode: a steady block for
+// Normal/Visual, a steady bar (I-beam) for Insert, a steady underline for
+// Replace.  `ESC [ <n> SP q`; n=2 block, n=6 bar, n=4 underline.
+fn cursor_shape(mode: Int) [io]
+    csi()
+    if mode == 1
+        emit("6 q")          // insert → bar
+    elif mode == 4
+        emit("4 q")          // replace → underline
+    else
+        emit("2 q")          // normal / visual → block
+
 // Expand tab bytes (0x09) to spaces up to the next `ts`-column stop, so a
 // buffer line renders with consistent indentation regardless of the
 // terminal's own tab stops.  Byte-oriented, matching the rest of the editor
@@ -3115,6 +3127,7 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode
     sgr("0")
     let curline = if ed.cy < nl then ed.lines[ed.cy] else ""
     cup(ed.cy - top + 1, (vis_col(curline, ed.cx, opts.tabstop) - left) + gutter + 1)
+    cursor_shape(mode)   // block in normal/visual, bar in insert, underline in replace
     csi()
     emit("?25h")         // show the cursor at its new home
 
@@ -3254,6 +3267,8 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
             clear_screen()   // dimensions changed — clear stale content once
             render(ed, rows, cols, path, top, left, st.mode, st.avy, st.avx, cs, opts)
     novo_pty_restore_mode_h()
+    csi()
+    emit("0 q")          // restore the terminal's default cursor shape
     csi()
     emit("2J")
     cup(1, 1)
