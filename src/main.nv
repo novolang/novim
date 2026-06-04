@@ -796,6 +796,10 @@ fn feed_operator(ed: Editor, st: InputState, opb: Int, pcode: Int, b: Int) -> St
         return Step { ed: ed, st: InputState { count: st.count, pending: 20 + opidx * 4 + 3, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
     if b == 0x67                                  // g — await second g (dgg): pending 32/33/34
         return Step { ed: ed, st: InputState { count: st.count, pending: 32 + opidx, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
+    if b == 0x69                                  // i — inner text object: pending 40/42/44
+        return Step { ed: ed, st: InputState { count: st.count, pending: 40 + opidx * 2 + 0, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
+    if b == 0x61                                  // a — around text object: pending 41/43/45
+        return Step { ed: ed, st: InputState { count: st.count, pending: 40 + opidx * 2 + 1, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
     let mb = if opb == 0x63 and b == 0x77 then 0x65 else b   // cw behaves like ce
     let tgt = motion_target(ed, mb, st.count)               // raw count (0 = none)
     if tgt.ok
@@ -861,9 +865,9 @@ fn vdelete_char_lines(ed: Editor, vr: VRange) -> [Str]
             i = i + 1
         ls
 
-// Apply d / y / c (opb byte) to a CHARWISE selection.  Single trailing return.
-fn visual_apply_char(ed: Editor, st: InputState, opb: Int) -> Step
-    let vr = visual_range(st, ed)
+// Apply d / y / c (opb byte) over an arbitrary CHARWISE range `vr` (may span
+// lines).  Single trailing return.
+fn apply_char_vr(ed: Editor, st: InputState, opb: Int, vr: VRange) -> Step
     let txt = vyank_char_text(ed, vr)
     let is_yank = opb == 0x79
     let ins = opb == 0x63
@@ -871,11 +875,143 @@ fn visual_apply_char(ed: Editor, st: InputState, opb: Int) -> Step
     let ne = if ins then clamp_insert(Editor { lines: nls, cy: vr.sy, cx: vr.sx }) else clamp(Editor { lines: nls, cy: vr.sy, cx: vr.sx })
     Step { ed: ne, st: ist_reg_cw(st, txt, ins) }
 
+fn visual_apply_char(ed: Editor, st: InputState, opb: Int) -> Step
+    apply_char_vr(ed, st, opb, visual_range(st, ed))
+
 // Apply d / y / c to a LINEWISE selection by delegating to apply_linewise_op
 // over [sy, ey].
 fn visual_apply_line(ed: Editor, st: InputState, opb: Int) -> Step
     let vr = visual_range(st, ed)
     apply_linewise_op(Editor { lines: ed.lines, cy: vr.sy, cx: 0 }, st, opb, vr.ey)
+
+// ── Text objects (slice 23): iw/aw, i"/a", i(/a(, i{/a{, i[/a[ ───────────
+// A text object resolves to a charwise range (or ok=false when there's no
+// object under the cursor).  Used by operators (diw, ci", yi(...) and visual
+// (viw, vi"...).
+
+struct TObj
+    vr: VRange
+    ok: Bool
+
+fn tobj(sy: Int, sx: Int, ey: Int, ex: Int) -> TObj
+    TObj { vr: VRange { sy: sy, sx: sx, ey: ey, ex: ex }, ok: true }
+
+fn tobj_none() -> TObj
+    TObj { vr: VRange { sy: 0, sx: 0, ey: 0, ex: 0 }, ok: false }
+
+// iw / aw — the word (or whitespace run) under the cursor.  `around` adds
+// trailing whitespace, or leading whitespace when there is no trailing.
+fn textobj_word(ed: Editor, around: Bool) -> TObj
+    let line = line_at(ed, ed.cy)
+    let n = str.len(line)
+    if n == 0
+        return tobj_none()
+    let cx = if ed.cx >= n then n - 1 else ed.cx
+    let cls = char_class_of(str.byte_at(line, cx) ?? 32)
+    var lo = cx
+    while lo > 0 and char_class_of(str.byte_at(line, lo - 1) ?? 32) == cls
+        lo = lo - 1
+    var hi = cx
+    while hi + 1 < n and char_class_of(str.byte_at(line, hi + 1) ?? 32) == cls
+        hi = hi + 1
+    if around
+        var added = false
+        while hi + 1 < n and char_class_of(str.byte_at(line, hi + 1) ?? 32) == 0
+            hi = hi + 1
+            added = true
+        if not added
+            while lo > 0 and char_class_of(str.byte_at(line, lo - 1) ?? 32) == 0
+                lo = lo - 1
+    tobj(ed.cy, lo, ed.cy, hi)
+
+// i" / a" (and ' / `) — the first quote pair on the line at/after the cursor.
+fn textobj_quote(ed: Editor, q: Int, around: Bool) -> TObj
+    let line = line_at(ed, ed.cy)
+    let n = str.len(line)
+    var inq = false
+    var qstart = 0 - 1
+    var op = 0 - 1
+    var cl = 0 - 1
+    var i = 0
+    while i < n and cl < 0
+        if (str.byte_at(line, i) ?? 0) == q
+            if not inq
+                inq = true
+                qstart = i
+            else
+                inq = false
+                if i >= ed.cx
+                    op = qstart
+                    cl = i
+        i = i + 1
+    if cl < 0
+        return tobj_none()
+    if around
+        tobj(ed.cy, op, ed.cy, cl)
+    else
+        tobj(ed.cy, op + 1, ed.cy, cl - 1)
+
+// i( / a( etc. — the bracket pair on the current line enclosing the cursor
+// (same-line v1; multi-line is a follow-on).
+fn textobj_bracket(ed: Editor, open_ch: Int, close_ch: Int, around: Bool) -> TObj
+    let line = line_at(ed, ed.cy)
+    let n = str.len(line)
+    var depth = 0
+    var op = 0 - 1
+    var i = ed.cx
+    while i >= 0 and op < 0
+        let ch = str.byte_at(line, i) ?? 0
+        if ch == close_ch and i != ed.cx
+            depth = depth + 1
+        elif ch == open_ch
+            if depth == 0
+                op = i
+            else
+                depth = depth - 1
+        i = i - 1
+    if op < 0
+        return tobj_none()
+    var depth2 = 0
+    var cl = 0 - 1
+    var j = op + 1
+    while j < n and cl < 0
+        let ch = str.byte_at(line, j) ?? 0
+        if ch == open_ch
+            depth2 = depth2 + 1
+        elif ch == close_ch
+            if depth2 == 0
+                cl = j
+            else
+                depth2 = depth2 - 1
+        j = j + 1
+    if cl < 0
+        return tobj_none()
+    if around
+        tobj(ed.cy, op, ed.cy, cl)
+    else
+        tobj(ed.cy, op + 1, ed.cy, cl - 1)
+
+// Resolve an object char (the byte after i / a) to a range.
+fn text_object(ed: Editor, obj: Int, around: Bool) -> TObj
+    if obj == 0x77                                          // w
+        textobj_word(ed, around)
+    elif obj == 0x22 or obj == 0x27 or obj == 0x60          // " ' `
+        textobj_quote(ed, obj, around)
+    elif obj == 0x28 or obj == 0x29 or obj == 0x62          // ( ) b
+        textobj_bracket(ed, 0x28, 0x29, around)
+    elif obj == 0x7B or obj == 0x7D or obj == 0x42          // { } B
+        textobj_bracket(ed, 0x7B, 0x7D, around)
+    elif obj == 0x5B or obj == 0x5D                         // [ ]
+        textobj_bracket(ed, 0x5B, 0x5D, around)
+    else
+        tobj_none()
+
+// Apply an operator over a text object; no-op + reset if there's no object.
+fn apply_text_object(ed: Editor, st: InputState, opb: Int, obj: Int, around: Bool) -> Step
+    let to = text_object(ed, obj, around)
+    if to.ok
+        return apply_char_vr(ed, st, opb, to.vr)
+    Step { ed: ed, st: ist_done(st) }
 
 fn visual_apply(ed: Editor, st: InputState, opb: Int) -> Step
     if st.mode == 3
@@ -986,6 +1122,13 @@ fn visual_paste(ed: Editor, st: InputState) -> Step
     let pasted = paste(ped, tmp, false)
     Step { ed: pasted, st: del.st }
 
+// `vi"` / `va(` … — set the selection to a text object, staying in visual.
+fn visual_set_textobj(ed: Editor, st: InputState, obj: Int, around: Bool) -> Step
+    let to = text_object(ed, obj, around)
+    if to.ok
+        return Step { ed: clamp(Editor { lines: ed.lines, cy: to.vr.ey, cx: to.vr.ex }), st: InputState { count: 0, pending: 0, mode: st.mode, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: to.vr.sy, avx: to.vr.sx } }
+    Step { ed: ed, st: ist_visual_keep(st, st.mode) }
+
 // Handle one byte in Visual mode (mode 2 = charwise, 3 = linewise).
 fn feed_visual(ed: Editor, st: InputState, b: Int) -> Step
     let cntp = if st.count > 0 then st.count else 1
@@ -1003,6 +1146,10 @@ fn feed_visual(ed: Editor, st: InputState, b: Int) -> Step
             let tgt = if st.count > 0 then st.count - 1 else 0
             return Step { ed: clamp(Editor { lines: ed.lines, cy: tgt, cx: ed.cx }), st: ist_visual_keep(st, st.mode) }
         return Step { ed: ed, st: ist_visual_keep(st, st.mode) }   // not gg — drop
+    if st.pending == 48                          // i<obj> — inner text object
+        return visual_set_textobj(ed, st, b, false)
+    if st.pending == 49                          // a<obj> — around text object
+        return visual_set_textobj(ed, st, b, true)
     if b == 27                                   // Esc — leave visual
         return Step { ed: ed, st: ist_done(st) }
     if b == 0x76                                 // v
@@ -1050,6 +1197,10 @@ fn feed_visual(ed: Editor, st: InputState, b: Int) -> Step
         return Step { ed: ed, st: ist_visual_pending(st, 11) }
     if b == 0x67
         return Step { ed: ed, st: ist_visual_pending(st, 1) }
+    if b == 0x69                                 // i — await inner text-object char
+        return Step { ed: ed, st: ist_visual_pending(st, 48) }
+    if b == 0x61                                 // a — await around text-object char
+        return Step { ed: ed, st: ist_visual_pending(st, 49) }
     // Single-byte motion: move the cursor, stay in visual mode (anchor fixed).
     Step { ed: visual_motion(ed, b, cntp), st: ist_visual_keep(st, st.mode) }
 
@@ -1137,6 +1288,14 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
             let opb = if st.pending == 32 then 0x64 elif st.pending == 33 then 0x63 else 0x79
             return apply_linewise_op(ed, st, opb, if st.count > 0 then st.count - 1 else 0)
         return feed(ed, ist_clear_pending(st), b)   // not gg — cancel + reprocess
+    // Operator + text object (slice 23): pending 40..45 encodes (operator,
+    // inner/around); the byte is the object char (w " ' ` ( ) b { } B [ ]).
+    if st.pending >= 40 and st.pending <= 45
+        let code = st.pending - 40
+        let opidx = code / 2
+        let around = (code - opidx * 2) == 1
+        let opb = if opidx == 0 then 0x64 elif opidx == 1 then 0x63 else 0x79
+        return apply_text_object(ed, st, opb, b, around)
     // Count digits.  `0` is a count digit only when a count is already
     // building; otherwise `0` is the "first column" motion.
     if b >= 0x31 and b <= 0x39         // '1'-'9'
