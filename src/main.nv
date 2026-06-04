@@ -508,6 +508,32 @@ fn toggle_case_byte(b: Int) -> Int
 
 // `~` / `N~` — toggle the case of `n` chars from the cursor, advancing the
 // cursor past the last one (vim).  Stops at end of line.
+// `Ctrl-A` / `Ctrl-X` — increment / decrement the (decimal) number at or after
+// the cursor on the current line by `delta`; cursor lands on its last digit.
+fn op_incdec(ed: Editor, delta: Int) -> Editor
+    let line = line_at(ed, ed.cy)
+    let n = str.len(line)
+    var s = ed.cx
+    while s < n and not ((str.byte_at(line, s) ?? 0) >= 0x30 and (str.byte_at(line, s) ?? 0) <= 0x39)
+        s = s + 1
+    if s >= n
+        return ed                                       // no number on the rest of the line
+    var start = s
+    while start > 0 and (str.byte_at(line, start - 1) ?? 0) >= 0x30 and (str.byte_at(line, start - 1) ?? 0) <= 0x39
+        start = start - 1
+    var endd = s
+    while endd < n and (str.byte_at(line, endd) ?? 0) >= 0x30 and (str.byte_at(line, endd) ?? 0) <= 0x39
+        endd = endd + 1
+    let neg = start > 0 and (str.byte_at(line, start - 1) ?? 0) == 0x2D
+    let numstart = if neg then start - 1 else start
+    let mag = match str.to_int(str.slice(line, start, endd))
+        None => 0
+        Some(v) => v
+    let signed = if neg then 0 - mag else mag
+    let newstr = str.from_int(signed + delta)
+    let newline = str.slice(line, 0, numstart) + newstr + str.slice(line, endd, n)
+    clamp(Editor { lines: set_line(ed.lines, ed.cy, newline), cy: ed.cy, cx: numstart + str.len(newstr) - 1 })
+
 fn op_toggle_case(ed: Editor, n: Int) -> Editor
     let line = line_at(ed, ed.cy)
     let ll = str.len(line)
@@ -1509,6 +1535,10 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
         return Step { ed: repeat_delete_char(ed, cnt), st: ist_done(st) }
     if b == 0x44                       // 'D' — delete to end of line
         return Step { ed: delete_to_eol(ed), st: ist_done(st) }
+    if b == 0x01                       // Ctrl-A — increment the number
+        return Step { ed: op_incdec(ed, cnt), st: ist_done(st) }
+    if b == 0x18                       // Ctrl-X — decrement the number
+        return Step { ed: op_incdec(ed, 0 - cnt), st: ist_done(st) }
     // Visual mode entry (slice 21): anchor the selection at the cursor.  A
     // count pre-extends the selection (`3v` = 3 chars, `2V` = 2 lines).
     if b == 0x76                       // 'v' — charwise visual
