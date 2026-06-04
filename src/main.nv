@@ -2106,6 +2106,21 @@ fn strip_quotes(s: Str) -> Str
     else
         s
 
+// Drop an inline `#` comment from a TOML value (a `#` outside double quotes
+// starts a comment), so `number = true   # note` parses as `true`.
+fn strip_inline_comment(s: Str) -> Str
+    var i = 0
+    let n = str.len(s)
+    var inq = false
+    while i < n
+        let b = str.byte_at(s, i) ?? 0
+        if b == 34
+            inq = not inq
+        elif b == 35 and (not inq)
+            return str.slice(s, 0, i)
+        i = i + 1
+    s
+
 // Load `[keymaps]` from a config file: lines `lhs = "rhs"` (rhs may use
 // `\e` etc.).  Comments (`#`) and blank lines are skipped; section headers
 // (`[name]`) gate which section we're in.  Missing file → empty keymap.
@@ -2128,7 +2143,7 @@ fn load_keymaps(cfg_path: Str) -> Keymap [io]
                         let eq = index_of_byte(raw, 61)                     // '='
                         if eq > 0
                             let lkey = strip_quotes(str.trim(str.slice(raw, 0, eq)))
-                            let rseq = strip_quotes(str.trim(str.slice(raw, eq + 1, str.len(raw))))
+                            let rseq = strip_quotes(str.trim(strip_inline_comment(str.slice(raw, eq + 1, str.len(raw)))))
                             if str.len(lkey) >= 1
                                 lhs = list.append(lhs, [str.byte_at(lkey, 0) ?? 0])
                                 rhs = list.append(rhs, [decode_escapes(rseq)])
@@ -2174,7 +2189,7 @@ fn load_colorscheme(cfg_path: Str) -> Colorscheme [io]
                         let eq = index_of_byte(raw, 61)
                         if eq > 0
                             let key = str.trim(str.slice(raw, 0, eq))
-                            let cv = parse_color_val(str.slice(raw, eq + 1, str.len(raw)))
+                            let cv = parse_color_val(strip_inline_comment(str.slice(raw, eq + 1, str.len(raw))))
                             if key == "status_fg"
                                 sfg = cv
                             elif key == "status_bg"
@@ -2238,7 +2253,7 @@ fn load_options(cfg_path: Str) -> Options [io]
                         let eq = index_of_byte(raw, 61)
                         if eq > 0
                             let key = str.trim(str.slice(raw, 0, eq))
-                            let valr = str.slice(raw, eq + 1, str.len(raw))
+                            let valr = strip_inline_comment(str.slice(raw, eq + 1, str.len(raw)))
                             if key == "number" or key == "nu"
                                 number = parse_bool_val(valr)
                             elif key == "relativenumber" or key == "rnu"
