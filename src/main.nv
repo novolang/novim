@@ -4008,6 +4008,10 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
     var lsp_reqid = 1                    // monotonic id for gd/K requests (init used 1)
     var lsp_info = ""                    // transient status message (gd/K result)
     var gpend = false                    // awaiting the 2nd byte of a `g` command (gd)
+    var comp_active = false              // Ctrl-N/P completion cycle in progress
+    var comp_cands: [Str] = []           // filtered candidate labels
+    var comp_idx = 0                     // current candidate
+    var comp_start = 0                   // column where the completed prefix begins
     var lsp_phase = 0                    // 0 none · 1 init sent (awaiting result) · 2 ready
     if ends_with_nv(path)
         lsp_pid = lsp_spawn()
@@ -4234,7 +4238,41 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                     search_mode = true
                     search_buf = ""
                     search_back = true
+                elif st.mode == 1 and lsp_phase == 2 and (b == 0x0E or b == 0x10)   // Ctrl-N/P — completion
+                    if not comp_active
+                        let curline = line_at(ed, ed.cy)
+                        comp_start = ident_start_before(curline, ed.cx)
+                        let prefix = str.slice(curline, comp_start, ed.cx)
+                        lsp_reqid = lsp_reqid + 1
+                        lsp_send(lsp_in, lsp_completion_req(lsp_reqid, lsp_uri, ed.cy, ed.cx))
+                        let cresp = lsp_pump(lsp_out, lsp_reqid, 40)
+                        var cands: [Str] = []
+                        let labels = lsp_comp_labels(cresp)
+                        var ci = 0
+                        while ci < list.len(labels)
+                            if starts_with(labels[ci], prefix)
+                                cands = list.push(cands, labels[ci])
+                            ci = ci + 1
+                        if list.len(cands) == 0
+                            lsp_info = "no completions"
+                        else
+                            comp_cands = cands
+                            comp_idx = if b == 0x10 then list.len(cands) - 1 else 0
+                            ed = comp_apply(ed, comp_start, ed.cx, comp_cands[comp_idx])
+                            lsp_info = "match " + str.from_int(comp_idx + 1) + "/" + str.from_int(list.len(comp_cands)) + ": " + comp_cands[comp_idx]
+                            comp_active = true
+                    else
+                        let n = list.len(comp_cands)
+                        if n > 0
+                            if b == 0x0E
+                                comp_idx = (comp_idx + 1) % n
+                            else
+                                comp_idx = (comp_idx + n - 1) % n
+                            ed = comp_apply(ed, comp_start, ed.cx, comp_cands[comp_idx])
+                            lsp_info = "match " + str.from_int(comp_idx + 1) + "/" + str.from_int(n) + ": " + comp_cands[comp_idx]
                 else
+                    if comp_active                   // any other key commits the candidate
+                        comp_active = false
                     let estep = feed_edit(ed, st, km, es, b)
                     ed = estep.ed
                     st = estep.st
@@ -4872,6 +4910,56 @@ fn lsp_rename_newtexts(msg: Str) -> [Str]
     match json.parse(msg)
         None => []
         Some(doc) => lsp_rename_newtexts_doc(doc)
+
+// ── completion (Ctrl-N / Ctrl-P, inline cycle) ──────────────────────────────
+fn lsp_completion_req(id: Int, uri: Str, line: Int, char: Int) -> Str
+    "{" + lsp_q("jsonrpc") + ":" + lsp_q("2.0") + "," + lsp_q("id") + ":" + str.from_int(id) + "," + lsp_q("method") + ":" + lsp_q("textDocument/completion") + "," + lsp_q("params") + ":{" + lsp_q("textDocument") + ":{" + lsp_q("uri") + ":" + lsp_q(uri) + "}," + lsp_q("position") + ":{" + lsp_q("line") + ":" + str.from_int(line) + "," + lsp_q("character") + ":" + str.from_int(char) + "}}}"
+
+fn lsp_comp_labels_arr(items: [JsonValueH]) -> [Str]
+    var out: [Str] = []
+    var i = 0
+    while i < list.len(items)
+        out = list.push(out, json.get_str(items[i], "label") ?? "")
+        i = i + 1
+    out
+
+fn lsp_comp_labels_res(res: JsonValueH) -> [Str]
+    match json.get_list(res, "items")
+        None => []
+        Some(items) => lsp_comp_labels_arr(items)
+
+fn lsp_comp_labels_doc(doc: JsonValueH) -> [Str]
+    match json.get(doc, "result")
+        None => []
+        Some(res) => lsp_comp_labels_res(res)
+
+// Completion labels (novols returns a CompletionList; the client filters by the
+// typed prefix — see the driver's Ctrl-N handling).
+fn lsp_comp_labels(msg: Str) -> [Str]
+    match json.parse(msg)
+        None => []
+        Some(doc) => lsp_comp_labels_doc(doc)
+
+// True when `s` begins with `prefix`.
+fn starts_with(s: Str, prefix: Str) -> Bool
+    let pl = str.len(prefix)
+    if pl > str.len(s)
+        return false
+    str.slice(s, 0, pl) == prefix
+
+// Column where the identifier ending at `col` begins (the completion prefix).
+fn ident_start_before(line: Str, col: Int) -> Int
+    var s = col
+    while s > 0 and nv_ident_char(str.byte_at(line, s - 1) ?? 0)
+        s = s - 1
+    s
+
+// Replace [start, endc) on the cursor line with `ins`; cursor lands after it.
+fn comp_apply(ed: Editor, start: Int, endc: Int, ins: Str) -> Editor
+    let line = line_at(ed, ed.cy)
+    let e = if endc <= str.len(line) then endc else str.len(line)
+    let nl = str.slice(line, 0, start) + ins + str.slice(line, e, str.len(line))
+    Editor { lines: set_line(ed.lines, ed.cy, nl), cy: ed.cy, cx: start + str.len(ins) }
 
 // Apply rename edits to the buffer.  Edits arrive in ascending (line, char)
 // order, so iterating in REVERSE applies them right-to-left / bottom-to-top —
