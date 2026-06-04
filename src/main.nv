@@ -1017,6 +1017,17 @@ fn save_buf(path: Str, lines: [Str]) [io]
 // Decode `\e`=Esc `\n`/`\r`=Enter `\t`=Tab `\b`=Backspace `\\`=backslash
 // into their real bytes, returning a new string.  Used for both `--batch`
 // key strings and `[keymaps]` right-hand sides.
+// Hex digit value, or -1 if `b` isn't a hex digit.
+fn hex_val(b: Int) -> Int
+    if b >= 0x30 and b <= 0x39
+        b - 0x30
+    elif b >= 0x61 and b <= 0x66
+        b - 0x61 + 10
+    elif b >= 0x41 and b <= 0x46
+        b - 0x41 + 10
+    else
+        0 - 1
+
 fn decode_escapes(s: Str) -> Str
     var out = ""
     let n = str.len(s)
@@ -1040,6 +1051,9 @@ fn decode_escapes(s: Str) -> Str
             elif nx == 0x5C
                 out = out + str.from_char(92)
                 i = i + 2
+            elif nx == 0x78 and i + 3 < n and hex_val(str.byte_at(s, i + 2) ?? 0) >= 0 and hex_val(str.byte_at(s, i + 3) ?? 0) >= 0
+                out = out + str.from_char(hex_val(str.byte_at(s, i + 2) ?? 0) * 16 + hex_val(str.byte_at(s, i + 3) ?? 0))
+                i = i + 4
             else
                 out = out + str.from_char(b)
                 i = i + 1
@@ -1349,21 +1363,6 @@ fn is_edit_start(b: Int) -> Bool
 // The per-session dot state: `last` = the recorded change to repeat; `cur` =
 // bytes of the in-progress command; `snap` = buffer text when it began;
 // `active` = whether a command is being recorded right now.
-struct DotState
-    last:   Str
-    cur:    Str
-    snap:   Str
-    active: Bool
-
-fn dot_new() -> DotState
-    DotState { last: "", cur: "", snap: "", active: false }
-
-// feed_dot's result: new editor + input state + updated dot state.
-struct DotStep
-    ed:  Editor
-    st:  InputState
-    dot: DotState
-
 // Replay a recorded byte sequence through feed_mapped.
 fn replay_seq(ed: Editor, st: InputState, km: Keymap, seq: Str) -> Step
     var e = ed
@@ -1377,55 +1376,146 @@ fn replay_seq(ed: Editor, st: InputState, km: Keymap, seq: Str) -> Step
         j = j + 1
     Step { ed: e, st: s }
 
-// Feed one byte, appending it to the in-progress command and — when the
-// command completes at a clean state — recording it as `last` if it changed
-// the buffer.
-fn dot_record(ed: Editor, st: InputState, km: Keymap, dot: DotState, b: Int) -> DotStep
-    // Build cur2 + extract the snapshot/last as LOCALS before feed_mapped: the
-    // operator/insert paths allocate heavily, and reading the DotState param's
-    // string fields *after* the call reads freed memory under --llvm
-    // (string-ownership bug family).  Rooting them as locals first avoids it.
+// ── `.` repeat + undo/redo (slices 19/20) ───────────────────────────────
+// Both are DRIVER-level session state so `feed` stays pure.  `EditState`
+// carries the dot-repeat recording (`last`/`cur`/`snaptxt`/`active`) plus an
+// undo/redo stack of buffer snapshots.  This works because novim never
+// mutates a line vector in place — every edit rebuilds it via list.append —
+// so a Snapshot that holds the old `[Str]` reference stays valid forever.
+// Every helper uses a SINGLE trailing return: an early `return StructLit{}`
+// from inside an `if` after a heavy call miscompiles under --llvm — see
+// bugs/codegen-llvm/llvm-early-return-struct-literal-after-call-corrupts-field.md.
+
+// A point-in-time buffer + cursor, pushed onto the undo/redo stacks.
+struct Snapshot
+    lines: [Str]
+    cy:    Int
+    cx:    Int
+
+struct EditState
+    last:    Str          // dot: last change command's bytes
+    cur:     Str          // dot: in-progress command bytes
+    snaptxt: Str          // dot: buf_text at command start (change detection)
+    active:  Bool         // a command is being recorded
+    snaped:  Snapshot     // undo: editor at command start
+    undos:   [Snapshot]   // undo stack (last = most recent pre-change state)
+    redos:   [Snapshot]   // redo stack
+
+struct EditStep
+    ed: Editor
+    st: InputState
+    es: EditState
+
+fn lines_empty() -> [Str]
+    var x: [Str] = []
+    x
+
+fn snaps_empty() -> [Snapshot]
+    var x: [Snapshot] = []
+    x
+
+fn snap_empty() -> Snapshot
+    Snapshot { lines: lines_empty(), cy: 0, cx: 0 }
+
+fn snap_of(ed: Editor) -> Snapshot
+    Snapshot { lines: ed.lines, cy: ed.cy, cx: ed.cx }
+
+fn edit_new() -> EditState
+    EditState { last: "", cur: "", snaptxt: "", active: false, snaped: snap_empty(), undos: snaps_empty(), redos: snaps_empty() }
+
+// First `k` snapshots of `xs` (the stack minus its top).
+fn take_snaps(xs: [Snapshot], k: Int) -> [Snapshot]
+    var out: [Snapshot] = []
+    let mut i = 0
+    while i < k
+        out = list.append(out, [xs[i]])
+        i = i + 1
+    out
+
+// Begin recording a command: snapshot the buffer text (for change detection)
+// and the full editor (for undo).
+fn edit_start(es: EditState, ed: Editor) -> EditState
+    EditState { last: es.last, cur: "", snaptxt: buf_text(ed), active: true, snaped: snap_of(ed), undos: es.undos, redos: es.redos }
+
+// Feed one byte mid/within a tracked command; on completion record the dot
+// `last` and push the pre-change snapshot onto the undo stack if it changed.
+fn edit_record(ed: Editor, st: InputState, km: Keymap, es: EditState, b: Int) -> EditStep
     let step = feed_mapped(ed, st, km, b)
     let s2 = step.st
-    let cur2 = dot.cur + str.from_char(b)
+    let cur2 = es.cur + str.from_char(b)
     let done = s2.mode == 0 and s2.pending == 0 and s2.count == 0
-    let changed = buf_text(step.ed) != dot.snap
-    // Single return point: an early `return StructLit{...}` from inside an
-    // `if` after this heavy feed_mapped call miscompiles under --llvm
-    // (bugs/codegen-llvm/llvm-early-return-struct-after-call.md), so fold the
-    // branch into the field values instead.
-    let newlast = if done and changed then cur2 else dot.last
-    let newcur  = if done then "" else cur2
-    let newsnap = if done then "" else dot.snap
-    DotStep { ed: step.ed, st: s2, dot: DotState { last: newlast, cur: newcur, snap: newsnap, active: not done } }
+    let push = done and (buf_text(step.ed) != es.snaptxt)
+    let newlast    = if push then cur2 else es.last
+    let newcur     = if done then "" else cur2
+    let newsnaptxt = if done then "" else es.snaptxt
+    let newundos   = if push then list.append(es.undos, [es.snaped]) else es.undos
+    let newredos   = if push then snaps_empty() else es.redos
+    EditStep { ed: step.ed, st: s2, es: EditState { last: newlast, cur: newcur, snaptxt: newsnaptxt, active: not done, snaped: es.snaped, undos: newundos, redos: newredos } }
 
-// Drive one input byte with dot-repeat recording/replay around feed_mapped.
-fn feed_dot(ed: Editor, st: InputState, km: Keymap, dot: DotState, b: Int) -> DotStep
-    // `.` at a command boundary replays the last change `count` times.
-    if st.mode == 0 and st.pending == 0 and b == 0x2E
-        let reps = if st.count > 0 then st.count else 1
-        var e = ed
-        var s = ist_done(st)
-        var r = 0
-        while r < reps
-            let step = replay_seq(e, s, km, dot.last)
-            e = step.ed
-            s = step.st
-            r = r + 1
-        return DotStep { ed: e, st: s, dot: DotState { last: dot.last, cur: "", snap: "", active: false } }
-    if dot.active                                            // mid-command — keep recording
-        return dot_record(ed, st, km, dot, b)
-    if st.mode == 0 and st.pending == 0 and st.count == 0 and is_edit_start(b)
-        let started = DotState { last: dot.last, cur: "", snap: buf_text(ed), active: true }
-        return dot_record(ed, st, km, started, b)
-    // Untracked (pure motion / navigation): feed without touching dot state.
+// Untracked byte (pure motion / navigation): feed without touching dot/undo.
+fn edit_pass(ed: Editor, st: InputState, km: Keymap, es: EditState, b: Int) -> EditStep
     let step = feed_mapped(ed, st, km, b)
-    DotStep { ed: step.ed, st: step.st, dot: dot }
+    EditStep { ed: step.ed, st: step.st, es: es }
+
+// `u` — pop the undo stack onto the redo stack and restore the buffer.
+fn edit_undo(ed: Editor, st: InputState, es: EditState) -> EditStep
+    let nu = list.len(es.undos)
+    let can = nu > 0
+    let snap = if can then es.undos[nu - 1] else snap_of(ed)
+    let undos2 = if can then take_snaps(es.undos, nu - 1) else es.undos
+    let redos2 = if can then list.append(es.redos, [snap_of(ed)]) else es.redos
+    let nede = if can then clamp(Editor { lines: snap.lines, cy: snap.cy, cx: snap.cx }) else ed
+    EditStep { ed: nede, st: ist_done(st), es: EditState { last: es.last, cur: "", snaptxt: "", active: false, snaped: es.snaped, undos: undos2, redos: redos2 } }
+
+// Ctrl-R — pop the redo stack onto the undo stack and restore the buffer.
+fn edit_redo(ed: Editor, st: InputState, es: EditState) -> EditStep
+    let nr = list.len(es.redos)
+    let can = nr > 0
+    let snap = if can then es.redos[nr - 1] else snap_of(ed)
+    let redos2 = if can then take_snaps(es.redos, nr - 1) else es.redos
+    let undos2 = if can then list.append(es.undos, [snap_of(ed)]) else es.undos
+    let nede = if can then clamp(Editor { lines: snap.lines, cy: snap.cy, cx: snap.cx }) else ed
+    EditStep { ed: nede, st: ist_done(st), es: EditState { last: es.last, cur: "", snaptxt: "", active: false, snaped: es.snaped, undos: undos2, redos: redos2 } }
+
+// `.` — replay the last change `count` times; it is itself an undoable change,
+// so snapshot the pre-replay buffer and push it on the undo stack if it changed.
+fn edit_dot(ed: Editor, st: InputState, km: Keymap, es: EditState) -> EditStep
+    let reps = if st.count > 0 then st.count else 1
+    let presnap = snap_of(ed)
+    let pretxt = buf_text(ed)
+    var e = ed
+    var s = ist_done(st)
+    var r = 0
+    while r < reps
+        let step = replay_seq(e, s, km, es.last)
+        e = step.ed
+        s = step.st
+        r = r + 1
+    let push = buf_text(e) != pretxt
+    let newundos = if push then list.append(es.undos, [presnap]) else es.undos
+    let newredos = if push then snaps_empty() else es.redos
+    EditStep { ed: e, st: s, es: EditState { last: es.last, cur: "", snaptxt: "", active: false, snaped: es.snaped, undos: newundos, redos: newredos } }
+
+// Drive one input byte with dot-repeat + undo/redo around feed_mapped.
+// feed_edit only ever early-returns the result of a HELPER call (safe), and
+// each helper has a single trailing return (the --llvm early-return-struct bug).
+fn feed_edit(ed: Editor, st: InputState, km: Keymap, es: EditState, b: Int) -> EditStep
+    if st.mode == 0 and st.pending == 0 and b == 0x75            // 'u' — undo
+        return edit_undo(ed, st, es)
+    if st.mode == 0 and st.pending == 0 and b == 0x12            // Ctrl-R — redo
+        return edit_redo(ed, st, es)
+    if st.mode == 0 and st.pending == 0 and b == 0x2E            // '.' — repeat
+        return edit_dot(ed, st, km, es)
+    if es.active                                                // mid-command
+        return edit_record(ed, st, km, es, b)
+    if st.mode == 0 and st.pending == 0 and st.count == 0 and is_edit_start(b)
+        return edit_record(ed, st, km, edit_start(es, ed), b)
+    edit_pass(ed, st, km, es, b)
 
 fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
     var ed = Editor { lines: buf_load(path), cy: 0, cx: 0 }
     var st = ist_new()
-    var dot = dot_new()
+    var es = edit_new()
     let km = load_keymaps(cfg_path)
     let decoded = decode_escapes(keys)
     var cmd_mode = false
@@ -1475,10 +1565,10 @@ fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
             search_mode = true
             search_buf = ""
         else
-            let dstep = feed_dot(ed, st, km, dot, b)
-            ed = dstep.ed
-            st = dstep.st
-            dot = dstep.dot
+            let estep = feed_edit(ed, st, km, es, b)
+            ed = estep.ed
+            st = estep.st
+            es = estep.es
         i = i + 1
     let mut li = 0
     let nl = list.len(ed.lines)
@@ -1657,7 +1747,7 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
     let _ = novo_pty_set_raw_mode_h()
     var ed = Editor { lines: buf_load(path), cy: 0, cx: 0 }
     var st = ist_new()
-    var dot = dot_new()
+    var es = edit_new()
     let km = load_keymaps(cfg_path)
     let cs = load_colorscheme(cfg_path)
     let opts = load_options(cfg_path)
@@ -1723,10 +1813,10 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                     search_mode = true
                     search_buf = ""
                 else
-                    let dstep = feed_dot(ed, st, km, dot, b)
-                    ed = dstep.ed
-                    st = dstep.st
-                    dot = dstep.dot
+                    let estep = feed_edit(ed, st, km, es, b)
+                    ed = estep.ed
+                    st = estep.st
+                    es = estep.es
             top = scroll_to(top, ed.cy, rows - 1)
             left = hscroll_for(left, ed, opts, cols)
             render(ed, rows, cols, path, top, left, st.mode, cs, opts)
