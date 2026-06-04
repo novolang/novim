@@ -2873,16 +2873,12 @@ fn feed_mapped(ed: Editor, st: InputState, km: Keymap, b: Int) -> Step
 // counts, and operator+motion all repeat faithfully.
 
 // Whole-buffer text, used to detect whether a command changed the buffer.
+// Join the buffer with newlines.  Uses str.join (a single O(n) pass) rather
+// than repeated `acc = acc + line` — the latter is O(n²) and, since buf_text
+// runs several times per keystroke (undo/dot change-detection), made insert
+// mode crawl on large files.
 fn buf_text(ed: Editor) -> Str
-    var acc = ""
-    let n = list.len(ed.lines)
-    let mut i = 0
-    while i < n
-        if i > 0
-            acc = acc + str.from_char(10)
-        acc = acc + ed.lines[i]
-        i = i + 1
-    acc
+    str.join(str.from_char(10), ed.lines)
 
 // Bytes that can BEGIN a buffer-changing command (so navigation keystrokes
 // stay cheap — we only snapshot/compare the buffer for these).  Counts are
@@ -4017,6 +4013,8 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
     // `jfwd`.  Recorded for gd / :sym / :N / search — the driver-level jumps.
     var jback: [Int] = []
     var jfwd: [Int] = []
+    var lsp_dirty = false                // buffer changed since the last didChange
+    var lsp_idle = 0                      // consecutive idle poll cycles (debounce)
     var lsp_phase = 0                    // 0 none · 1 init sent (awaiting result) · 2 ready
     if ends_with_nv(path)
         lsp_pid = lsp_spawn()
@@ -4305,16 +4303,23 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                     st = estep.st
                     es = estep.es
             changed = true
-        // Live document sync: an edit can only have come from stdin this
-        // iteration.  Debounce on the actual buffer text (reused from the
-        // undo/dot change-detection) so insert-mode keystrokes that don't
-        // alter the buffer don't spam didChange.  Only once the doc is open.
-        if lsp_phase == 2 and m % 2 == 1
+        // Live document sync, TIME-debounced: mark the buffer dirty on any
+        // input, and only send `didChange` after typing pauses (~150 ms of idle
+        // poll cycles).  This coalesces a burst of insert-mode keystrokes into a
+        // single full-document sync instead of rebuilding + re-sending the whole
+        // buffer (a byte-at-a-time pipe write) on every keypress.
+        if m % 2 == 1
+            lsp_dirty = true
+            lsp_idle = 0
+        else
+            lsp_idle = lsp_idle + 1
+        if lsp_phase == 2 and lsp_dirty and lsp_idle >= 3
             let cur = buf_text(ed)
             if cur != lsp_lasttext
                 lsp_lasttext = cur
                 lsp_ver = lsp_ver + 1
                 lsp_send(lsp_in, lsp_didchange(lsp_uri, lsp_ver, cur))
+            lsp_dirty = false
         // Drain whatever novols has sent (non-blocking).  The init result
         // (id 1) completes the handshake asynchronously — initialized +
         // didOpen (with the buffer's current text, edits-during-init included);
@@ -4383,13 +4388,10 @@ fn default_config_path() -> Str [io]
 // novim talks JSON-RPC over stdio to `novols`.  All of this lives outside the
 // pure `feed`; see orbit/novim/docs/LSP-DESIGN.md.
 
-// Write a whole string to a fd.
+// Write a whole string to a fd in one bulk call (not byte-at-a-time — a large
+// didChange written one byte per syscall froze the loop for hundreds of ms).
 fn lsp_write_fd(fd: Int, s: Str) [io]
-    var i = 0
-    let n = str.len(s)
-    while i < n
-        let _ = novo_unix_write_byte_h(fd, str.byte_at(s, i) ?? 0)
-        i = i + 1
+    let _ = novo_unix_write_str_h(fd, s)
 
 // Send a JSON-RPC message: `Content-Length: N\r\n\r\n<body>`.
 fn lsp_send(fd: Int, body: Str) [io]
@@ -4447,27 +4449,35 @@ fn lsp_poll_message(fd: Int, timeout: Int) -> Str [io, time]
     else
         ""
 
-// Escape a string for a JSON string value.
+// Escape a string for a JSON string value.  Uses a str.builder (amortized
+// O(1) byte append) — the old `out = out + …` per byte was O(n²) and, run on
+// the whole buffer for every didChange, froze the editor on large files.
 fn json_escape(s: Str) -> Str
-    let bs = str.from_char(92)
-    var out = ""
+    let sb = str.builder_new()
     var i = 0
     let n = str.len(s)
     while i < n
         let b = str.byte_at(s, i) ?? 0
         if b == 34
-            out = out + bs + str.from_char(34)
+            str.builder_append_char(sb, 92)
+            str.builder_append_char(sb, 34)
         elif b == 92
-            out = out + bs + str.from_char(92)
+            str.builder_append_char(sb, 92)
+            str.builder_append_char(sb, 92)
         elif b == 10
-            out = out + bs + str.from_char(110)
+            str.builder_append_char(sb, 92)
+            str.builder_append_char(sb, 110)
         elif b == 13
-            out = out + bs + str.from_char(114)
+            str.builder_append_char(sb, 92)
+            str.builder_append_char(sb, 114)
         elif b == 9
-            out = out + bs + str.from_char(116)
+            str.builder_append_char(sb, 92)
+            str.builder_append_char(sb, 116)
         else
-            out = out + str.from_char(b)
+            str.builder_append_char(sb, b)
         i = i + 1
+    let out = str.builder_to_str(sb)
+    str.builder_drop(sb)
     out
 
 fn lsp_q(s: Str) -> Str
