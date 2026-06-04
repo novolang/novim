@@ -1991,6 +1991,15 @@ fn sym_query(cmd: Str) -> Str
     let c = str.trim(cmd)
     if str.len(c) <= 4 then "" else str.trim(str.slice(c, 4, str.len(c)))
 
+// `:rename <newname>` — rename the symbol under the cursor across the file.
+fn is_rename(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    c == "rename" or (str.len(c) > 7 and str.slice(c, 0, 7) == "rename ")
+
+fn rename_query(cmd: Str) -> Str
+    let c = str.trim(cmd)
+    if str.len(c) <= 7 then "" else str.trim(str.slice(c, 7, str.len(c)))
+
 fn ex_goto(ed: Editor, cmd: Str) -> Editor
     let c = str.trim(cmd)
     let nl = list.len(ed.lines)
@@ -4089,6 +4098,31 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                                         lsp_info = "sym: no match"
                             else
                                 lsp_info = "sym: LSP not ready"
+                        elif is_rename(cmd_buf)
+                            if lsp_phase != 2
+                                lsp_info = "rename: LSP not ready"
+                            else
+                                let nn = rename_query(cmd_buf)
+                                if str.len(nn) == 0
+                                    lsp_info = "rename: usage :rename <newname>"
+                                else
+                                    lsp_reqid = lsp_reqid + 1
+                                    lsp_send(lsp_in, lsp_rename_req(lsp_reqid, lsp_uri, ed.cy, ed.cx, nn))
+                                    let rresp = lsp_pump(lsp_out, lsp_reqid, 40)
+                                    if str.len(rresp) == 0
+                                        lsp_info = "rename: no response"
+                                    else
+                                        let nts = lsp_rename_newtexts(rresp)
+                                        if list.len(nts) == 0
+                                            lsp_info = "rename: no occurrences"
+                                        else
+                                            let trips = lsp_rename_triples(rresp)
+                                            es = edit_push_undo(es, ed)
+                                            ed = clamp(apply_rename(ed, trips, nts))
+                                            lsp_lasttext = buf_text(ed)
+                                            lsp_ver = lsp_ver + 1
+                                            lsp_send(lsp_in, lsp_didchange(lsp_uri, lsp_ver, lsp_lasttext))
+                                            lsp_info = "renamed " + str.from_int(list.len(nts)) + " sites"
                         else
                             let r = exec_ex(cmd_buf)
                             if r.save
@@ -4748,6 +4782,115 @@ fn lsp_sym_pos(msg: Str) -> [Int]
     match json.parse(msg)
         None => []
         Some(doc) => lsp_sym_pos_doc(doc)
+
+// ── rename (:rename <newname>) ──────────────────────────────────────────────
+fn lsp_rename_req(id: Int, uri: Str, line: Int, char: Int, newname: Str) -> Str
+    "{" + lsp_q("jsonrpc") + ":" + lsp_q("2.0") + "," + lsp_q("id") + ":" + str.from_int(id) + "," + lsp_q("method") + ":" + lsp_q("textDocument/rename") + "," + lsp_q("params") + ":{" + lsp_q("textDocument") + ":{" + lsp_q("uri") + ":" + lsp_q(uri) + "}," + lsp_q("position") + ":{" + lsp_q("line") + ":" + str.from_int(line) + "," + lsp_q("character") + ":" + str.from_int(char) + "}," + lsp_q("newName") + ":" + lsp_q(json_escape(newname)) + "}}"
+
+// The end character of a Range node (rename edits are single-line).
+fn range_end_char(rng: JsonValueH) -> Int
+    match json.get(rng, "end")
+        None => 0 - 1
+        Some(en) => json.get_int(en, "character") ?? (0 - 1)
+
+// [line, start_char, end_char] of a single TextEdit, or [].
+fn lsp_edit_triple(e: JsonValueH) -> [Int]
+    match json.get(e, "range")
+        None => []
+        Some(rng) =>
+            let sp = range_start_pos(rng)
+            let ec = range_end_char(rng)
+            if list.len(sp) >= 2 and ec >= 0 then [sp[0], sp[1], ec] else []
+
+// WorkspaceEdit `changes` is an object keyed by URI; a local rename has a
+// single key (this file).  Take that key's TextEdit array.  (Multi-file
+// rename isn't applied — only the buffer we hold.)
+fn lsp_rename_triples_arr(edits: [JsonValueH]) -> [Int]
+    var out: [Int] = []
+    var i = 0
+    while i < list.len(edits)
+        let t = lsp_edit_triple(edits[i])
+        if list.len(t) >= 3
+            out = list.push(out, t[0])
+            out = list.push(out, t[1])
+            out = list.push(out, t[2])
+        i = i + 1
+    out
+
+fn lsp_rename_triples_changes(changes: JsonValueH) -> [Int]
+    let ks = json.keys(changes)
+    if list.len(ks) == 0
+        return []
+    match json.get_list(changes, ks[0])
+        None => []
+        Some(edits) => lsp_rename_triples_arr(edits)
+
+fn lsp_rename_triples_res(res: JsonValueH) -> [Int]
+    match json.get(res, "changes")
+        None => []
+        Some(changes) => lsp_rename_triples_changes(changes)
+
+fn lsp_rename_triples_doc(doc: JsonValueH) -> [Int]
+    match json.get(doc, "result")
+        None => []
+        Some(res) => lsp_rename_triples_res(res)
+
+// Flat [line, schar, echar, …] for every rename edit, ascending source order.
+fn lsp_rename_triples(msg: Str) -> [Int]
+    match json.parse(msg)
+        None => []
+        Some(doc) => lsp_rename_triples_doc(doc)
+
+fn lsp_rename_newtexts_arr(edits: [JsonValueH]) -> [Str]
+    var out: [Str] = []
+    var i = 0
+    while i < list.len(edits)
+        out = list.push(out, json.get_str(edits[i], "newText") ?? "")
+        i = i + 1
+    out
+
+fn lsp_rename_newtexts_changes(changes: JsonValueH) -> [Str]
+    let ks = json.keys(changes)
+    if list.len(ks) == 0
+        return []
+    match json.get_list(changes, ks[0])
+        None => []
+        Some(edits) => lsp_rename_newtexts_arr(edits)
+
+fn lsp_rename_newtexts_res(res: JsonValueH) -> [Str]
+    match json.get(res, "changes")
+        None => []
+        Some(changes) => lsp_rename_newtexts_changes(changes)
+
+fn lsp_rename_newtexts_doc(doc: JsonValueH) -> [Str]
+    match json.get(doc, "result")
+        None => []
+        Some(res) => lsp_rename_newtexts_res(res)
+
+// Replacement text per edit, index-aligned with `lsp_rename_triples`.
+fn lsp_rename_newtexts(msg: Str) -> [Str]
+    match json.parse(msg)
+        None => []
+        Some(doc) => lsp_rename_newtexts_doc(doc)
+
+// Apply rename edits to the buffer.  Edits arrive in ascending (line, char)
+// order, so iterating in REVERSE applies them right-to-left / bottom-to-top —
+// earlier positions never shift.  Each edit replaces line[ln][schar..echar).
+fn apply_rename(ed: Editor, triples: [Int], newtexts: [Str]) -> Editor
+    var lines = ed.lines
+    var k = list.len(newtexts) - 1
+    while k >= 0
+        if k * 3 + 2 < list.len(triples)
+            let ln = triples[k * 3]
+            let sc = triples[k * 3 + 1]
+            let ec = triples[k * 3 + 2]
+            if ln >= 0 and ln < list.len(lines)
+                let old = lines[ln]
+                if sc >= 0 and sc <= ec and ec <= str.len(old)
+                    let nw = str.slice(old, 0, sc) + newtexts[k] + str.slice(old, ec, str.len(old))
+                    lines = set_line(lines, ln, nw)
+        k = k - 1
+    Editor { lines: lines, cy: ed.cy, cx: ed.cx }
 
 // `--lsp-diag <file>`: spawn novols, open the file, print its diagnostics.
 // Deterministic transport smoke test for Phase A.
