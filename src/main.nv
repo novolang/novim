@@ -4012,6 +4012,11 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
     var comp_cands: [Str] = []           // filtered candidate labels
     var comp_idx = 0                     // current candidate
     var comp_start = 0                   // column where the completed prefix begins
+    // Jumplist (browser-style back/forward) for Ctrl-O / Ctrl-I.  Each stack is
+    // flat [y0, x0, y1, x1, …]; a jump pushes the origin onto `jback` and clears
+    // `jfwd`.  Recorded for gd / :sym / :N / search — the driver-level jumps.
+    var jback: [Int] = []
+    var jfwd: [Int] = []
     var lsp_phase = 0                    // 0 none · 1 init sent (awaiting result) · 2 ready
     if ends_with_nv(path)
         lsp_pid = lsp_spawn()
@@ -4052,6 +4057,8 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                             es = edit_push_undo(es, ed)
                             ed = ex_global(ed, cmd_buf)
                         elif is_goto(cmd_buf)
+                            jback = list.push(list.push(jback, ed.cy), ed.cx)
+                            jfwd = []
                             ed = ex_goto(ed, cmd_buf)
                         elif is_set(cmd_buf)
                             opts = apply_set(opts, cmd_buf)
@@ -4096,6 +4103,8 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                                             found = si
                                         si = si + 1
                                     if found >= 0 and found * 2 + 1 < list.len(spos)
+                                        jback = list.push(list.push(jback, ed.cy), ed.cx)
+                                        jfwd = []
                                         ed = clamp(Editor { lines: ed.lines, cy: spos[found * 2], cx: spos[found * 2 + 1] })
                                         lsp_info = "sym: " + snames[found]
                                     else
@@ -4147,6 +4156,8 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                 elif search_mode
                     if b == 13 or b == 10
                         st = ist_set_search(st, search_buf)
+                        jback = list.push(list.push(jback, ed.cy), ed.cx)
+                        jfwd = []
                         ed = find_next(ed, search_buf, not search_back)
                         search_mode = false
                         search_buf = ""
@@ -4176,6 +4187,8 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                             if list.len(dpos) >= 2
                                 let duri = lsp_def_uri(resp)
                                 if duri == lsp_uri or duri == ""
+                                    jback = list.push(list.push(jback, ed.cy), ed.cx)
+                                    jfwd = []
                                     ed = clamp(Editor { lines: ed.lines, cy: dpos[0], cx: dpos[1] })
                                     lsp_info = "definition"
                                 else
@@ -4227,6 +4240,20 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                     if ncy > top + body - 1
                         ncy = top + body - 1
                     ed = clamp(Editor { lines: ed.lines, cy: ncy, cx: ed.cx })
+                elif scroll_idle(st, es) and key_free(km, b) and b == 0x0F and list.len(jback) >= 2   // Ctrl-O — jump back
+                    let nb = list.len(jback)
+                    let ty = jback[nb - 2]
+                    let tx = jback[nb - 1]
+                    jfwd = list.push(list.push(jfwd, ed.cy), ed.cx)
+                    jback = drop_last2(jback)
+                    ed = clamp(Editor { lines: ed.lines, cy: ty, cx: tx })
+                elif scroll_idle(st, es) and key_free(km, b) and b == 0x09 and list.len(jfwd) >= 2   // Ctrl-I / Tab — jump forward
+                    let nf = list.len(jfwd)
+                    let ty = jfwd[nf - 2]
+                    let tx = jfwd[nf - 1]
+                    jback = list.push(list.push(jback, ed.cy), ed.cx)
+                    jfwd = drop_last2(jfwd)
+                    ed = clamp(Editor { lines: ed.lines, cy: ty, cx: tx })
                 elif b == 58 and st.mode == 0        // ':' — open the Ex line
                     cmd_mode = true
                     cmd_buf = ""
@@ -4953,6 +4980,16 @@ fn ident_start_before(line: Str, col: Int) -> Int
     while s > 0 and nv_ident_char(str.byte_at(line, s - 1) ?? 0)
         s = s - 1
     s
+
+// Drop the last two Ints (one packed [y, x] jumplist entry).
+fn drop_last2(xs: [Int]) -> [Int]
+    var out: [Int] = []
+    var i = 0
+    let n = list.len(xs) - 2
+    while i < n
+        out = list.push(out, xs[i])
+        i = i + 1
+    out
 
 // Replace [start, endc) on the cursor line with `ins`; cursor lands after it.
 fn comp_apply(ed: Editor, start: Int, endc: Int, ins: Str) -> Editor
