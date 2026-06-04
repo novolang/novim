@@ -3589,6 +3589,19 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                 elif scroll_idle(st, es) and key_free(km, b) and b == 0x26 and str.len(last_subst) > 0   // & — repeat last :s
                     es = edit_push_undo(es, ed)
                     ed = ex_substitute(ed, subst_current_line(last_subst))
+                elif scroll_idle(st, es) and key_free(km, b) and (b == 0x05 or b == 0x19)   // Ctrl-E / Ctrl-Y — scroll one line
+                    let body = rows - 1
+                    let nl = list.len(ed.lines)
+                    if b == 0x05                     // Ctrl-E — view down
+                        top = if top + 1 < nl then top + 1 else top
+                    else                             // Ctrl-Y — view up
+                        top = if top - 1 > 0 then top - 1 else 0
+                    var ncy = ed.cy                  // keep the cursor on screen
+                    if ncy < top
+                        ncy = top
+                    if ncy > top + body - 1
+                        ncy = top + body - 1
+                    ed = clamp(Editor { lines: ed.lines, cy: ncy, cx: ed.cx })
                 elif b == 58 and st.mode == 0        // ':' — open the Ex line
                     cmd_mode = true
                     cmd_buf = ""
