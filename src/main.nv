@@ -3028,10 +3028,12 @@ fn edit_await_reg(ed: Editor, st: InputState, es: EditState) -> EditStep
 // The byte after `"`: a-z selects that register (loaded into the unnamed
 // register for reads); anything else cancels.
 fn edit_select_reg(ed: Editor, st: InputState, es: EditState, b: Int) -> EditStep
-    if (b >= 0x61 and b <= 0x7A) or (b >= 0x30 and b <= 0x39)
-        let idx = if b <= 0x39 then 26 + (b - 0x30) else b - 0x61   // 0-9 → 26-35, a-z → 0-25
+    if (b >= 0x61 and b <= 0x7A) or (b >= 0x30 and b <= 0x39) or (b >= 0x41 and b <= 0x5A)
+        let upper = b >= 0x41 and b <= 0x5A                         // A-Z → append to a-z
+        let idx = if b <= 0x39 then 26 + (b - 0x30) elif upper then b - 0x41 else b - 0x61
+        let rr = if upper then 0 - (idx + 1) else idx + 1          // negative rreg = append mode
         let loaded = InputState { count: st.count, pending: st.pending, mode: st.mode, reg: es.regs[idx], reg_lw: es.reglw[idx], search: st.search, avy: st.avy, avx: st.avx }
-        EditStep { ed: ed, st: loaded, es: EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: es.regs, reglw: es.reglw, rreg: idx + 1, awaitreg: false, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: es.recording, macrobuf: es.macrobuf, awaitmac: es.awaitmac, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt, giy: es.giy, gix: es.gix } }
+        EditStep { ed: ed, st: loaded, es: EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: es.regs, reglw: es.reglw, rreg: rr, awaitreg: false, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: es.recording, macrobuf: es.macrobuf, awaitmac: es.awaitmac, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt, giy: es.giy, gix: es.gix } }
     else
         EditStep { ed: ed, st: st, es: EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: false, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: es.recording, macrobuf: es.macrobuf, awaitmac: es.awaitmac, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt, giy: es.giy, gix: es.gix } }
 
@@ -3039,9 +3041,21 @@ fn edit_select_reg(ed: Editor, st: InputState, es: EditState, b: Int) -> EditSte
 // register into the named slot, then clear the selection.
 fn edit_persist_reg(step: EditStep) -> EditStep
     if step.es.rreg != 0 and step.st.mode == 0 and step.st.pending == 0 and step.st.count == 0
-        let idx = step.es.rreg - 1
-        let regs2 = set_str_at(step.es.regs, idx, step.st.reg)
-        let lw2 = set_bool_at(step.es.reglw, idx, step.st.reg_lw)
+        let app = step.es.rreg < 0                                  // append (A-Z)
+        let idx = (if app then 0 - step.es.rreg else step.es.rreg) - 1
+        let old = step.es.regs[idx]
+        // Replace always writes (idempotent for read-only ops); append writes
+        // only when the unnamed register actually changed (an actual yank/delete,
+        // not a read like "Ap).
+        let same = step.st.reg == old
+        let wrote = if app then (not same) else true
+        // Line-wise append joins with a newline (registers hold lines without a
+        // trailing \n); skip the separator when the target is still empty.
+        let sep = if step.st.reg_lw and str.len(old) > 0 then str.from_char(10) else ""
+        let newval = if app then old + sep + step.st.reg else step.st.reg
+        let newlw = step.st.reg_lw     // append keeps the appended chunk's line-wise flag
+        let regs2 = if wrote then set_str_at(step.es.regs, idx, newval) else step.es.regs
+        let lw2 = if wrote then set_bool_at(step.es.reglw, idx, newlw) else step.es.reglw
         EditStep { ed: step.ed, st: step.st, es: EditState { last: step.es.last, cur: step.es.cur, snaptxt: step.es.snaptxt, active: step.es.active, snaped: step.es.snaped, undos: step.es.undos, redos: step.es.redos, regs: regs2, reglw: lw2, rreg: 0, awaitreg: step.es.awaitreg, marky: step.es.marky, markx: step.es.markx, awaitmark: step.es.awaitmark, recording: step.es.recording, macrobuf: step.es.macrobuf, awaitmac: step.es.awaitmac, lastmacro: step.es.lastmacro, lvy: step.es.lvy, lvx: step.es.lvx, lvey: step.es.lvey, lvex: step.es.lvex, lvmode: step.es.lvmode, findc: step.es.findc, findt: step.es.findt, giy: step.es.giy, gix: step.es.gix } }
     else
         step
