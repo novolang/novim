@@ -1422,6 +1422,65 @@ fn exec_ex(cmd: Str) -> ExResult
     else
         ExResult { quit: false, save: false }
 
+// ── :s substitute (slice 25) ────────────────────────────────────────────
+// Plain-substring substitute (novim has no regex yet): `:s/pat/repl/[g]` on
+// the current line, `:%s/pat/repl/[g]` on every line.  `g` replaces every
+// occurrence on a line; without it, just the first.
+
+// Is `cmd` a substitute command (`s<delim>…` / `%s<delim>…`)?
+fn is_substitute(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    let n = str.len(c)
+    let p = if n > 0 and (str.byte_at(c, 0) ?? 0) == 0x25 then 1 else 0   // optional %
+    if p < n and (str.byte_at(c, p) ?? 0) == 0x73 and p + 1 < n           // 's' + delimiter
+        char_class_of(str.byte_at(c, p + 1) ?? 0) == 2                     // punctuation delim
+    else
+        false
+
+// Replace `pat` with `repl` in `line` (first occurrence, or all if global).
+fn replace_in_line(line: Str, pat: Str, repl: Str, global: Bool) -> Str
+    if str.len(pat) == 0
+        return line
+    var out = ""
+    var i = 0
+    let n = str.len(line)
+    let pl = str.len(pat)
+    var did = false
+    while i < n
+        if (global or not did) and i + pl <= n and str.slice(line, i, i + pl) == pat
+            out = out + repl
+            i = i + pl
+            did = true
+        else
+            out = out + str.from_char(str.byte_at(line, i) ?? 0)
+            i = i + 1
+    out
+
+// Apply a `:s` / `:%s` substitute, returning the new editor.
+fn ex_substitute(ed: Editor, cmd: Str) -> Editor
+    let c = str.trim(cmd)
+    let alllines = (str.byte_at(c, 0) ?? 0) == 0x25
+    let p = if alllines then 1 else 0
+    let delim = str.byte_at(c, p + 1) ?? 0
+    let body = str.slice(c, p + 2, str.len(c))                  // after "s<delim>"
+    let d1 = index_of_byte(body, delim)
+    let pat = if d1 < 0 then body else str.slice(body, 0, d1)
+    let after1 = if d1 < 0 then "" else str.slice(body, d1 + 1, str.len(body))
+    let d2 = index_of_byte(after1, delim)
+    let repl = if d2 < 0 then after1 else str.slice(after1, 0, d2)
+    let flags = if d2 < 0 then "" else str.slice(after1, d2 + 1, str.len(after1))
+    let global = index_of_byte(flags, 0x67) >= 0                // 'g'
+    if alllines
+        var ls: [Str] = []
+        let total = list.len(ed.lines)
+        let mut i = 0
+        while i < total
+            ls = list.append(ls, [replace_in_line(ed.lines[i], pat, repl, global)])
+            i = i + 1
+        clamp(Editor { lines: ls, cy: ed.cy, cx: 0 })
+    else
+        clamp(Editor { lines: set_line(ed.lines, ed.cy, replace_in_line(line_at(ed, ed.cy), pat, repl, global)), cy: ed.cy, cx: 0 })
+
 // Serialise the line buffer to file text (one trailing newline per line).
 fn buf_to_str(lines: [Str]) -> Str
     var s = ""
@@ -1892,6 +1951,11 @@ fn set_bool_at(xs: [Bool], idx: Int, v: Bool) -> [Bool]
 fn edit_new() -> EditState
     EditState { last: "", cur: "", snaptxt: "", active: false, snaped: snap_empty(), undos: snaps_empty(), redos: snaps_empty(), regs: regs_empty(), reglw: reglw_empty(), rreg: 0, awaitreg: false }
 
+// Push a manual undo snapshot (for buffer-changing Ex commands like :s, which
+// run in the driver outside the feed/feed_edit recording path) and clear redo.
+fn edit_push_undo(es: EditState, ed: Editor) -> EditState
+    EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: list.append(es.undos, [snap_of(ed)]), redos: snaps_empty(), regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg }
+
 // First `k` snapshots of `xs` (the stack minus its top).
 fn take_snaps(xs: [Snapshot], k: Int) -> [Snapshot]
     var out: [Snapshot] = []
@@ -2037,11 +2101,15 @@ fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
         let b = str.byte_at(decoded, i) ?? 0
         if cmd_mode
             if b == 13 or b == 10            // Enter — run the command
-                let r = exec_ex(cmd_buf)
-                if r.save
-                    save_buf(path, ed.lines)
-                if r.quit
-                    quit = true
+                if is_substitute(cmd_buf)
+                    es = edit_push_undo(es, ed)
+                    ed = ex_substitute(ed, cmd_buf)
+                else
+                    let r = exec_ex(cmd_buf)
+                    if r.save
+                        save_buf(path, ed.lines)
+                    if r.quit
+                        quit = true
                 cmd_mode = false
                 cmd_buf = ""
             elif b == 27                     // Esc — cancel
@@ -2322,12 +2390,16 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                     running = false
                 elif cmd_mode
                     if b == 13 or b == 10            // Enter — run command
-                        let r = exec_ex(cmd_buf)
-                        if r.save
-                            save_buf(path, ed.lines)
-                        if r.quit
-                            running = false
-                            done = true
+                        if is_substitute(cmd_buf)
+                            es = edit_push_undo(es, ed)
+                            ed = ex_substitute(ed, cmd_buf)
+                        else
+                            let r = exec_ex(cmd_buf)
+                            if r.save
+                                save_buf(path, ed.lines)
+                            if r.quit
+                                running = false
+                                done = true
                         cmd_mode = false
                         cmd_buf = ""
                     elif b == 27                     // Esc — cancel
