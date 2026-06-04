@@ -3571,46 +3571,61 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode
     let sey = if a_first then ed.cy else avy
     let sex = if a_first then ed.cx else avx
     let vis = mode == 2 or mode == 3
-    let mut r = 0
+    // `r` = screen row, `li` = buffer line.  With `wrap` a long line occupies
+    // several screen rows, so the two are tracked separately.
+    var r = 0
+    var li = top
     while r < body
-        cup(r + 1, 1)
-        let li = top + r
         if li < nl
-            if numbered
-                // relativenumber → distance from the cursor line; with `number`
-                // too, the cursor line shows its absolute number (vim "hybrid").
-                let gnum = if opts.relativenumber and li != ed.cy
-                    if li > ed.cy then li - ed.cy else ed.cy - li
-                elif opts.relativenumber and (not opts.number)
-                    0
-                else
-                    li + 1
-                emit(pad_num(gnum, 3) + " ")
-            // Tab-expand to visual columns, then show only [left, left+width),
-            // reverse-videoing any selected span.
             let raw = ed.lines[li]
             let expanded = expand_tabs(raw, opts.tabstop)
+            let vlen = str.len(expanded)
             var vlo = 0
             var vhi = 0
             if vis and li >= ssy and li <= sey
                 if mode == 3
                     vlo = 0
-                    vhi = str.len(expanded)
+                    vhi = vlen
                 else
                     let blo = if li == ssy then ssx else 0
                     let bhi = if li == sey then sex + 1 else str.len(raw)
                     vlo = vis_col(raw, blo, opts.tabstop)
                     vhi = vis_col(raw, bhi, opts.tabstop)
-            let sr = if dohl then search_vis_ranges(satoms, raw, opts.tabstop) else []
-            emit_line_search(expanded, left, width, vlo, vhi, sr, "30;43")
-        elif cs.tilde_fg >= 0
-            sgr("38;5;" + str.from_int(cs.tilde_fg))
-            emit("~")
-            sgr("0")
+            let srng = if dohl then search_vis_ranges(satoms, raw, opts.tabstop) else []
+            let segs = if opts.wrap and vlen > width then (vlen + width - 1) / width else 1
+            var seg = 0
+            while seg < segs and r < body
+                cup(r + 1, 1)
+                if numbered
+                    if seg == 0
+                        // relativenumber → distance from the cursor line; with
+                        // `number` too the cursor line shows its absolute number.
+                        let gnum = if opts.relativenumber and li != ed.cy
+                            if li > ed.cy then li - ed.cy else ed.cy - li
+                        elif opts.relativenumber and (not opts.number)
+                            0
+                        else
+                            li + 1
+                        emit(pad_num(gnum, 3) + " ")
+                    else
+                        emit("    ")           // blank gutter on continuation rows
+                let segleft = if opts.wrap then seg * width else left
+                emit_line_search(expanded, segleft, width, vlo, vhi, srng, "30;43")
+                el()
+                r = r + 1
+                seg = seg + 1
+            li = li + 1
         else
-            emit("~")
-        el()             // erase any leftover tail from the previous frame
-        r = r + 1
+            cup(r + 1, 1)
+            if cs.tilde_fg >= 0
+                sgr("38;5;" + str.from_int(cs.tilde_fg))
+                emit("~")
+                sgr("0")
+            else
+                emit("~")
+            el()
+            r = r + 1
+            li = li + 1
     cup(rows, 1)
     sgr(status_sgr(cs))
     let modestr = if mode == 1 then "-- INSERT -- " elif mode == 2 then "-- VISUAL -- " elif mode == 3 then "-- VISUAL LINE -- " elif mode == 4 then "-- REPLACE -- " else "-- NORMAL -- "
@@ -3618,7 +3633,18 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode
     el()                 // fill the rest of the status bar with the status bg
     sgr("0")
     let curline = if ed.cy < nl then ed.lines[ed.cy] else ""
-    cup(ed.cy - top + 1, (vis_col(curline, ed.cx, opts.tabstop) - left) + gutter + 1)
+    let cviscol = vis_col(curline, ed.cx, opts.tabstop)
+    if opts.wrap
+        // screen row = rows used by lines [top, cy) + the cursor's own segment
+        var crow = 0
+        var ci = top
+        while ci < ed.cy
+            let cvl = str.len(expand_tabs(ed.lines[ci], opts.tabstop))
+            crow = crow + (if cvl > width then (cvl + width - 1) / width else 1)
+            ci = ci + 1
+        cup(crow + cviscol / width + 1, (cviscol % width) + gutter + 1)
+    else
+        cup(ed.cy - top + 1, (cviscol - left) + gutter + 1)
     cursor_shape(mode)   // block in normal/visual, bar in insert, underline in replace
     csi()
     emit("?25h")         // show the cursor at its new home
@@ -3637,6 +3663,8 @@ fn term_cols() -> Int [io]
 // `cols` minus the line-number gutter, and the cursor's visual column must
 // stay inside it.  Pure wrapper around hscroll_to used at each repaint site.
 fn hscroll_for(left: Int, ed: Editor, opts: Options, cols: Int) -> Int
+    if opts.wrap                                  // wrapped lines never scroll horizontally
+        return 0
     let gutter = if opts.number or opts.relativenumber then 4 else 0
     hscroll_to(left, vis_col(line_at(ed, ed.cy), ed.cx, opts.tabstop), cols - gutter)
 
