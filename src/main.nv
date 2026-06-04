@@ -2440,6 +2440,11 @@ fn el() [io]                      // ESC [ K — erase from cursor to end of lin
 // buffer line renders with consistent indentation regardless of the
 // terminal's own tab stops.  Byte-oriented, matching the rest of the editor
 // (cx is a byte index).  ts <= 0 leaves the line untouched.
+// A UTF-8 continuation byte (10xxxxxx) — part of a multi-byte character, so it
+// occupies no display column of its own.
+fn is_utf8_cont(b: Int) -> Bool
+    bits.band(b, 0xC0) == 0x80
+
 fn expand_tabs(s: Str, ts: Int) -> Str
     if ts <= 0
         return s
@@ -2456,22 +2461,22 @@ fn expand_tabs(s: Str, ts: Int) -> Str
                 col = col + 1
         else
             out = out + str.from_char(b)
-            col = col + 1
+            if not is_utf8_cont(b)               // count one column per character
+                col = col + 1
         i = i + 1
     out
 
 // Visual column of byte index `cx` within `s` once tabs are expanded — used
 // to place the hardware cursor over the rendered (tab-expanded) text.
 fn vis_col(s: Str, cx: Int, ts: Int) -> Int
-    if ts <= 0
-        return cx
     var col = 0
     let mut i = 0
-    while i < cx
+    let stop = if cx > str.len(s) then str.len(s) else cx
+    while i < stop
         let b = str.byte_at(s, i) ?? 0
-        if b == 9
+        if b == 9 and ts > 0
             col = ((col / ts) + 1) * ts
-        else
+        elif not is_utf8_cont(b)               // UTF-8 continuation bytes add no column
             col = col + 1
         i = i + 1
     col
