@@ -1731,6 +1731,15 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
         return Step { ed: repeat_delete_char(ed, cnt), st: ist_done(st) }
     if b == 0x44                       // 'D' — delete to end of line
         return Step { ed: delete_to_eol(ed), st: ist_done(st) }
+    if b == 0x58                       // 'X' — delete char(s) before the cursor
+        let xline = line_at(ed, ed.cy)
+        let lo = if ed.cx - cnt < 0 then 0 else ed.cx - cnt
+        let nls = set_line(ed.lines, ed.cy, str.slice(xline, 0, lo) + str.slice(xline, ed.cx, str.len(xline)))
+        return Step { ed: clamp(Editor { lines: nls, cy: ed.cy, cx: lo }), st: ist_done(st) }
+    if b == 0x59                       // 'Y' — yank line(s) (= yy)
+        return apply_linewise_op(ed, st, 0x79, ed.cy + (if cnt > 1 then cnt - 1 else 0))
+    if b == 0x53                       // 'S' — change whole line(s) (= cc)
+        return apply_linewise_op(ed, st, 0x63, ed.cy + (if cnt > 1 then cnt - 1 else 0))
     if b == 0x01                       // Ctrl-A — increment the number
         return Step { ed: op_incdec(ed, cnt), st: ist_done(st) }
     if b == 0x18                       // Ctrl-X — decrement the number
