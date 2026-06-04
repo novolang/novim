@@ -1829,6 +1829,43 @@ fn ex_substitute(ed: Editor, cmd: Str) -> Editor
 // `:g/pat/d` deletes every line containing `pat`; `:v/pat/d` (or `:g!/pat/d`)
 // deletes every line NOT containing it.  Only the `d` command is supported.
 
+// ── :N goto-line (slice 47) ─────────────────────────────────────────────
+// `:N` (a line number) or `:$` (last line) moves the cursor to that line's
+// first non-blank.  Driver-level, like :s / :g.
+
+fn is_goto(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    let n = str.len(c)
+    if n == 0
+        return false
+    if c == "$"
+        return true
+    var i = 0
+    while i < n
+        let b = str.byte_at(c, i) ?? 0
+        if b < 0x30 or b > 0x39
+            return false
+        i = i + 1
+    true
+
+fn ex_goto(ed: Editor, cmd: Str) -> Editor
+    let c = str.trim(cmd)
+    let nl = list.len(ed.lines)
+    var target = nl - 1
+    if c != "$"
+        var v = 0
+        var i = 0
+        let n = str.len(c)
+        while i < n
+            v = v * 10 + ((str.byte_at(c, i) ?? 0) - 0x30)
+            i = i + 1
+        target = v - 1                      // :N is 1-indexed
+    if target < 0
+        target = 0
+    if target > nl - 1
+        target = nl - 1
+    clamp(Editor { lines: ed.lines, cy: target, cx: first_nonblank(line_at(ed, target)) })
+
 fn is_global(cmd: Str) -> Bool
     let c = str.trim(cmd)
     let n = str.len(c)
@@ -2951,6 +2988,8 @@ fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
                 elif is_global(cmd_buf)
                     es = edit_push_undo(es, ed)
                     ed = ex_global(ed, cmd_buf)
+                elif is_goto(cmd_buf)
+                    ed = ex_goto(ed, cmd_buf)
                 else
                     let r = exec_ex(cmd_buf)
                     if r.save
@@ -3333,6 +3372,8 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                         elif is_global(cmd_buf)
                             es = edit_push_undo(es, ed)
                             ed = ex_global(ed, cmd_buf)
+                        elif is_goto(cmd_buf)
+                            ed = ex_goto(ed, cmd_buf)
                         else
                             let r = exec_ex(cmd_buf)
                             if r.save
