@@ -2032,6 +2032,25 @@ fn is_badd(cmd: Str) -> Bool
     let c = str.trim(cmd)
     str.len(c) > 5 and str.slice(c, 0, 5) == "badd "
 
+// Argument-list navigation (the CLI file list).  0 = not an arglist command,
+// 1 = :args (show), 2 = :next, 3 = :prev, 4 = :first, 5 = :last,
+// 6 = :wnext (write+next), 7 = :wprev (write+prev).
+fn argcmd_kind(cmd: Str) -> Int
+    let c = str.trim(cmd)
+    if c == "args" or c == "ar" then 1 elif c == "next" or c == "n" or c == "n!" or c == "next!" then 2 elif c == "prev" or c == "previous" or c == "N" or c == "Next" or c == "prev!" then 3 elif c == "first" or c == "rewind" or c == "fir" then 4 elif c == "last" or c == "la" then 5 elif c == "wn" or c == "wnext" then 6 elif c == "wN" or c == "wp" or c == "wprev" then 7 else 0
+
+// Render the argument list with the current entry bracketed: `a [b] c`.
+fn arglist_str(args: [Str], cur: Int) -> Str
+    var s = ""
+    var i = 0
+    while i < list.len(args)
+        if i > 0
+            s = s + " "
+        let nm = basename_of(args[i])
+        s = if i == cur then s + "[" + nm + "]" else s + nm
+        i = i + 1
+    s
+
 // Buffer-list commands: `:ls`/`:buffers`, `:bn`/`:bnext`, `:bp`/`:bprev`.
 fn is_bufcmd(cmd: Str) -> Bool
     let c = str.trim(cmd)
@@ -4336,6 +4355,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var bufs_markx: [Str] = [""]     // per-buffer marks a-z: serialized columns
     var cur_buf = 0
     var alt_buf = 0 - 1              // alternate buffer (last visited) for Ctrl-^ / :b#
+    var arglist: [Str] = [path]     // the CLI argument list (:args / :next / :prev)
+    var arg_idx = 0                 // current position in the argument list
     // Extra command-line files (`novim a b c`) become additional buffers.  They
     // arrive newline-joined in `extra` (a Str — passing a `[Str]` parameter to
     // this function reproducibly corrupted the buffer-switch codegen).
@@ -4356,6 +4377,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
             bufs_redo = list.push(bufs_redo, "")
             bufs_marky = list.push(bufs_marky, "")
             bufs_markx = list.push(bufs_markx, "")
+            arglist = list.push(arglist, ef)
         efi = efi + 1
     // Deferred buffer switch: `:e`/`:bn`/`:bp`/cross-file gd / cross-file
     // Ctrl-O all set `want_path` (+ target cursor, or `want_y < 0` to restore the
@@ -4556,6 +4578,25 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                 bufs_marky = list.push(bufs_marky, "")
                                 bufs_markx = list.push(bufs_markx, "")
                                 lsp_info = "added " + basename_of(tgt) + "; " + str.from_int(list.len(bufs_path)) + " buffers"
+                        elif argcmd_kind(cmd_buf) > 0    // :args / :next / :prev / :first / :last / :wn / :wN
+                            let ak = argcmd_kind(cmd_buf)
+                            let na = list.len(arglist)
+                            if ak == 1                    // :args — show the list
+                                lsp_info = arglist_str(arglist, arg_idx)
+                            else
+                                let tgt = if ak == 2 or ak == 6 then arg_idx + 1 elif ak == 3 or ak == 7 then arg_idx - 1 elif ak == 4 then 0 else na - 1
+                                if tgt < 0 or tgt >= na
+                                    lsp_info = if tgt < 0 then "at first arg" else "at last arg"
+                                else
+                                    if ak == 6 or ak == 7     // :wn / :wN — write current first
+                                        save_buf(curpath, ed.lines)
+                                        disk_text = buf_text(ed)
+                                    arg_idx = tgt
+                                    jback = list.push(jback, jentry(curpath, ed.cy, ed.cx))
+                                    jfwd = []
+                                    want_path = arglist[tgt]
+                                    want_y = 0 - 1
+                                    want_x = 0
                         elif is_bufcmd(cmd_buf)
                             let nb = list.len(bufs_path)
                             let bk = bufcmd_kind(cmd_buf)
