@@ -2013,12 +2013,12 @@ fn edit_cmd_path(cmd: Str) -> Str
 // Buffer-list commands: `:ls`/`:buffers`, `:bn`/`:bnext`, `:bp`/`:bprev`.
 fn is_bufcmd(cmd: Str) -> Bool
     let c = str.trim(cmd)
-    c == "ls" or c == "buffers" or c == "bn" or c == "bnext" or c == "bp" or c == "bprev" or c == "bprevious"
+    c == "ls" or c == "buffers" or c == "bn" or c == "bnext" or c == "bp" or c == "bprev" or c == "bprevious" or c == "bd" or c == "bdelete"
 
 // 0 = :ls, 1 = :bn (next), 2 = :bp (prev).
 fn bufcmd_kind(cmd: Str) -> Int
     let c = str.trim(cmd)
-    if c == "bn" or c == "bnext" then 1 elif c == "bp" or c == "bprev" or c == "bprevious" then 2 else 0
+    if c == "bn" or c == "bnext" then 1 elif c == "bp" or c == "bprev" or c == "bprevious" then 2 elif c == "bd" or c == "bdelete" then 3 else 0
 
 // The basename (last path component) of `p`.
 fn basename_of(p: Str) -> Str
@@ -4102,6 +4102,7 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
     var want_path = ""
     var want_y = 0
     var want_x = 0
+    var want_close = ""
     var lsp_dirty = false                // buffer changed since the last didChange
     var lsp_idle = 0                      // consecutive idle poll cycles (debounce)
     var lsp_phase = 0                    // 0 none · 1 init sent (awaiting result) · 2 ready
@@ -4239,6 +4240,15 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                             let bk = bufcmd_kind(cmd_buf)
                             if bk == 0                    // :ls — list the open buffers
                                 lsp_info = buf_list_str(bufs_path, cur_buf)
+                            elif bk == 3                  // :bd — close current
+                                if nb <= 1
+                                    lsp_info = "cannot close the last buffer"
+                                else
+                                    let surv = if cur_buf > 0 then cur_buf - 1 else 1
+                                    want_close = curpath
+                                    want_path = bufs_path[surv]
+                                    want_y = 0 - 1
+                                    want_x = 0
                             else                          // :bn / :bp — cycle
                                 let tgt2 = if bk == 1 then (cur_buf + 1) % nb else (cur_buf + nb - 1) % nb
                                 jback = list.push(jback, jentry(curpath, ed.cy, ed.cx))
@@ -4497,6 +4507,21 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
             elif want_y >= 0                   // same buffer — just move the cursor
                 ed = clamp(Editor { lines: ed.lines, cy: want_y, cx: want_x })
             want_path = ""
+            changed = true
+        if str.len(want_close) > 0
+            let ci = buf_index_of(bufs_path, want_close)
+            if ci >= 0 and list.len(bufs_path) > 1
+                bufs_text = remove_at_str(bufs_text, ci)
+                bufs_path = remove_at_str(bufs_path, ci)
+                bufs_cy = remove_at_int(bufs_cy, ci)
+                bufs_cx = remove_at_int(bufs_cx, ci)
+                bufs_top = remove_at_int(bufs_top, ci)
+                bufs_left = remove_at_int(bufs_left, ci)
+                bufs_disk = remove_at_str(bufs_disk, ci)
+                if ci < cur_buf
+                    cur_buf = cur_buf - 1
+                lsp_info = "closed; " + str.from_int(list.len(bufs_path)) + " left"
+            want_close = ""
             changed = true
         // Live document sync, TIME-debounced: mark the buffer dirty on any
         // input, and only send `didChange` after typing pauses (~150 ms of idle
@@ -5219,6 +5244,24 @@ fn drop_last_str(xs: [Str]) -> [Str]
     let n = list.len(xs) - 1
     while i < n
         out = list.push(out, xs[i])
+        i = i + 1
+    out
+
+fn remove_at_str(xs: [Str], idx: Int) -> [Str]
+    var out: [Str] = []
+    var i = 0
+    while i < list.len(xs)
+        if i != idx
+            out = list.push(out, xs[i])
+        i = i + 1
+    out
+
+fn remove_at_int(xs: [Int], idx: Int) -> [Int]
+    var out: [Int] = []
+    var i = 0
+    while i < list.len(xs)
+        if i != idx
+            out = list.push(out, xs[i])
         i = i + 1
     out
 
