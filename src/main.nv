@@ -3180,6 +3180,35 @@ fn snaps_de(s: Str) -> [Snapshot]
         p = tstart + ln
     out
 
+// Serialize an Int list as comma-joined decimals (per-buffer marks storage).
+fn ints_ser(xs: [Int]) -> Str
+    var out = ""
+    var i = 0
+    while i < list.len(xs)
+        if i > 0
+            out = out + ","
+        out = out + str.from_int(xs[i])
+        i = i + 1
+    out
+
+// Parse a comma-joined Int list back into the 26 mark slots (-1 = unset; an
+// empty string — a buffer with no marks set yet — yields a fresh slot array).
+fn marks_de(s: Str) -> [Int]
+    if str.len(s) == 0
+        return marks_empty()
+    var out: [Int] = []
+    let n = str.len(s)
+    var p = 0
+    while p <= n
+        let c = index_of_byte_from(s, 0x2C, p)
+        let endp = if c < 0 then n else c
+        let v = str.to_int(str.slice(s, p, endp)) ?? (0 - 1)
+        out = list.append(out, [v])
+        p = if c < 0 then n + 1 else c + 1
+    while list.len(out) < 26
+        out = list.append(out, [0 - 1])
+    out
+
 // 37 register slots: 0-25 = named a-z, 26-35 = numbered "0-"9 ("0 yank, "1-"9
 // delete ring), 36 = "- (small charwise-delete register).
 fn regs_empty() -> [Str]
@@ -3263,12 +3292,12 @@ fn set_int_at(xs: [Int], idx: Int, v: Int) -> [Int]
 fn edit_new() -> EditState
     EditState { last: "", cur: "", snaptxt: "", active: false, snaped: snap_empty(), undos: snaps_empty(), redos: snaps_empty(), regs: regs_empty(), reglw: reglw_empty(), rreg: 0, awaitreg: false, marky: marks_empty(), markx: marks_empty(), awaitmark: 0, recording: 0, macrobuf: "", awaitmac: 0, lastmacro: 0, lvy: 0 - 1, lvx: 0 - 1, lvey: 0 - 1, lvex: 0 - 1, lvmode: 0, findc: 0, findt: 0, giy: 0 - 1, gix: 0 - 1 }
 
-// A fresh EditState seeded with a buffer's restored undo/redo history plus the
-// session-global registers (used on buffer switch so each buffer keeps its own
-// `u` / Ctrl-R stacks while yanks/macros remain shared — registers are global
-// in vim).  Marks reset (vim marks a-z are per-buffer; deferred).
-fn edit_new_undo(undos: [Snapshot], redos: [Snapshot], regs: [Str], reglw: [Bool]) -> EditState
-    EditState { last: "", cur: "", snaptxt: "", active: false, snaped: snap_empty(), undos: undos, redos: redos, regs: regs, reglw: reglw, rreg: 0, awaitreg: false, marky: marks_empty(), markx: marks_empty(), awaitmark: 0, recording: 0, macrobuf: "", awaitmac: 0, lastmacro: 0, lvy: 0 - 1, lvx: 0 - 1, lvey: 0 - 1, lvex: 0 - 1, lvmode: 0, findc: 0, findt: 0, giy: 0 - 1, gix: 0 - 1 }
+// A fresh EditState seeded with a buffer's restored undo/redo history and marks
+// (both buffer-local in vim) plus the session-global registers (used on buffer
+// switch so each buffer keeps its own `u` / Ctrl-R stacks and `a-z` marks while
+// yanks/macros remain shared — registers are global in vim).
+fn edit_new_undo(undos: [Snapshot], redos: [Snapshot], regs: [Str], reglw: [Bool], marky: [Int], markx: [Int]) -> EditState
+    EditState { last: "", cur: "", snaptxt: "", active: false, snaped: snap_empty(), undos: undos, redos: redos, regs: regs, reglw: reglw, rreg: 0, awaitreg: false, marky: marky, markx: markx, awaitmark: 0, recording: 0, macrobuf: "", awaitmac: 0, lastmacro: 0, lvy: 0 - 1, lvx: 0 - 1, lvey: 0 - 1, lvex: 0 - 1, lvmode: 0, findc: 0, findt: 0, giy: 0 - 1, gix: 0 - 1 }
 
 // Push a manual undo snapshot (for buffer-changing Ex commands like :s, which
 // run in the driver outside the feed/feed_edit recording path) and clear redo.
@@ -4264,6 +4293,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var bufs_disk: [Str] = [disk_text]
     var bufs_undo: [Str] = [""]      // per-buffer serialized undo stack
     var bufs_redo: [Str] = [""]      // per-buffer serialized redo stack
+    var bufs_marky: [Str] = [""]     // per-buffer marks a-z: serialized lines
+    var bufs_markx: [Str] = [""]     // per-buffer marks a-z: serialized columns
     var cur_buf = 0
     // Extra command-line files (`novim a b c`) become additional buffers.  They
     // arrive newline-joined in `extra` (a Str — passing a `[Str]` parameter to
@@ -4283,6 +4314,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
             bufs_disk = list.push(bufs_disk, eft)
             bufs_undo = list.push(bufs_undo, "")
             bufs_redo = list.push(bufs_redo, "")
+            bufs_marky = list.push(bufs_marky, "")
+            bufs_markx = list.push(bufs_markx, "")
         efi = efi + 1
     // Deferred buffer switch: `:e`/`:bn`/`:bp`/cross-file gd / cross-file
     // Ctrl-O all set `want_path` (+ target cursor, or `want_y < 0` to restore the
@@ -4691,6 +4724,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 bufs_disk = list.push(bufs_disk, "")
                 bufs_undo = list.push(bufs_undo, "")
                 bufs_redo = list.push(bufs_redo, "")
+                bufs_marky = list.push(bufs_marky, "")
+                bufs_markx = list.push(bufs_markx, "")
                 idx = list.len(bufs_path) - 1
             if idx != cur_buf
                 // save the buffer we're leaving (incl. its undo/redo history)
@@ -4702,6 +4737,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 bufs_disk = set_str_at(bufs_disk, cur_buf, disk_text)
                 bufs_undo = set_str_at(bufs_undo, cur_buf, snaps_ser(es.undos))
                 bufs_redo = set_str_at(bufs_redo, cur_buf, snaps_ser(es.redos))
+                bufs_marky = set_str_at(bufs_marky, cur_buf, ints_ser(es.marky))
+                bufs_markx = set_str_at(bufs_markx, cur_buf, ints_ser(es.markx))
                 if lsp_phase == 2              // close the document we're leaving
                     lsp_send(lsp_in, lsp_didclose(lsp_uri))
                 cur_buf = idx
@@ -4713,13 +4750,15 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 top = bufs_top[idx]
                 left = bufs_left[idx]
                 disk_text = if creating then buf_text(ed) else bufs_disk[idx]
-                // restore the target buffer's own undo/redo history; carry the
-                // registers forward (global) but reset marks/dot/macros
+                // restore the target buffer's own undo/redo history + marks;
+                // carry the registers forward (global) but reset dot/macros
                 let usaved = bufs_undo[idx]
                 let rsaved = bufs_redo[idx]
+                let mysaved = bufs_marky[idx]
+                let mxsaved = bufs_markx[idx]
                 let gregs = es.regs
                 let greglw = es.reglw
-                es = edit_new_undo(snaps_de(usaved), snaps_de(rsaved), gregs, greglw)
+                es = edit_new_undo(snaps_de(usaved), snaps_de(rsaved), gregs, greglw, marks_de(mysaved), marks_de(mxsaved))
                 diag_li = []
                 diag_msgs = []
                 lsp_uri = "file://" + curpath
@@ -4751,6 +4790,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 bufs_disk = remove_at_str(bufs_disk, ci)
                 bufs_undo = remove_at_str(bufs_undo, ci)
                 bufs_redo = remove_at_str(bufs_redo, ci)
+                bufs_marky = remove_at_str(bufs_marky, ci)
+                bufs_markx = remove_at_str(bufs_markx, ci)
                 if ci < cur_buf
                     cur_buf = cur_buf - 1
                 lsp_info = "closed; " + str.from_int(list.len(bufs_path)) + " left"
