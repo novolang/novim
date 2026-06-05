@@ -1,37 +1,34 @@
-// novim — modal terminal editor written in Novo.
+// novim — a modal terminal editor written in Novo.
 //
-// v1 slice 1: a [Str] line-vector buffer, file load, h/j/k/l cursor
-// motion, an interactive ANSI TUI viewer, and a deterministic `--batch`
-// mode used by the test harness.  See features/orbits/novim/README.md
-// for the full v1 scope + 10-slice plan (piece-tree / novols LSP /
-// novo-treesitter / plugins are v2; the buffer is a plain line vector
-// in v1).
+// The buffer is a plain `[Str]` line vector.  The editor loads a file, drives
+// an interactive ANSI TUI, and supports a deterministic `--batch` mode used by
+// the test harness.  See features/orbits/novim/README.md for the feature
+// overview.
 //
-// The interactive TUI uses the host-TTY primitives std.pty already
-// exposes (raw mode, host stdin byte, host stdout byte, poll, winsize)
-// — the same surface novomux/novoterm drive.  `novo_pty_` references
-// also trip the stdlib's conditional-link so libutil is pulled in.
+// The interactive TUI uses the host-TTY primitives std.pty exposes (raw mode,
+// host stdin/stdout byte, poll, winsize) — the same surface novomux/novoterm
+// drive.  `novo_pty_` references also trip the stdlib's conditional-link so
+// libutil is pulled in.
 
-// Editor state.  Cursor is 0-based (line, col); the buffer is a plain
-// line vector in v1.
+// Editor state.  The cursor is 0-based (line, col); the buffer is a line vector.
 struct Editor
     lines: [Str]
     cy:    Int
     cx:    Int
 
-// Normal-mode input state carried across bytes: `count` accumulates a
-// numeric prefix (e.g. `5j`); `pending` is the awaiting-second-key operator
-// (0 none, 1 `g` for gg, 2 `d` for dd, 3 `y` for yy); `mode` is Normal/Insert;
-// `reg` + `reg_lw` are the unnamed yank/delete register (slice 6 — linewise
-// when reg_lw, characterwise otherwise).  (slices 2/4/6)
+// Normal-mode input state carried across bytes: `count` accumulates a numeric
+// prefix (e.g. `5j`); `pending` is the awaiting-second-key operator (0 none,
+// 1 `g` for gg, 2 `d` for dd, 3 `y` for yy); `mode` is Normal/Insert/Visual;
+// `reg` + `reg_lw` are the unnamed yank/delete register (linewise when reg_lw,
+// characterwise otherwise).
 struct InputState
     count:   Int
     pending: Int
     mode:    Int          // 0 Normal, 1 Insert, 2 Visual-char, 3 Visual-line
     reg:     Str
     reg_lw:  Bool
-    search:  Str          // last `/pattern` (slice 10), for n / N
-    avy:     Int          // visual-mode selection anchor (slice 21): line / col
+    search:  Str          // last `/pattern`, for n / N
+    avy:     Int          // visual-mode selection anchor: line / col
     avx:     Int
 
 // feed()'s result: the new editor + the new input state.
@@ -58,9 +55,9 @@ fn ist_set_search(st: InputState, pat: Str) -> InputState
 
 // ── Buffer ──────────────────────────────────────────────────────
 
-// Load `path` into a line vector.  Missing/unreadable file → a single
-// empty line (a fresh scratch buffer); an empty split keeps one line so
-// the cursor always has somewhere to sit.
+@intent("""Load `path` into a line vector.  A missing/unreadable file, or an
+empty file, yields a single empty line — a fresh scratch buffer — so the cursor
+always has somewhere to sit.""")
 fn buf_load(path: Str) -> [Str] [io]
     match fs.read(path)
         None    => [""]
@@ -68,8 +65,9 @@ fn buf_load(path: Str) -> [Str] [io]
             let ls = str.split_lines(s)
             if list.len(ls) == 0 then [""] else ls
 
-// Clamp the cursor into the buffer.  Vim normal-mode rule: cx sits on
-// the last glyph (len-1), or col 0 on an empty line.
+@intent("""Clamp the cursor into the buffer bounds, following the vim
+normal-mode rule: cx sits on the last glyph (len-1), or col 0 on an empty
+line.""")
 fn clamp(ed: Editor) -> Editor
     let n = list.len(ed.lines)
     var cy = ed.cy
@@ -455,7 +453,7 @@ fn delete_to_eol(ed: Editor) -> Editor
     let line = line_at(ed, ed.cy)
     clamp(Editor { lines: set_line(ed.lines, ed.cy, str.slice(line, 0, ed.cx)), cy: ed.cy, cx: ed.cx })
 
-// ── Register: yank / delete-lines / paste (slice 6) ─────────────
+// ── Register: yank / delete-lines / paste ─────────────
 
 // Clear a pending operator but keep the count + register (used when the
 // second key of d/y/g isn't the doubling key — reprocess it fresh).
@@ -531,7 +529,7 @@ fn paste(ed: Editor, st: InputState, after: Bool) -> Editor
         let merged = str.slice(line, 0, col) + st.reg + str.slice(line, col, str.len(line))
         clamp(Editor { lines: set_line(ed.lines, ed.cy, merged), cy: ed.cy, cx: col + str.len(st.reg) - 1 })
 
-// ── Char-level edits (slice 14): ~ toggle case, r replace, J join ───────
+// ── Char-level edits: ~ toggle case, r replace, J join ───────
 
 // ASCII case toggle: A-Z ↔ a-z, other bytes unchanged.
 fn toggle_case_byte(b: Int) -> Int
@@ -637,7 +635,7 @@ fn op_join_lines(ed: Editor, n: Int, space: Bool) -> Editor
     let cx = if joincol < 0 then 0 else joincol
     clamp(Editor { lines: ls, cy: ed.cy, cx: cx })
 
-// ── Indent (slice 16): >> and << ───────────────────────────────────────
+// ── Indent: >> and << ───────────────────────────────────────
 
 // Add one indent level.  We indent with a real tab byte — its rendered width
 // follows `tabstop` (see expand_tabs), so the indent respects the user's
@@ -680,7 +678,7 @@ fn op_indent_lines(ed: Editor, st: InputState, lo: Int, hi: Int, right: Bool) ->
     op_indent(Editor { lines: ed.lines, cy: lo, cx: 0 }, st, hi - lo + 1, right)
 
 // Second key of a `>` / `<` operator: doubled → line(s), a linewise motion →
-// that line range (slice 37).
+// that line range.
 fn feed_indent(ed: Editor, st: InputState, right: Bool, b: Int) -> Step
     let trigger = if right then 0x3E else 0x3C
     if b == trigger                              // >> / <<
@@ -692,7 +690,7 @@ fn feed_indent(ed: Editor, st: InputState, right: Bool, b: Int) -> Step
         return op_indent_lines(ed, st, lo, hi, right)
     feed(ed, ist_clear_pending(st), b)           // not a linewise motion — cancel
 
-// ── Find-char motions f/F/t/T (slice 17) ───────────────────────────────
+// ── Find-char motions f/F/t/T ───────────────────────────────
 
 // Index of the `count`-th `ch` strictly after `from` in `line`, or -1.
 fn find_char_fwd(line: Str, ch: Int, from: Int, count: Int) -> Int
@@ -730,7 +728,7 @@ fn move_find(ed: Editor, ch: Int, forward: Bool, till: Bool, count: Int) -> Edit
         let idx = find_char_bwd(line, ch, ed.cx, count)
         if idx < 0 then ed else clamp(Editor { lines: ed.lines, cy: ed.cy, cx: if till then idx + 1 else idx })
 
-// ── % matching pair (slice 26) ──────────────────────────────────────────
+// ── % matching pair ──────────────────────────────────────────
 
 fn is_open_bracket(ch: Int) -> Bool
     ch == 0x28 or ch == 0x5B or ch == 0x7B            // ( [ {
@@ -813,7 +811,7 @@ fn match_pair(ed: Editor) -> Editor
     else
         scan_match_bwd(ed, ed.cy, bx - 1, bracket_open_of(bch), bch)
 
-// ── Operator + motion (slice 17): d / c / y over a motion ───────────────
+// ── Operator + motion: d / c / y over a motion ───────────────
 
 // A motion's resolved destination, as an operator target.  Charwise targets
 // stay on the cursor's line (cross-line word motions clamp to the line edge);
@@ -1025,7 +1023,7 @@ fn feed_operator(ed: Editor, st: InputState, opb: Int, pcode: Int, b: Int) -> St
         return apply_motion_op(ed, st, opb, tgt)
     feed(ed, ist_clear_pending(st), b)            // not a motion — cancel + reprocess
 
-// ── Visual mode (slice 21): v / V + motions + operators on a selection ──────
+// ── Visual mode: v / V + motions + operators on a selection ──────
 
 // Normalised selection bounds (start <= end) between the anchor (avy,avx) and
 // the cursor.
@@ -1115,7 +1113,7 @@ fn visual_apply_line(ed: Editor, st: InputState, opb: Int) -> Step
     let vr = visual_range(st, ed)
     apply_linewise_op(Editor { lines: ed.lines, cy: vr.sy, cx: 0 }, st, opb, vr.ey)
 
-// ── Text objects (slice 23): iw/aw, i"/a", i(/a(, i{/a{, i[/a[ ───────────
+// ── Text objects: iw/aw, i"/a", i(/a(, i{/a{, i[/a[ ───────────
 // A text object resolves to a charwise range (or ok=false when there's no
 // object under the cursor).  Used by operators (diw, ci", yi(...) and visual
 // (viw, vi"...).
@@ -1412,7 +1410,7 @@ fn visual_case(ed: Editor, st: InputState, kind: Int) -> Step
         i = i + 1
     Step { ed: clamp(Editor { lines: ls, cy: vr.sy, cx: vr.sx }), st: ist_done(st) }
 
-// ── Case operators gu / gU / g~ + motion (slice 35) ─────────────────────
+// ── Case operators gu / gU / g~ + motion ─────────────────────
 // kind: 0 toggle, 1 lower, 2 upper.
 
 // Apply a case map to whole lines [lo, hi].
@@ -1629,15 +1627,15 @@ fn feed_replace(ed: Editor, st: InputState, b: Int) -> Step
 
 // Feed one byte through the Normal-mode handler, threading InputState.
 // Counts (`5j`, `10G`), line motions (`0 $ ^`), and buffer motions
-// (`gg G`) join the slice-1 `h j k l`.  (slices 1-2)
+// (`gg G`) join the basic `h j k l`.
 fn feed(ed: Editor, st: InputState, b: Int) -> Step
-    // Insert mode owns every byte until Esc.  (slice 4)
+    // Insert mode owns every byte until Esc.
     if st.mode == 1
         return feed_insert(ed, st, b)
-    // Visual mode (slice 21): charwise (2) / linewise (3).
+    // Visual mode: charwise (2) / linewise (3).
     if st.mode == 2 or st.mode == 3
         return feed_visual(ed, st, b)
-    // Replace mode (slice 36): overtype.
+    // Replace mode: overtype.
     if st.mode == 4
         return feed_replace(ed, st, b)
     // Operators awaiting a second key (pending: 1=g, 2=d, 3=y).
@@ -1679,7 +1677,7 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
         return feed_indent(ed, st, true, b)
     if st.pending == 6                 // `<` — indent left (<< or <motion)
         return feed_indent(ed, st, false, b)
-    // Find-char motions (slice 17): pending 8=f 9=F 10=t 11=T await the target.
+    // Find-char motions: pending 8=f 9=F 10=t 11=T await the target.
     if st.pending == 8                 // f<char>
         if b == 27
             return Step { ed: ed, st: ist_done(st) }
@@ -1696,7 +1694,7 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
         if b == 27
             return Step { ed: ed, st: ist_done(st) }
         return Step { ed: move_find(ed, b, false, true, if st.count > 0 then st.count else 1), st: ist_done(st) }
-    // Operator + find-char (slice 18): pending 20..31 encodes (operator,
+    // Operator + find-char: pending 20..31 encodes (operator,
     // find-type); the byte is the target char.  df{c} / dt{c} / dF{c} / dT{c}
     // for d / c / y.
     if st.pending >= 20 and st.pending <= 31
@@ -1710,13 +1708,13 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
         let till = ftidx == 2 or ftidx == 3
         let tgt = find_target(ed, b, forward, till, if st.count > 0 then st.count else 1)
         return apply_motion_op(ed, st, opb, tgt)
-    // Operator + gg (slice 18): pending 32/33/34 = d/c/y awaiting the second g.
+    // Operator + gg: pending 32/33/34 = d/c/y awaiting the second g.
     if st.pending >= 32 and st.pending <= 34
         if b == 0x67                   // second g — linewise [top, cursor]
             let opb = if st.pending == 32 then 0x64 elif st.pending == 33 then 0x63 else 0x79
             return apply_linewise_op(ed, st, opb, if st.count > 0 then st.count - 1 else 0)
         return feed(ed, ist_clear_pending(st), b)   // not gg — cancel + reprocess
-    // Operator + text object (slice 23): pending 40..45 encodes (operator,
+    // Operator + text object: pending 40..45 encodes (operator,
     // inner/around); the byte is the object char (w " ' ` ( ) b { } B [ ]).
     if st.pending >= 40 and st.pending <= 45
         let code = st.pending - 40
@@ -1783,7 +1781,7 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
         return Step { ed: match_pair(ed), st: ist_done(st) }
     if b == 0x52                       // 'R' — enter Replace (overtype) mode
         return Step { ed: ed, st: InputState { count: 0, pending: 0, mode: 4, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
-    // Insert-mode entry (slice 4).  Position the cursor (insert-clamped so
+    // Insert-mode entry.  Position the cursor (insert-clamped so
     // it may sit at end-of-line) and switch to Insert.
     if b == 0x69                       // 'i' — insert before cursor
         return Step { ed: ed, st: ist_insert(st) }
@@ -1797,7 +1795,7 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
         return Step { ed: open_line(ed, true), st: ist_insert(st) }
     if b == 0x4F                       // 'O' — open line above
         return Step { ed: open_line(ed, false), st: ist_insert(st) }
-    // Deletes (slice 5).
+    // Deletes.
     if b == 0x78                       // 'x' — delete char(s) under cursor (→ register)
         let xl = line_at(ed, ed.cy)
         let xhi = if ed.cx + cnt > str.len(xl) then str.len(xl) else ed.cx + cnt
@@ -1818,7 +1816,7 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
         return Step { ed: op_incdec(ed, cnt), st: ist_done(st) }
     if b == 0x18                       // Ctrl-X — decrement the number
         return Step { ed: op_incdec(ed, 0 - cnt), st: ist_done(st) }
-    // Visual mode entry (slice 21): anchor the selection at the cursor.  A
+    // Visual mode entry: anchor the selection at the cursor.  A
     // count pre-extends the selection (`3v` = 3 chars, `2V` = 2 lines).
     if b == 0x76                       // 'v' — charwise visual
         let ne = clamp(Editor { lines: ed.lines, cy: ed.cy, cx: ed.cx + cnt - 1 })
@@ -1826,7 +1824,7 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
     if b == 0x56                       // 'V' — linewise visual
         let ne = clamp(Editor { lines: ed.lines, cy: ed.cy + cnt - 1, cx: ed.cx })
         return Step { ed: ne, st: InputState { count: 0, pending: 0, mode: 3, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: ed.cy, avx: ed.cx } }
-    // Char-level edits (slice 14).
+    // Char-level edits.
     if b == 0x7E                       // '~' — toggle case (count chars), advance
         return Step { ed: op_toggle_case(ed, cnt), st: ist_done(st) }
     if b == 0x4A                       // 'J' — join line(s) with a space
@@ -1837,7 +1835,7 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
         return Step { ed: ed, st: InputState { count: st.count, pending: 5, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
     if b == 0x3C                       // '<' — await second '<' (indent left)
         return Step { ed: ed, st: InputState { count: st.count, pending: 6, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
-    // Operator + motion (slice 17): c awaits a motion (like d/y); f/F/t/T
+    // Operator + motion: c awaits a motion (like d/y); f/F/t/T
     // await a target char.
     if b == 0x63                       // 'c' — change operator (awaits motion)
         return Step { ed: ed, st: InputState { count: st.count, pending: 7, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
@@ -1885,7 +1883,7 @@ fn exec_ex(cmd: Str) -> ExResult
     else
         ExResult { quit: false, save: false }
 
-// ── :s substitute (slice 25) ────────────────────────────────────────────
+// ── :s substitute ────────────────────────────────────────────
 // Plain-substring substitute (novim has no regex yet): `:s/pat/repl/[g]` on
 // the current line, `:%s/pat/repl/[g]` on every line.  `g` replaces every
 // occurrence on a line; without it, just the first.
@@ -1953,11 +1951,11 @@ fn ex_substitute(ed: Editor, cmd: Str) -> Editor
     else
         clamp(Editor { lines: set_line(ed.lines, ed.cy, re_replace_line(atoms, line_at(ed, ed.cy), repl, global)), cy: ed.cy, cx: 0 })
 
-// ── :g / :v global delete (slice 30) ────────────────────────────────────
+// ── :g / :v global delete ────────────────────────────────────
 // `:g/pat/d` deletes every line containing `pat`; `:v/pat/d` (or `:g!/pat/d`)
 // deletes every line NOT containing it.  Only the `d` command is supported.
 
-// ── :N goto-line (slice 47) ─────────────────────────────────────────────
+// ── :N goto-line ─────────────────────────────────────────────
 // `:N` (a line number) or `:$` (last line) moves the cursor to that line's
 // first non-blank.  Driver-level, like :s / :g.
 
@@ -2264,7 +2262,7 @@ fn save_buf(path: Str, lines: [Str]) [io]
 fn save_buf_text(path: Str, text: Str) [io]
     save_buf(path, str.split_lines(text))
 
-// ── Key-sequence decoding + keymaps (slice 8) ───────────────────
+// ── Key-sequence decoding + keymaps ───────────────────
 
 // Decode `\e`=Esc `\n`/`\r`=Enter `\t`=Tab `\b`=Backspace `\\`=backslash
 // into their real bytes, returning a new string.  Used for both `--batch`
@@ -2315,8 +2313,8 @@ fn decode_escapes(s: Str) -> Str
     out
 
 // A user keymap: single Normal-mode key `lhs[i]` is replaced by the
-// (already-decoded) key sequence `rhs[i]`.  (slice 8 — single-key LHS;
-// multi-key LHS like `jk` is a later enhancement.)
+// (already-decoded) key sequence `rhs[i]`.  Single-key LHS only; multi-key
+// LHS like `jk` is not supported.
 struct Keymap
     lhs: [Int]
     rhs: [Str]
@@ -2386,7 +2384,7 @@ fn load_keymaps(cfg_path: Str) -> Keymap [io]
                 i = i + 1
             Keymap { lhs: lhs, rhs: rhs }
 
-// ── Colorscheme (slice 9) ───────────────────────────────────────
+// ── Colorscheme ───────────────────────────────────────
 // `[colorscheme]` sets 256-colour SGR indices for chrome elements; -1 =
 // use the default.  v1 colours the status line (fg/bg) and the `~`
 // end-of-buffer markers; syntax-token classes inherit this once
@@ -2470,7 +2468,7 @@ fn status_sgr(cs: Colorscheme) -> Str
     else
         codes
 
-// ── Options (slice 11) ──────────────────────────────────────────
+// ── Options ──────────────────────────────────────────
 // `[options]` toggles editor settings.  v1: `number` (a line-number
 // gutter) and `tabstop` (loaded; tab expansion in render is a follow-on).
 
@@ -2626,7 +2624,7 @@ fn apply_set(o: Options, cmd: Str) -> Options
         result = apply_set_token(result, tok)
     result
 
-// ── Search (/pattern, n / N) — slice 10 ─────────────────────────
+// ── Search (/pattern, n / N) ─────────────────────────
 
 // First occurrence of `needle` in `hay` at or after column `from`; -1 if
 // none.  Plain substring (no regex in v1).
@@ -2658,7 +2656,7 @@ fn find_last_in_line(hay: Str, needle: Str, before: Int) -> Int
         i = i + 1
     found
 
-// ── Regex engine (slice 39) ─────────────────────────────────────────────
+// ── Regex engine ─────────────────────────────────────────────
 // A small backtracking matcher, vim "magic" subset: literals, `.` any, `*` /
 // `\+` / `\?` quantifiers, `^` / `$` anchors, `[..]` / `[^..]` classes with
 // `a-z` ranges, and the `\d \w \s \D \W \S` shortcuts.  `:s` replacement
@@ -3068,33 +3066,30 @@ fn feed_mapped(ed: Editor, st: InputState, km: Keymap, b: Int) -> Step
         j = j + 1
     Step { ed: e, st: s }
 
-// ── `.` repeat (slice 19) ───────────────────────────────────────────────
+// ── `.` repeat ──────────────────────────────────────────────────────────
 // Repeat the last buffer-changing command.  Kept in the DRIVER (not the pure
 // feed) by recording the raw byte sequence of each change command and
-// replaying it on `.`.  This way feed stays pure and the recorded bytes
-// re-run through the same feed_mapped (keymaps included), so insert-mode text,
-// counts, and operator+motion all repeat faithfully.
+// replaying it on `.`.  The recorded bytes re-run through the same feed_mapped
+// (keymaps included), so insert-mode text, counts, and operator+motion all
+// repeat faithfully.
 
-// Whole-buffer text, used to detect whether a command changed the buffer.
-// Join the buffer with newlines.  Uses str.join (a single O(n) pass) rather
-// than repeated `acc = acc + line` — the latter is O(n²) and, since buf_text
-// runs several times per keystroke (undo/dot change-detection), made insert
-// mode crawl on large files.
+// Perf: str.join is one O(n) pass.  `acc = acc + line` would be O(n²), and
+// since this runs several times per keystroke (undo + dot change-detection) it
+// made insert mode crawl on large files.
+@intent("Serialize the buffer's lines to a single newline-joined string.")
 fn buf_text(ed: Editor) -> Str
     str.join(str.from_char(10), ed.lines)
 
-// Bytes that can BEGIN a buffer-changing command (so navigation keystrokes
-// stay cheap — we only snapshot/compare the buffer for these).  Counts are
-// tracked too (a leading digit may precede an edit, e.g. `3x`).  Yank (`y`)
-// is excluded: it changes no buffer text, so `.` never repeats it.
+// Counts are included (a leading digit may precede an edit, e.g. `3x`).  Yank
+// (`y`) is excluded: it changes no buffer text, so `.` never repeats it.
+// `g`/`v`/`V` may start a command that doesn't change the buffer (gg, vy, v
+// cancel) — change detection below only records an undo when buf_text actually
+// changed, so those no-op cases push nothing.
+@intent("True if byte `b` can begin a buffer-changing command — lets navigation keystrokes skip the per-keystroke snapshot/compare.")
 fn is_edit_start(b: Int) -> Bool
     if b >= 0x30 and b <= 0x39                               // count digit (may precede an edit)
         return true
-    // i a I A  o O  x X D  J ~ r  s S c C  p P  d > <  R  ^A ^X  g (gu/gU/g~/gJ)
-    // v V (a Visual selection may end in an edit).  `g`/`v`/`V` are start a
-    // command that *might* not change the buffer (gg navigation, vy yank, v
-    // cancel) — change detection (below) records an undo only when buf_text
-    // actually changed, so those no-op cases push nothing.
+    // i a I A · o O · x X D · J ~ r · s S c C · p P · d > < · R · ^A ^X · g · v V
     let edits = [0x69, 0x61, 0x49, 0x41, 0x6F, 0x4F, 0x78, 0x58, 0x44, 0x4A, 0x7E, 0x72, 0x73, 0x53, 0x63, 0x43, 0x70, 0x50, 0x64, 0x3E, 0x3C, 0x52, 0x01, 0x18, 0x67, 0x76, 0x56]
     var found = false
     let mut i = 0
@@ -3121,15 +3116,12 @@ fn replay_seq(ed: Editor, st: InputState, km: Keymap, seq: Str) -> Step
         j = j + 1
     Step { ed: e, st: s }
 
-// ── `.` repeat + undo/redo (slices 19/20) ───────────────────────────────
+// ── `.` repeat + undo/redo ──────────────────────────────────────────────
 // Both are DRIVER-level session state so `feed` stays pure.  `EditState`
 // carries the dot-repeat recording (`last`/`cur`/`snaptxt`/`active`) plus an
-// undo/redo stack of buffer snapshots.  This works because novim never
+// undo/redo stack of buffer snapshots.  This is sound because novim never
 // mutates a line vector in place — every edit rebuilds it via list.append —
 // so a Snapshot that holds the old `[Str]` reference stays valid forever.
-// Every helper uses a SINGLE trailing return: an early `return StructLit{}`
-// from inside an `if` after a heavy call miscompiles under --llvm — see
-// bugs/codegen-llvm/llvm-early-return-struct-literal-after-call-corrupts-field.md.
 
 // A point-in-time buffer + cursor, pushed onto the undo/redo stacks.
 struct Snapshot
@@ -3145,14 +3137,14 @@ struct EditState
     snaped:   Snapshot     // undo: editor at command start
     undos:    [Snapshot]   // undo stack (last = most recent pre-change state)
     redos:    [Snapshot]   // redo stack
-    regs:     [Str]        // named registers a-z (slice 24): contents
+    regs:     [Str]        // named registers a-z: contents
     reglw:    [Bool]       // named registers a-z: linewise flag
     rreg:     Int          // register selected for the current command (0 = none, 1-26 = a-z)
     awaitreg: Bool         // true after `"`, awaiting the register letter
-    marky:    [Int]        // marks a-z (slice 28): line (-1 = unset)
+    marky:    [Int]        // marks a-z: line (-1 = unset)
     markx:    [Int]        // marks a-z: column
     awaitmark: Int         // 0 none, 1 set (m), 2 jump-exact (`), 3 jump-line (')
-    recording: Int         // macros (slice 38): register being recorded into (0 none, 1-26)
+    recording: Int         // macros: register being recorded into (0 none, 1-26)
     macrobuf:  Str         // keystrokes recorded so far
     awaitmac:  Int         // 0 none, 1 await q-register, 2 await @-register
     lastmacro: Int         // last replayed macro register (for @@), 0 none
@@ -3187,9 +3179,9 @@ fn snap_of(ed: Editor) -> Snapshot
 
 // ── per-buffer undo: serialize a snapshot stack to a flat Str ────────────
 // Buffers keep their own undo/redo history across `:bn`/`:e`/etc.  Each
-// buffer's stacks are stashed as serialized strings in parallel `[Str]`
-// arrays (the same proven-safe storage shape as `bufs_text`) rather than a
-// `[[Snapshot]]` — nested list-of-lists has miscompiled in this file before.
+// buffer's stacks are stashed as serialized strings in parallel `[Str]` arrays,
+// the same flat storage shape `bufs_text` uses — a deliberately simple,
+// uniform representation rather than threading `[[Snapshot]]` through the driver.
 
 // Offset of the first byte `b` at or after `from`, or -1.
 fn index_of_byte_from(s: Str, b: Int, from: Int) -> Int
@@ -3550,9 +3542,10 @@ fn edit_dot(ed: Editor, st: InputState, km: Keymap, es: EditState) -> EditStep
     let newredos = if push then snaps_empty() else es.redos
     EditStep { ed: e, st: s, es: EditState { last: es.last, cur: "", snaptxt: "", active: false, snaped: es.snaped, undos: newundos, redos: newredos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: es.recording, macrobuf: es.macrobuf, awaitmac: es.awaitmac, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt, giy: es.giy, gix: es.gix } }
 
-// Drive one input byte with dot-repeat + undo/redo around feed_mapped.
-// feed_edit only ever early-returns the result of a HELPER call (safe), and
-// each helper has a single trailing return (the --llvm early-return-struct bug).
+@intent("""Drive one input byte through feed_mapped with dot-repeat and
+undo/redo bookkeeping: `u`/Ctrl-R restore from the snapshot stacks; any other
+byte runs the edit, and a snapshot is pushed onto the undo stack when the buffer
+actually changed.""")
 fn feed_edit_inner(ed: Editor, st: InputState, km: Keymap, es: EditState, b: Int) -> EditStep
     if st.mode == 0 and st.pending == 0 and b == 0x75            // 'u' — undo
         return edit_undo(ed, st, es)
@@ -3572,7 +3565,7 @@ fn feed_edit_inner(ed: Editor, st: InputState, km: Keymap, es: EditState, b: Int
         return edit_record(ed, st, km, edit_start(es, ed), b)
     edit_pass(ed, st, km, es, b)
 
-// ── Named registers (slice 24): `"a` selects register a for the next op ──────
+// ── Named registers: `"a` selects register a for the next op ──────
 // The `"<letter>` prefix is handled here in the driver: it loads the named
 // register into the unnamed register (so a following p reads it) and marks
 // `rreg`; after the command completes, the unnamed register is stored back
@@ -3618,7 +3611,7 @@ fn edit_persist_reg(step: EditStep) -> EditStep
     else
         step
 
-// ── Marks (slice 28): m<a-z> set, `<a-z> jump exact, '<a-z> jump line ────────
+// ── Marks: m<a-z> set, `<a-z> jump exact, '<a-z> jump line ────────
 
 // Begin a mark prefix (op: 1 set, 2 jump-exact, 3 jump-line).
 fn edit_await_mark(ed: Editor, st: InputState, es: EditState, op: Int) -> EditStep
@@ -3652,7 +3645,7 @@ fn feed_edit_core(ed: Editor, st: InputState, km: Keymap, es: EditState, b: Int)
         return edit_await_reg(ed, st, es)
     edit_persist_reg(feed_edit_inner(ed, st, km, es, b))
 
-// ── Macros (slice 38): q<reg> … q record, @<reg> / @@ replay ─────────────
+// ── Macros: q<reg> … q record, @<reg> / @@ replay ─────────────
 // Recorded keystrokes are stored in the named-register slot (vim shares them),
 // so q stop writes `macrobuf` into regs[reg].  Replay re-feeds the bytes
 // through feed_edit.  Limitation (v1): `:` / `/` lines inside a macro aren't
@@ -4307,7 +4300,7 @@ fn scroll_to(top: Int, cy: Int, body: Int) -> Int
         t = 0
     t
 
-// ── Viewport scrolling (slice 45): Ctrl-D/U/F/B + zz/zt/zb ───────────────────
+// ── Viewport scrolling: Ctrl-D/U/F/B + zz/zt/zb ───────────────────
 // These are driver-level (they touch the `top` viewport, which `feed` does not
 // know about).  `kind`: 0 Ctrl-D (½ down), 1 Ctrl-U (½ up), 2 Ctrl-F (page
 // down), 3 Ctrl-B (page up), 4 zz (centre), 5 zt (cursor→top), 6 zb (→bottom).
@@ -4417,7 +4410,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var zpend = false                    // awaiting the 2nd byte of a `z` scroll command
     var esc_pushback = 0 - 99            // one-byte pushback: the key after a lone ESC
     var last_subst = ""                  // last :s command, for `&`
-    // ── LSP (novols) live state — Phase B.  All async I/O lives here in the
+    // ── LSP (novols) live state.  All async I/O lives here in the
     // driver, never in the pure `feed` path.  `lsp_pid < 0` means no server.
     var lsp_pid = 0 - 1
     var lsp_in = 0
@@ -5214,7 +5207,7 @@ fn default_config_path() -> Str [io]
     let home = process.env("HOME") ?? ""
     home + "/.config/novim/config.toml"
 
-// ── LSP (novols) client — transport (Phase A) ───────────────────────────────
+// ── LSP (novols) client — JSON-RPC transport ───────────────────────────────
 // novim talks JSON-RPC over stdio to `novols`.  All of this lives outside the
 // pure `feed`; see orbit/novim/docs/LSP-DESIGN.md.
 
@@ -5372,7 +5365,7 @@ fn lsp_msg_diags(msg: Str) -> Bool
             let r = lsp_print_diags(doc)
             return r
 
-// ── Phase B — live diagnostics in run_interactive ───────────────────────────
+// ── Live diagnostics in run_interactive ─────────────────────────────────────
 //
 // Spawn novols; returns its pid, or -1 on failure.  (A bare-unit `None => ()`
 // arm before a block trips the parser, so this returns a value from each arm.)
@@ -5503,7 +5496,7 @@ fn diag_msg_for_line(diag_li: [Int], diag_msgs: [Str], line: Int) -> Str
         i = i + 2
     ""
 
-// ── Phase C — go-to-definition (gd) + hover (K) ─────────────────────────────
+// ── Go-to-definition (gd) + hover (K) ───────────────────────────────────────
 //
 // A position request (definition / hover share the same params shape).
 fn lsp_pos_req(id: Int, method: Str, uri: Str, line: Int, char: Int) -> Str
@@ -5953,7 +5946,7 @@ fn apply_rename(ed: Editor, triples: [Int], newtexts: [Str]) -> Editor
     Editor { lines: lines, cy: ed.cy, cx: ed.cx }
 
 // `--lsp-diag <file>`: spawn novols, open the file, print its diagnostics.
-// Deterministic transport smoke test for Phase A.
+// Deterministic transport smoke test.
 fn run_lsp_diag(path: Str) [io, time]
     // Use the free `proc.*` surface (pid-keyed) rather than the Subprocess
     // methods: the method-return slot-type inference is fragile (an fd binder
