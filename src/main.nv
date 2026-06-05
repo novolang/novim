@@ -2028,14 +2028,17 @@ fn bufcmd_kind(cmd: Str) -> Int
     let c = str.trim(cmd)
     if c == "bn" or c == "bnext" then 1 elif c == "bp" or c == "bprev" or c == "bprevious" then 2 elif c == "bd" or c == "bdelete" then 3 elif c == "bf" or c == "bfirst" then 4 elif c == "bl" or c == "blast" then 5 else 0
 
-// `:b <n>` / `:buffer <n>` — switch to buffer number <n> (1-based).
+// `:b <n>` / `:buffer <n>` — switch to buffer number <n> (1-based); the
+// space-free `:b#` / `:buffer#` (alternate buffer) form is accepted too.
 fn is_bgoto(cmd: Str) -> Bool
     let c = str.trim(cmd)
-    (str.len(c) > 2 and str.slice(c, 0, 2) == "b ") or (str.len(c) > 7 and str.slice(c, 0, 7) == "buffer ")
+    (str.len(c) > 2 and str.slice(c, 0, 2) == "b ") or (str.len(c) > 7 and str.slice(c, 0, 7) == "buffer ") or c == "b#" or c == "buffer#"
 
-// The argument string after `:b`/`:buffer`, trimmed.
+// The argument string after `:b`/`:buffer`, trimmed (`:b#` → "#").
 fn bgoto_arg(cmd: Str) -> Str
     let c = str.trim(cmd)
+    if c == "b#" or c == "buffer#"
+        return "#"
     let sp = index_of_byte(c, 0x20)
     if sp < 0 then "" else str.trim(str.slice(c, sp + 1, str.len(c)))
 
@@ -4296,6 +4299,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var bufs_marky: [Str] = [""]     // per-buffer marks a-z: serialized lines
     var bufs_markx: [Str] = [""]     // per-buffer marks a-z: serialized columns
     var cur_buf = 0
+    var alt_buf = 0 - 1              // alternate buffer (last visited) for Ctrl-^ / :b#
     // Extra command-line files (`novim a b c`) become additional buffers.  They
     // arrive newline-joined in `extra` (a Str — passing a `[Str]` parameter to
     // this function reproducibly corrupted the buffer-switch codegen).
@@ -4481,11 +4485,12 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                 want_path = bufs_path[tgt2]
                                 want_y = 0 - 1
                                 want_x = 0
-                        elif is_bgoto(cmd_buf)             // :b <n> / :b <name>
+                        elif is_bgoto(cmd_buf)             // :b <n> / :b <name> / :b#
                             let barg = bgoto_arg(cmd_buf)
                             let bn2 = bgoto_target(cmd_buf)
-                            // a number switches by index; otherwise match a filename
-                            let bidx = if bn2 >= 1 and bn2 <= list.len(bufs_path) then bn2 - 1 else buf_find_by_name(bufs_path, barg)
+                            // `#` = alternate buffer; a number switches by index;
+                            // otherwise match a filename
+                            let bidx = if barg == "#" then alt_buf elif bn2 >= 1 and bn2 <= list.len(bufs_path) then bn2 - 1 else buf_find_by_name(bufs_path, barg)
                             if bidx >= 0
                                 jback = list.push(jback, jentry(curpath, ed.cy, ed.cx))
                                 jfwd = []
@@ -4651,6 +4656,12 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                         want_path = tf
                         want_y = jentry_y(e)
                         want_x = jentry_x(e)
+                elif scroll_idle(st, es) and key_free(km, b) and b == 0x1E and alt_buf >= 0 and alt_buf < list.len(bufs_path) and alt_buf != cur_buf   // Ctrl-^ — alternate buffer
+                    jback = list.push(jback, jentry(curpath, ed.cy, ed.cx))
+                    jfwd = []
+                    want_path = bufs_path[alt_buf]
+                    want_y = 0 - 1
+                    want_x = 0
                 elif b == 58 and st.mode == 0        // ':' — open the Ex line
                     cmd_mode = true
                     cmd_buf = ""
@@ -4741,6 +4752,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 bufs_markx = set_str_at(bufs_markx, cur_buf, ints_ser(es.markx))
                 if lsp_phase == 2              // close the document we're leaving
                     lsp_send(lsp_in, lsp_didclose(lsp_uri))
+                alt_buf = cur_buf             // the buffer we leave becomes the alternate
                 cur_buf = idx
                 let nls = str.split_lines(bufs_text[idx])
                 let ny = if want_y >= 0 then want_y else bufs_cy[idx]
@@ -4794,6 +4806,10 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 bufs_markx = remove_at_str(bufs_markx, ci)
                 if ci < cur_buf
                     cur_buf = cur_buf - 1
+                if ci == alt_buf            // alternate closed — invalidate
+                    alt_buf = 0 - 1
+                elif ci < alt_buf
+                    alt_buf = alt_buf - 1
                 lsp_info = "closed; " + str.from_int(list.len(bufs_path)) + " left"
             want_close = ""
             changed = true
