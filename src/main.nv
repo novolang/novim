@@ -2025,11 +2025,36 @@ fn is_bgoto(cmd: Str) -> Bool
     let c = str.trim(cmd)
     (str.len(c) > 2 and str.slice(c, 0, 2) == "b ") or (str.len(c) > 7 and str.slice(c, 0, 7) == "buffer ")
 
-// The 1-based buffer number from `:b <n>`, or -1.
-fn bgoto_target(cmd: Str) -> Int
+// The argument string after `:b`/`:buffer`, trimmed.
+fn bgoto_arg(cmd: Str) -> Str
     let c = str.trim(cmd)
     let sp = index_of_byte(c, 0x20)
-    if sp < 0 then 0 - 1 else (str.to_int(str.trim(str.slice(c, sp + 1, str.len(c)))) ?? (0 - 1))
+    if sp < 0 then "" else str.trim(str.slice(c, sp + 1, str.len(c)))
+
+// The 1-based buffer number from `:b <n>`, or -1 if the arg isn't a number.
+fn bgoto_target(cmd: Str) -> Int
+    str.to_int(bgoto_arg(cmd)) ?? (0 - 1)
+
+// True if any buffer has unsaved changes (active vs disk, or a stored buffer
+// vs its saved text).  Used by the `:q` guard.
+fn buffers_modified(bt: [Str], bd: [Str], cur: Int, atext: Str, adisk: Str) -> Bool
+    if atext != adisk
+        return true
+    var i = 0
+    while i < list.len(bt)
+        if i != cur and bt[i] != bd[i]
+            return true
+        i = i + 1
+    false
+
+// Index of the first buffer whose basename or path contains `name`, or -1.
+fn buf_find_by_name(paths: [Str], name: Str) -> Int
+    var i = 0
+    while i < list.len(paths)
+        if index_of_str(basename_of(paths[i]), name) >= 0 or index_of_str(paths[i], name) >= 0
+            return i
+        i = i + 1
+    0 - 1
 
 // The basename (last path component) of `p`.
 fn basename_of(p: Str) -> Str
@@ -3803,7 +3828,7 @@ fn ends_with_nv(p: Str) -> Bool
     let n = str.len(p)
     n >= 3 and str.slice(p, n - 3, n) == ".nv"
 
-fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str) [io]
+fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool) [io]
     csi()
     emit("?25l")         // hide cursor while we repaint
     let body = rows - 1
@@ -3868,13 +3893,19 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode
                         // A line with a diagnostic colours its number red (error)
                         // or yellow (warning) — a zero-width gutter sign.
                         let dsev = diag_sev_for_line(diag_li, li)
+                        let iscur = li == ed.cy        // the active line gets a bold number
                         if dsev == 1
-                            sgr("38;5;9")
+                            sgr(if iscur then "1;38;5;9" else "38;5;9")
                             emit(pad_num(gnum, numw))
                             sgr("0")
                             emit(" ")
                         elif dsev >= 2
-                            sgr("38;5;11")
+                            sgr(if iscur then "1;38;5;11" else "38;5;11")
+                            emit(pad_num(gnum, numw))
+                            sgr("0")
+                            emit(" ")
+                        elif iscur
+                            sgr("1;38;5;15")           // active line number — bold bright white
                             emit(pad_num(gnum, numw))
                             sgr("0")
                             emit(" ")
@@ -3908,7 +3939,8 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode
     let dsum = if ndiag > 0 then "  E:" + str.from_int(diag_count(diag_li, 1)) + " W:" + str.from_int(diag_count(diag_li, 2)) else ""
     // Base status (path/pos/mode/count) is emitted in full — only the on-cursor
     // diagnostic message is bounded to the remaining width so it can't wrap.
-    var statusln = " " + path + "  " + str.from_int(ed.cy + 1) + ":" + str.from_int(ed.cx + 1) + "  " + modestr + dsum
+    let modflag = if modified then " [+]" else ""
+    var statusln = " " + path + modflag + "  " + str.from_int(ed.cy + 1) + ":" + str.from_int(ed.cx + 1) + "  " + modestr + dsum
     // An explicit `info` line (a gd/K result) wins over the passive on-cursor
     // diagnostic message; either is bounded to the remaining width.
     let cmsg = diag_msg_for_line(diag_li, diag_msgs, ed.cy)
@@ -4139,6 +4171,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var want_x = 0
     var want_close = ""
     var buflist = false                  // `:ls` — show the buffer-list overlay until the next key
+    var modified = false                 // active buffer differs from disk → status `[+]`
     var lsp_dirty = false                // buffer changed since the last didChange
     var lsp_idle = 0                      // consecutive idle poll cycles (debounce)
     var lsp_phase = 0                    // 0 none · 1 init sent (awaiting result) · 2 ready
@@ -4154,7 +4187,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
             lsp_phase = 1
     clear_screen()       // one-time clear of whatever was on screen before
     left = hscroll_for(left, ed, opts, cols)
-    render(ed, rows, cols, curpath, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, lsp_info)
+    render(ed, rows, cols, curpath, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, lsp_info, modified)
     var running = true
     while running
         // Short stdin poll keeps the editor responsive while leaving slack to
@@ -4293,24 +4326,30 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                 want_path = bufs_path[tgt2]
                                 want_y = 0 - 1
                                 want_x = 0
-                        elif is_bgoto(cmd_buf)             // :b <n> / :buffer <n>
+                        elif is_bgoto(cmd_buf)             // :b <n> / :b <name>
+                            let barg = bgoto_arg(cmd_buf)
                             let bn2 = bgoto_target(cmd_buf)
-                            if bn2 >= 1 and bn2 <= list.len(bufs_path)
+                            // a number switches by index; otherwise match a filename
+                            let bidx = if bn2 >= 1 and bn2 <= list.len(bufs_path) then bn2 - 1 else buf_find_by_name(bufs_path, barg)
+                            if bidx >= 0
                                 jback = list.push(jback, jentry(curpath, ed.cy, ed.cx))
                                 jfwd = []
-                                want_path = bufs_path[bn2 - 1]
+                                want_path = bufs_path[bidx]
                                 want_y = 0 - 1
                                 want_x = 0
                             else
-                                lsp_info = "no buffer " + str.from_int(bn2)
+                                lsp_info = "no buffer matching " + barg
                         else
                             let r = exec_ex(cmd_buf)
                             if r.save
                                 save_buf(curpath, ed.lines)
                                 disk_text = buf_text(ed)
                             if r.quit
-                                running = false
-                                done = true
+                                if (not r.save) and index_of_byte(cmd_buf, 0x21) < 0 and buffers_modified(bufs_text, bufs_disk, cur_buf, buf_text(ed), disk_text)
+                                    lsp_info = "unsaved buffers (:q! to override)"
+                                else
+                                    running = false
+                                    done = true
                         cmd_mode = false
                         cmd_buf = ""
                     elif b == 27                     // Esc — cancel
@@ -4609,7 +4648,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
         if changed
             top = scroll_to(top, ed.cy, rows - 1)
             left = hscroll_for(left, ed, opts, cols)
-            render(ed, rows, cols, curpath, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, lsp_info)
+            modified = buf_text(ed) != disk_text
+            render(ed, rows, cols, curpath, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, lsp_info, modified)
             if cmd_mode
                 cup(rows, 1)
                 csi()
@@ -4628,7 +4668,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
             top = scroll_to(top, ed.cy, rows - 1)
             left = hscroll_for(left, ed, opts, cols)
             clear_screen()   // dimensions changed — clear stale content once
-            render(ed, rows, cols, curpath, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, lsp_info)
+            render(ed, rows, cols, curpath, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, lsp_info, modified)
     if lsp_pid >= 0                       // tear the language server down
         let _ = proc.kill(lsp_pid, 15)
         proc.close(lsp_pid)
