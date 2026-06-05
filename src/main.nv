@@ -3267,6 +3267,58 @@ fn marks_de(s: Str) -> [Int]
         out = list.append(out, [0 - 1])
     out
 
+// Parse a comma-joined Int list of variable length (no padding) — used for the
+// per-buffer diagnostic line/severity store.
+fn ints_de_csv(s: Str) -> [Int]
+    var out: [Int] = []
+    if str.len(s) == 0
+        return out
+    let n = str.len(s)
+    var p = 0
+    while p <= n
+        let c = index_of_byte_from(s, 0x2C, p)
+        let endp = if c < 0 then n else c
+        let v = str.to_int(str.slice(s, p, endp)) ?? 0
+        out = list.append(out, [v])
+        p = if c < 0 then n + 1 else c + 1
+    out
+
+// Split `s` on byte 0x01 into fields (the per-buffer diagnostic message store).
+fn str_split_b1(s: Str) -> [Str]
+    var out: [Str] = []
+    let n = str.len(s)
+    var start = 0
+    var i = 0
+    while i < n
+        if (str.byte_at(s, i) ?? 0) == 1
+            out = list.append(out, [str.slice(s, start, i)])
+            start = i + 1
+        i = i + 1
+    out = list.append(out, [str.slice(s, start, n)])
+    out
+
+// Serialize a buffer's diagnostics: the flat line/sev ints (comma-joined), a
+// NUL separator, then the messages joined by 0x01.  Per-buffer diagnostics let
+// every open document keep its own diagnostics live across switches.
+fn diag_ser(li: [Int], msgs: [Str]) -> Str
+    ints_ser(li) + str.from_char(0) + str.join(str.from_char(1), msgs)
+
+fn diag_de_li(s: Str) -> [Int]
+    let z = index_of_byte(s, 0)
+    let head = if z < 0 then s else str.slice(s, 0, z)
+    ints_de_csv(head)
+
+fn diag_de_msgs(s: Str) -> [Str]
+    let z = index_of_byte(s, 0)
+    if z < 0
+        var e: [Str] = []
+        return e
+    let tail = str.slice(s, z + 1, str.len(s))
+    if str.len(tail) == 0
+        var e2: [Str] = []
+        return e2
+    str_split_b1(tail)
+
 // 37 register slots: 0-25 = named a-z, 26-35 = numbered "0-"9 ("0 yank, "1-"9
 // delete ring), 36 = "- (small charwise-delete register).
 fn regs_empty() -> [Str]
@@ -4353,6 +4405,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var bufs_redo: [Str] = [""]      // per-buffer serialized redo stack
     var bufs_marky: [Str] = [""]     // per-buffer marks a-z: serialized lines
     var bufs_markx: [Str] = [""]     // per-buffer marks a-z: serialized columns
+    var bufs_diag: [Str] = [""]      // per-buffer serialized diagnostics (multi-doc LSP)
+    var bufs_lspopen: [Bool] = [false]  // whether each buffer's doc is open in novols
     var cur_buf = 0
     var alt_buf = 0 - 1              // alternate buffer (last visited) for Ctrl-^ / :b#
     var arglist: [Str] = [path]     // the CLI argument list (:args / :next / :prev)
@@ -4377,6 +4431,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
             bufs_redo = list.push(bufs_redo, "")
             bufs_marky = list.push(bufs_marky, "")
             bufs_markx = list.push(bufs_markx, "")
+            bufs_diag = list.push(bufs_diag, "")
+            bufs_lspopen = list.push(bufs_lspopen, false)
             arglist = list.push(arglist, ef)
         efi = efi + 1
     // Deferred buffer switch: `:e`/`:bn`/`:bp`/cross-file gd / cross-file
@@ -4577,6 +4633,11 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                 bufs_redo = list.push(bufs_redo, "")
                                 bufs_marky = list.push(bufs_marky, "")
                                 bufs_markx = list.push(bufs_markx, "")
+                                bufs_diag = list.push(bufs_diag, "")
+                                bufs_lspopen = list.push(bufs_lspopen, false)
+                                if ends_with_nv(tgt) and lsp_phase == 2   // open the doc so its diagnostics go live
+                                    lsp_send(lsp_in, lsp_didopen("file://" + tgt, file_to_text(tgt)))
+                                    bufs_lspopen = set_bool_at(bufs_lspopen, list.len(bufs_path) - 1, true)
                                 lsp_info = "added " + basename_of(tgt) + "; " + str.from_int(list.len(bufs_path)) + " buffers"
                         elif argcmd_kind(cmd_buf) > 0    // :args / :next / :prev / :first / :last / :wn / :wN
                             let ak = argcmd_kind(cmd_buf)
@@ -4870,6 +4931,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 bufs_redo = list.push(bufs_redo, "")
                 bufs_marky = list.push(bufs_marky, "")
                 bufs_markx = list.push(bufs_markx, "")
+                bufs_diag = list.push(bufs_diag, "")
+                bufs_lspopen = list.push(bufs_lspopen, false)
                 idx = list.len(bufs_path) - 1
             if idx != cur_buf
                 // save the buffer we're leaving (incl. its undo/redo history)
@@ -4883,8 +4946,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 bufs_redo = set_str_at(bufs_redo, cur_buf, snaps_ser(es.redos))
                 bufs_marky = set_str_at(bufs_marky, cur_buf, ints_ser(es.marky))
                 bufs_markx = set_str_at(bufs_markx, cur_buf, ints_ser(es.markx))
-                if lsp_phase == 2              // close the document we're leaving
-                    lsp_send(lsp_in, lsp_didclose(lsp_uri))
+                bufs_diag = set_str_at(bufs_diag, cur_buf, diag_ser(diag_li, diag_msgs))
+                // documents stay open in novols (multi-doc) — no didClose on switch
                 alt_buf = cur_buf             // the buffer we leave becomes the alternate
                 cur_buf = idx
                 let nls = str.split_lines(bufs_text[idx])
@@ -4904,21 +4967,24 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 let gregs = es.regs
                 let greglw = es.reglw
                 es = edit_new_undo(snaps_de(usaved), snaps_de(rsaved), gregs, greglw, marks_de(mysaved), marks_de(mxsaved))
-                diag_li = []
-                diag_msgs = []
+                let dsaved = bufs_diag[idx]   // restore the target's live diagnostics
+                diag_li = diag_de_li(dsaved)
+                diag_msgs = diag_de_msgs(dsaved)
                 lsp_uri = "file://" + curpath
+                lsp_lasttext = buf_text(ed)   // debounced didChange now diffs against THIS buffer
+                let already = bufs_lspopen[idx]
                 if ends_with_nv(curpath)
-                    if lsp_pid < 0             // no server yet — spawn + init async
+                    if lsp_pid < 0             // no server yet — spawn + init async (opens all docs at handshake)
                         lsp_pid = lsp_spawn()
                         if lsp_pid >= 0
                             lsp_in = proc.stdin_fd(lsp_pid)
                             lsp_out = proc.stdout_fd(lsp_pid)
                             lsp_send(lsp_in, lsp_init_req(lsp_uri))
                             lsp_phase = 1
-                    elif lsp_phase == 2        // server ready — open the new document
-                        lsp_lasttext = buf_text(ed)
+                    elif lsp_phase == 2 and not already   // first visit since server ready — open it
                         lsp_ver = lsp_ver + 1
                         lsp_send(lsp_in, lsp_didopen(lsp_uri, lsp_lasttext))
+                        bufs_lspopen = set_bool_at(bufs_lspopen, idx, true)
             elif want_y >= 0                   // same buffer — just move the cursor
                 ed = clamp(Editor { lines: ed.lines, cy: want_y, cx: want_x })
             want_path = ""
@@ -4937,6 +5003,10 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 bufs_redo = remove_at_str(bufs_redo, ci)
                 bufs_marky = remove_at_str(bufs_marky, ci)
                 bufs_markx = remove_at_str(bufs_markx, ci)
+                if ends_with_nv(want_close) and bufs_lspopen[ci] and lsp_phase == 2
+                    lsp_send(lsp_in, lsp_didclose("file://" + want_close))
+                bufs_diag = remove_at_str(bufs_diag, ci)
+                bufs_lspopen = remove_at_bool(bufs_lspopen, ci)
                 if ci < cur_buf
                     cur_buf = cur_buf - 1
                 if ci == alt_buf            // alternate closed — invalidate
@@ -4975,13 +5045,29 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                     more = false
                 elif lsp_phase == 1 and lsp_msg_id(msg) == 1
                     lsp_send(lsp_in, lsp_initialized())
-                    lsp_lasttext = buf_text(ed)
-                    lsp_send(lsp_in, lsp_didopen(lsp_uri, lsp_lasttext))
                     lsp_phase = 2
+                    var oi = 0                  // open EVERY .nv buffer (multi-doc)
+                    while oi < list.len(bufs_path)
+                        let opath = bufs_path[oi]
+                        if ends_with_nv(opath)
+                            let otext = if oi == cur_buf then buf_text(ed) else bufs_text[oi]
+                            lsp_send(lsp_in, lsp_didopen("file://" + opath, otext))
+                            bufs_lspopen = set_bool_at(bufs_lspopen, oi, true)
+                        oi = oi + 1
+                    lsp_lasttext = buf_text(ed)
                 elif lsp_is_diag(msg)
-                    diag_li = lsp_collect_diag_ints(msg)
-                    diag_msgs = lsp_collect_diag_msgs(msg)
-                    changed = true
+                    // route diagnostics to the buffer they belong to (by URI);
+                    // only the active buffer's update the live display.
+                    let dpath = uri_to_path(lsp_diag_uri(msg))
+                    let dbi = buf_index_of(bufs_path, dpath)
+                    if dbi >= 0
+                        let dli = lsp_collect_diag_ints(msg)
+                        let dmsgs = lsp_collect_diag_msgs(msg)
+                        bufs_diag = set_str_at(bufs_diag, dbi, diag_ser(dli, dmsgs))
+                        if dbi == cur_buf
+                            diag_li = dli
+                            diag_msgs = dmsgs
+                            changed = true
         if changed
             top = scroll_to(top, ed.cy, rows - 1)
             left = hscroll_for(left, ed, opts, cols)
@@ -5267,6 +5353,23 @@ fn lsp_collect_diag_msgs(msg: Str) -> [Str]
     match json.parse(msg)
         None => []
         Some(doc) => lsp_cm_doc(doc)
+
+// The `params.uri` of a publishDiagnostics notification (which document the
+// diagnostics belong to) — routes diagnostics to the right buffer when several
+// documents are open at once.  One helper per nesting level (value-returning
+// arms; no bare-unit None before a Some block; no `return f(payload)`).
+fn lsp_du_params(params: JsonValueH) -> Str
+    json.get_str(params, "uri") ?? ""
+
+fn lsp_du_doc(doc: JsonValueH) -> Str
+    match json.get(doc, "params")
+        None => ""
+        Some(params) => lsp_du_params(params)
+
+fn lsp_diag_uri(msg: Str) -> Str
+    match json.parse(msg)
+        None => ""
+        Some(doc) => lsp_du_doc(doc)
 
 // Highest severity (1 = error wins over 2 = warning) on buffer line `line`,
 // or 0 when the line is clean.  `diag_li` is the flat line/sev store.
@@ -5684,6 +5787,15 @@ fn remove_at_str(xs: [Str], idx: Int) -> [Str]
 
 fn remove_at_int(xs: [Int], idx: Int) -> [Int]
     var out: [Int] = []
+    var i = 0
+    while i < list.len(xs)
+        if i != idx
+            out = list.push(out, xs[i])
+        i = i + 1
+    out
+
+fn remove_at_bool(xs: [Bool], idx: Int) -> [Bool]
+    var out: [Bool] = []
     var i = 0
     while i < list.len(xs)
         if i != idx
