@@ -3263,10 +3263,12 @@ fn set_int_at(xs: [Int], idx: Int, v: Int) -> [Int]
 fn edit_new() -> EditState
     EditState { last: "", cur: "", snaptxt: "", active: false, snaped: snap_empty(), undos: snaps_empty(), redos: snaps_empty(), regs: regs_empty(), reglw: reglw_empty(), rreg: 0, awaitreg: false, marky: marks_empty(), markx: marks_empty(), awaitmark: 0, recording: 0, macrobuf: "", awaitmac: 0, lastmacro: 0, lvy: 0 - 1, lvx: 0 - 1, lvey: 0 - 1, lvex: 0 - 1, lvmode: 0, findc: 0, findt: 0, giy: 0 - 1, gix: 0 - 1 }
 
-// A fresh EditState seeded with a buffer's restored undo/redo history (used on
-// buffer switch so each buffer keeps its own `u` / Ctrl-R stacks).
-fn edit_new_undo(undos: [Snapshot], redos: [Snapshot]) -> EditState
-    EditState { last: "", cur: "", snaptxt: "", active: false, snaped: snap_empty(), undos: undos, redos: redos, regs: regs_empty(), reglw: reglw_empty(), rreg: 0, awaitreg: false, marky: marks_empty(), markx: marks_empty(), awaitmark: 0, recording: 0, macrobuf: "", awaitmac: 0, lastmacro: 0, lvy: 0 - 1, lvx: 0 - 1, lvey: 0 - 1, lvex: 0 - 1, lvmode: 0, findc: 0, findt: 0, giy: 0 - 1, gix: 0 - 1 }
+// A fresh EditState seeded with a buffer's restored undo/redo history plus the
+// session-global registers (used on buffer switch so each buffer keeps its own
+// `u` / Ctrl-R stacks while yanks/macros remain shared — registers are global
+// in vim).  Marks reset (vim marks a-z are per-buffer; deferred).
+fn edit_new_undo(undos: [Snapshot], redos: [Snapshot], regs: [Str], reglw: [Bool]) -> EditState
+    EditState { last: "", cur: "", snaptxt: "", active: false, snaped: snap_empty(), undos: undos, redos: redos, regs: regs, reglw: reglw, rreg: 0, awaitreg: false, marky: marks_empty(), markx: marks_empty(), awaitmark: 0, recording: 0, macrobuf: "", awaitmac: 0, lastmacro: 0, lvy: 0 - 1, lvx: 0 - 1, lvey: 0 - 1, lvex: 0 - 1, lvmode: 0, findc: 0, findt: 0, giy: 0 - 1, gix: 0 - 1 }
 
 // Push a manual undo snapshot (for buffer-changing Ex commands like :s, which
 // run in the driver outside the feed/feed_edit recording path) and clear redo.
@@ -4711,10 +4713,13 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 top = bufs_top[idx]
                 left = bufs_left[idx]
                 disk_text = if creating then buf_text(ed) else bufs_disk[idx]
-                // restore the target buffer's own undo/redo history
+                // restore the target buffer's own undo/redo history; carry the
+                // registers forward (global) but reset marks/dot/macros
                 let usaved = bufs_undo[idx]
                 let rsaved = bufs_redo[idx]
-                es = edit_new_undo(snaps_de(usaved), snaps_de(rsaved))
+                let gregs = es.regs
+                let greglw = es.reglw
+                es = edit_new_undo(snaps_de(usaved), snaps_de(rsaved), gregs, greglw)
                 diag_li = []
                 diag_msgs = []
                 lsp_uri = "file://" + curpath
