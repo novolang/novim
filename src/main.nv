@@ -2437,6 +2437,16 @@ fn pad_num(n: Int, width: Int) -> Str
         s = " " + s
     s
 
+// Left-justify a number in `width` columns (pad spaces on the right).  Used
+// for the active line number in hybrid number+relativenumber mode, where
+// neovim pins the cursor line's absolute number flush-left — most-significant
+// digit fixed at the gutter's left edge, extending rightward.
+fn pad_num_l(n: Int, width: Int) -> Str
+    var s = str.from_int(n)
+    while str.len(s) < width
+        s = s + " "
+    s
+
 // Decimal digit count of a non-negative Int (min 1).
 fn num_digits(n: Int) -> Int
     var v = if n < 0 then 0 - n else n
@@ -3894,23 +3904,30 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode
                         // or yellow (warning) — a zero-width gutter sign.
                         let dsev = diag_sev_for_line(diag_li, li)
                         let iscur = li == ed.cy        // the active line gets a bold number
+                        // In hybrid number+relativenumber the active line shows
+                        // its absolute number flush-LEFT (neovim style); every
+                        // other line stays right-aligned.
+                        let numtxt = if iscur and opts.relativenumber and opts.number
+                            pad_num_l(gnum, numw)
+                        else
+                            pad_num(gnum, numw)
                         if dsev == 1
                             sgr(if iscur then "1;38;5;9" else "38;5;9")
-                            emit(pad_num(gnum, numw))
+                            emit(numtxt)
                             sgr("0")
                             emit(" ")
                         elif dsev >= 2
                             sgr(if iscur then "1;38;5;11" else "38;5;11")
-                            emit(pad_num(gnum, numw))
+                            emit(numtxt)
                             sgr("0")
                             emit(" ")
                         elif iscur
                             sgr("1;38;5;15")           // active line number — bold bright white
-                            emit(pad_num(gnum, numw))
+                            emit(numtxt)
                             sgr("0")
                             emit(" ")
                         else
-                            emit(pad_num(gnum, numw) + " ")
+                            emit(numtxt + " ")
                     else
                         emit(nspaces(numw + 1))   // blank gutter on continuation rows
                 let segleft = if opts.wrap then seg * width else left
