@@ -2016,6 +2016,22 @@ fn is_reload(cmd: Str) -> Bool
     let c = str.trim(cmd)
     c == "e" or c == "e!" or c == "edit" or c == "edit!"
 
+// The argument after the first space of an Ex command, trimmed.
+fn cmd_arg(cmd: Str) -> Str
+    let c = str.trim(cmd)
+    let sp = index_of_byte(c, 0x20)
+    if sp < 0 then "" else str.trim(str.slice(c, sp + 1, str.len(c)))
+
+// `:bufdo <subcmd>` — run a substitution across every buffer (v1: `:s`/`:%s`).
+fn is_bufdo(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    str.len(c) > 6 and str.slice(c, 0, 6) == "bufdo "
+
+// `:badd <file>` — add a buffer without switching to it.
+fn is_badd(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    str.len(c) > 5 and str.slice(c, 0, 5) == "badd "
+
 // Buffer-list commands: `:ls`/`:buffers`, `:bn`/`:bnext`, `:bp`/`:bprev`.
 fn is_bufcmd(cmd: Str) -> Bool
     let c = str.trim(cmd)
@@ -2082,6 +2098,20 @@ fn write_all_bufs(paths: [Str], texts: [Str], disks: [Str], cur: Int, ed: Editor
                 wrote = wrote + 1
         i = i + 1
     wrote
+
+// Apply a `:s`/`:%s` substitution to newline-joined buffer text (for `:bufdo`
+// over a stored, non-active buffer).  Editor construction stays in this shallow
+// helper to keep the struct-after-call shape out of the deep dispatch nesting.
+fn sub_text(text: Str, sub: Str) -> Str
+    let plines = str.split_lines(text)
+    let bed = ex_substitute(Editor { lines: plines, cy: 0, cx: 0 }, sub)
+    buf_text(bed)
+
+// Append a whole-buffer undo record (pre-change text) to a serialized undo
+// stack — lets `:bufdo` edits on stored buffers stay undoable after a switch.
+fn undo_push_text(serial_undo: Str, pretext: Str) -> Str
+    let plines = str.split_lines(pretext)
+    serial_undo + snap_ser(Snapshot { lines: plines, cy: 0, cx: 0 })
 
 // Mark every buffer clean (saved-text := current-text) after a write-all.
 fn mark_all_saved(texts: [Str], disks: [Str]) -> [Str]
@@ -4485,6 +4515,47 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                 want_y = 0 - 1            // restore the buffer's saved cursor
                                 want_x = 0
                                 lsp_info = str.from_char(34) + tgt + str.from_char(34)
+                        elif is_bufdo(cmd_buf)            // :bufdo <subcmd> — substitute across all buffers
+                            let sub = cmd_arg(cmd_buf)
+                            if not is_substitute(sub)
+                                lsp_info = "bufdo: only :s/:%s supported"
+                            else
+                                es = edit_push_undo(es, ed)   // active buffer
+                                ed = ex_substitute(ed, sub)
+                                var bi = 0                     // stored buffers
+                                while bi < list.len(bufs_text)
+                                    if bi != cur_buf
+                                        let pre = bufs_text[bi]
+                                        let nt = sub_text(pre, sub)
+                                        if nt != pre
+                                            bufs_undo = set_str_at(bufs_undo, bi, undo_push_text(bufs_undo[bi], pre))
+                                            bufs_redo = set_str_at(bufs_redo, bi, "")
+                                            bufs_text = set_str_at(bufs_text, bi, nt)
+                                    bi = bi + 1
+                                if lsp_phase == 2
+                                    lsp_lasttext = buf_text(ed)
+                                    lsp_ver = lsp_ver + 1
+                                    lsp_send(lsp_in, lsp_didchange(lsp_uri, lsp_ver, lsp_lasttext))
+                                lsp_info = "bufdo: " + str.from_int(list.len(bufs_text)) + " buffers"
+                        elif is_badd(cmd_buf)            // :badd <file> — add buffer without switching
+                            let tgt = cmd_arg(cmd_buf)
+                            if str.len(tgt) == 0
+                                lsp_info = "badd: usage :badd <file>"
+                            elif buf_index_of(bufs_path, tgt) >= 0
+                                lsp_info = "already open: " + basename_of(tgt)
+                            else
+                                bufs_text = list.push(bufs_text, file_to_text(tgt))
+                                bufs_path = list.push(bufs_path, tgt)
+                                bufs_cy = list.push(bufs_cy, 0)
+                                bufs_cx = list.push(bufs_cx, 0)
+                                bufs_top = list.push(bufs_top, 0)
+                                bufs_left = list.push(bufs_left, 0)
+                                bufs_disk = list.push(bufs_disk, file_to_text(tgt))
+                                bufs_undo = list.push(bufs_undo, "")
+                                bufs_redo = list.push(bufs_redo, "")
+                                bufs_marky = list.push(bufs_marky, "")
+                                bufs_markx = list.push(bufs_markx, "")
+                                lsp_info = "added " + basename_of(tgt) + "; " + str.from_int(list.len(bufs_path)) + " buffers"
                         elif is_bufcmd(cmd_buf)
                             let nb = list.len(bufs_path)
                             let bk = bufcmd_kind(cmd_buf)
