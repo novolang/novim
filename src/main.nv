@@ -3127,6 +3127,59 @@ fn snap_empty() -> Snapshot
 fn snap_of(ed: Editor) -> Snapshot
     Snapshot { lines: ed.lines, cy: ed.cy, cx: ed.cx }
 
+// ── per-buffer undo: serialize a snapshot stack to a flat Str ────────────
+// Buffers keep their own undo/redo history across `:bn`/`:e`/etc.  Each
+// buffer's stacks are stashed as serialized strings in parallel `[Str]`
+// arrays (the same proven-safe storage shape as `bufs_text`) rather than a
+// `[[Snapshot]]` — nested list-of-lists has miscompiled in this file before.
+
+// Offset of the first byte `b` at or after `from`, or -1.
+fn index_of_byte_from(s: Str, b: Int, from: Int) -> Int
+    let n = str.len(s)
+    var i = from
+    while i < n
+        if (str.byte_at(s, i) ?? 0) == b
+            return i
+        i = i + 1
+    0 - 1
+
+// Serialize one snapshot as "cy,cx,LEN:TEXT" (TEXT = lines joined by \n; the
+// LEN prefix makes each record self-delimiting whatever TEXT contains).
+fn snap_ser(s: Snapshot) -> Str
+    let text = str.join(str.from_char(10), s.lines)
+    str.from_int(s.cy) + "," + str.from_int(s.cx) + "," + str.from_int(str.len(text)) + ":" + text
+
+// Serialize a snapshot stack as the concatenation of its records.
+fn snaps_ser(ss: [Snapshot]) -> Str
+    var out = ""
+    var i = 0
+    while i < list.len(ss)
+        out = out + snap_ser(ss[i])
+        i = i + 1
+    out
+
+// Parse a snapshot stack back from snaps_ser's output.
+fn snaps_de(s: Str) -> [Snapshot]
+    var out = snaps_empty()
+    let n = str.len(s)
+    var p = 0
+    while p < n
+        let c1 = index_of_byte_from(s, 0x2C, p)         // ','
+        let c2 = index_of_byte_from(s, 0x2C, c1 + 1)    // ','
+        let c3 = index_of_byte_from(s, 0x3A, c2 + 1)    // ':'
+        if c1 < 0 or c2 < 0 or c3 < 0
+            return out
+        let cy = str.to_int(str.slice(s, p, c1)) ?? 0
+        let cx = str.to_int(str.slice(s, c1 + 1, c2)) ?? 0
+        let ln = str.to_int(str.slice(s, c2 + 1, c3)) ?? 0
+        let tstart = c3 + 1
+        let text = str.slice(s, tstart, tstart + ln)
+        let lns = str.split_lines(text)
+        let lines = if list.len(lns) == 0 then [""] else lns
+        out = list.append(out, [Snapshot { lines: lines, cy: cy, cx: cx }])
+        p = tstart + ln
+    out
+
 // 37 register slots: 0-25 = named a-z, 26-35 = numbered "0-"9 ("0 yank, "1-"9
 // delete ring), 36 = "- (small charwise-delete register).
 fn regs_empty() -> [Str]
@@ -3209,6 +3262,11 @@ fn set_int_at(xs: [Int], idx: Int, v: Int) -> [Int]
 
 fn edit_new() -> EditState
     EditState { last: "", cur: "", snaptxt: "", active: false, snaped: snap_empty(), undos: snaps_empty(), redos: snaps_empty(), regs: regs_empty(), reglw: reglw_empty(), rreg: 0, awaitreg: false, marky: marks_empty(), markx: marks_empty(), awaitmark: 0, recording: 0, macrobuf: "", awaitmac: 0, lastmacro: 0, lvy: 0 - 1, lvx: 0 - 1, lvey: 0 - 1, lvex: 0 - 1, lvmode: 0, findc: 0, findt: 0, giy: 0 - 1, gix: 0 - 1 }
+
+// A fresh EditState seeded with a buffer's restored undo/redo history (used on
+// buffer switch so each buffer keeps its own `u` / Ctrl-R stacks).
+fn edit_new_undo(undos: [Snapshot], redos: [Snapshot]) -> EditState
+    EditState { last: "", cur: "", snaptxt: "", active: false, snaped: snap_empty(), undos: undos, redos: redos, regs: regs_empty(), reglw: reglw_empty(), rreg: 0, awaitreg: false, marky: marks_empty(), markx: marks_empty(), awaitmark: 0, recording: 0, macrobuf: "", awaitmac: 0, lastmacro: 0, lvy: 0 - 1, lvx: 0 - 1, lvey: 0 - 1, lvex: 0 - 1, lvmode: 0, findc: 0, findt: 0, giy: 0 - 1, gix: 0 - 1 }
 
 // Push a manual undo snapshot (for buffer-changing Ex commands like :s, which
 // run in the driver outside the feed/feed_edit recording path) and clear redo.
@@ -4202,6 +4260,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var bufs_top: [Int] = [0]
     var bufs_left: [Int] = [0]
     var bufs_disk: [Str] = [disk_text]
+    var bufs_undo: [Str] = [""]      // per-buffer serialized undo stack
+    var bufs_redo: [Str] = [""]      // per-buffer serialized redo stack
     var cur_buf = 0
     // Extra command-line files (`novim a b c`) become additional buffers.  They
     // arrive newline-joined in `extra` (a Str — passing a `[Str]` parameter to
@@ -4219,6 +4279,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
             bufs_top = list.push(bufs_top, 0)
             bufs_left = list.push(bufs_left, 0)
             bufs_disk = list.push(bufs_disk, eft)
+            bufs_undo = list.push(bufs_undo, "")
+            bufs_redo = list.push(bufs_redo, "")
         efi = efi + 1
     // Deferred buffer switch: `:e`/`:bn`/`:bp`/cross-file gd / cross-file
     // Ctrl-O all set `want_path` (+ target cursor, or `want_y < 0` to restore the
@@ -4625,15 +4687,19 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 bufs_top = list.push(bufs_top, 0)
                 bufs_left = list.push(bufs_left, 0)
                 bufs_disk = list.push(bufs_disk, "")
+                bufs_undo = list.push(bufs_undo, "")
+                bufs_redo = list.push(bufs_redo, "")
                 idx = list.len(bufs_path) - 1
             if idx != cur_buf
-                // save the buffer we're leaving
+                // save the buffer we're leaving (incl. its undo/redo history)
                 bufs_text = set_str_at(bufs_text, cur_buf, buf_text(ed))
                 bufs_cy = set_int_at(bufs_cy, cur_buf, ed.cy)
                 bufs_cx = set_int_at(bufs_cx, cur_buf, ed.cx)
                 bufs_top = set_int_at(bufs_top, cur_buf, top)
                 bufs_left = set_int_at(bufs_left, cur_buf, left)
                 bufs_disk = set_str_at(bufs_disk, cur_buf, disk_text)
+                bufs_undo = set_str_at(bufs_undo, cur_buf, snaps_ser(es.undos))
+                bufs_redo = set_str_at(bufs_redo, cur_buf, snaps_ser(es.redos))
                 if lsp_phase == 2              // close the document we're leaving
                     lsp_send(lsp_in, lsp_didclose(lsp_uri))
                 cur_buf = idx
@@ -4645,7 +4711,10 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 top = bufs_top[idx]
                 left = bufs_left[idx]
                 disk_text = if creating then buf_text(ed) else bufs_disk[idx]
-                es = edit_new()
+                // restore the target buffer's own undo/redo history
+                let usaved = bufs_undo[idx]
+                let rsaved = bufs_redo[idx]
+                es = edit_new_undo(snaps_de(usaved), snaps_de(rsaved))
                 diag_li = []
                 diag_msgs = []
                 lsp_uri = "file://" + curpath
@@ -4675,6 +4744,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 bufs_top = remove_at_int(bufs_top, ci)
                 bufs_left = remove_at_int(bufs_left, ci)
                 bufs_disk = remove_at_str(bufs_disk, ci)
+                bufs_undo = remove_at_str(bufs_undo, ci)
+                bufs_redo = remove_at_str(bufs_redo, ci)
                 if ci < cur_buf
                     cur_buf = cur_buf - 1
                 lsp_info = "closed; " + str.from_int(list.len(bufs_path)) + " left"
