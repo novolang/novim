@@ -4194,6 +4194,8 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                             else
                                 lsp_info = "no definition found"
                     else                              // not `gd` — replay g + this byte
+                        let jy = ed.cy
+                        let jx = ed.cx
                         let g1 = feed_edit(ed, st, km, es, 0x67)
                         ed = g1.ed
                         st = g1.st
@@ -4202,6 +4204,9 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                         ed = g2.ed
                         st = g2.st
                         es = g2.es
+                        if b == 0x67 and ed.cy != jy   // gg moved — record the jump
+                            jback = list.push(list.push(jback, jy), jx)
+                            jfwd = []
                 elif lsp_phase == 2 and scroll_idle(st, es) and key_free(km, 0x67) and b == 0x67   // 'g' — await d (gd)
                     gpend = true
                 elif lsp_phase == 2 and scroll_idle(st, es) and key_free(km, 0x4B) and b == 0x4B   // K — hover
@@ -4298,10 +4303,16 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                 else
                     if comp_active                   // any other key commits the candidate
                         comp_active = false
+                    let jy = ed.cy                    // record G/gg/n/N/{/}/%/*/# jumps
+                    let jx = ed.cx
+                    let wasjump = is_jump_key(st, b)
                     let estep = feed_edit(ed, st, km, es, b)
                     ed = estep.ed
                     st = estep.st
                     es = estep.es
+                    if wasjump and ed.cy != jy
+                        jback = list.push(list.push(jback, jy), jx)
+                        jfwd = []
             changed = true
         // Live document sync, TIME-debounced: mark the buffer dirty on any
         // input, and only send `didChange` after typing pauses (~150 ms of idle
@@ -4990,6 +5001,19 @@ fn ident_start_before(line: Str, col: Int) -> Int
     while s > 0 and nv_ident_char(str.byte_at(line, s - 1) ?? 0)
         s = s - 1
     s
+
+// True when feeding `b` in the current state is a "jump" command (G, gg, n, N,
+// {, }, %, *, #) — whose origin the driver records in the jumplist if the
+// cursor actually moves.  These run inside the pure feed_edit, so the driver
+// snapshots around the call rather than recording from within.
+fn is_jump_key(st: InputState, b: Int) -> Bool
+    if st.mode != 0
+        return false
+    if st.pending == 1
+        return b == 0x67                                 // gg (second g)
+    if st.pending == 0
+        return b == 0x47 or b == 0x6E or b == 0x4E or b == 0x7B or b == 0x7D or b == 0x25 or b == 0x2A or b == 0x23
+    false
 
 // Drop the last two Ints (one packed [y, x] jumplist entry).
 fn drop_last2(xs: [Int]) -> [Int]
