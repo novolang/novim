@@ -867,9 +867,11 @@ fn para_bwd(ed: Editor, count: Int) -> Int
         c = c + 1
     cy
 
-// Resolve a motion byte to an operator target relative to the cursor.
-// `rawcount` is 0 when no count was typed; per-step motions default it to 1,
-// but `G` needs the raw value (no count → last line, not line 1).
+@intent("""Resolve a motion byte to an operator target (the range an operator
+like d/c/y should act over) relative to the cursor, with charwise/linewise and
+inclusive/exclusive flags set per vim's motion table.  `rawcount` is 0 when no
+count was typed; most motions default it to 1, but `G` needs the raw value (no
+count → last line, not line 1).""")
 fn motion_target(ed: Editor, b: Int, rawcount: Int) -> MTarget
     let count = if rawcount > 0 then rawcount else 1
     let line = line_at(ed, ed.cy)
@@ -919,7 +921,10 @@ fn motion_target(ed: Editor, b: Int, rawcount: Int) -> MTarget
 fn ist_reg_cw(st: InputState, text: Str, ins: Bool) -> InputState
     InputState { count: 0, pending: 0, mode: if ins then 1 else 0, reg: text, reg_lw: false, search: st.search, avy: st.avy, avx: st.avx }
 
-// Apply operator `opb` (d/c/y) over a LINEWISE range [cur, ty].
+@intent("""Apply operator `opb` (d/c/y) over the LINEWISE range between the
+cursor line and `ty`.  Yank loads the linewise register and parks the cursor at
+the range top; delete removes the lines; change removes them, leaves one blank
+line, and enters Insert.  The buffer always keeps at least one line.""")
 fn apply_linewise_op(ed: Editor, st: InputState, opb: Int, ty: Int) -> Step
     let total = list.len(ed.lines)
     var lo = if ed.cy < ty then ed.cy else ty
@@ -955,7 +960,10 @@ fn apply_linewise_op(ed: Editor, st: InputState, opb: Int, ty: Int) -> Step
     let ins = opb == 0x63
     Step { ed: clamp_insert(Editor { lines: ls, cy: ncy, cx: 0 }), st: InputState { count: 0, pending: 0, mode: if ins then 1 else 0, reg: payload, reg_lw: true, search: st.search, avy: st.avy, avx: st.avx } }
 
-// Apply operator `opb` over a resolved motion target.
+@intent("""Apply operator `opb` (d/c/y) over a resolved motion target,
+dispatching to the linewise path or the charwise path per the target's flags
+and honouring inclusive/exclusive end handling.  A target with `ok == false` is
+a no-op that just ends the command.""")
 fn apply_motion_op(ed: Editor, st: InputState, opb: Int, tgt: MTarget) -> Step
     if not tgt.ok
         return Step { ed: ed, st: ist_done(st) }
@@ -1514,7 +1522,10 @@ fn visual_set_textobj(ed: Editor, st: InputState, obj: Int, around: Bool) -> Ste
         return Step { ed: clamp(Editor { lines: ed.lines, cy: to.vr.ey, cx: to.vr.ex }), st: InputState { count: 0, pending: 0, mode: st.mode, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: to.vr.sy, avx: to.vr.sx } }
     Step { ed: ed, st: ist_visual_keep(st, st.mode) }
 
-// Handle one byte in Visual mode (mode 2 = charwise, 3 = linewise).
+@intent("""Handle one byte in Visual mode (mode 2 = charwise, 3 = linewise):
+motions extend the selection from its fixed anchor, operators (d/x/y/c/>/</~/u/U/J/p)
+act on the selection and return to Normal, and text-object keys reshape the
+selection.""")
 fn feed_visual(ed: Editor, st: InputState, b: Int) -> Step
     let cntp = if st.count > 0 then st.count else 1
     // Pending multi-key motions (extend the selection, stay visual).
@@ -1591,7 +1602,9 @@ fn feed_visual(ed: Editor, st: InputState, b: Int) -> Step
     // Single-byte motion: move the cursor, stay in visual mode (anchor fixed).
     Step { ed: visual_motion(ed, b, cntp), st: ist_visual_keep(st, st.mode) }
 
-// Handle one byte while in Insert mode.
+@intent("""Handle one byte in Insert mode: Esc returns to Normal (stepping the
+cursor left, vim-style), Enter splits the line, Backspace deletes back, and
+printables (plus tab) insert at the cursor.  Other control bytes are ignored.""")
 fn feed_insert(ed: Editor, st: InputState, b: Int) -> Step
     if b == 27                         // Esc → Normal (cursor steps left, vim)
         let e = clamp(Editor { lines: ed.lines, cy: ed.cy, cx: ed.cx - 1 })
@@ -1612,8 +1625,9 @@ fn overtype_char(ed: Editor, b: Int) -> Editor
     let newline = if ed.cx < n then str.slice(line, 0, ed.cx) + str.from_char(b) + str.slice(line, ed.cx + 1, n) else line + str.from_char(b)
     clamp_insert(Editor { lines: set_line(ed.lines, ed.cy, newline), cy: ed.cy, cx: ed.cx + 1 })
 
-// Handle one byte in Replace mode (`R`): printables overwrite instead of
-// insert.  Backspace just steps left (no original-char restore in v1).
+@intent("""Handle one byte in Replace mode (`R`): printables overwrite the char
+at the cursor instead of inserting.  Backspace just steps left (it does not
+restore the overwritten character).""")
 fn feed_replace(ed: Editor, st: InputState, b: Int) -> Step
     if b == 27                         // Esc → Normal (cursor steps left)
         return Step { ed: clamp(Editor { lines: ed.lines, cy: ed.cy, cx: ed.cx - 1 }), st: ist_done(st) }
@@ -1625,9 +1639,12 @@ fn feed_replace(ed: Editor, st: InputState, b: Int) -> Step
         return Step { ed: overtype_char(ed, b), st: st }
     Step { ed: ed, st: st }
 
-// Feed one byte through the Normal-mode handler, threading InputState.
-// Counts (`5j`, `10G`), line motions (`0 $ ^`), and buffer motions
-// (`gg G`) join the basic `h j k l`.
+@intent("""The pure input core: fold one input byte into (editor, input-state).
+Dispatches by mode — Insert/Visual/Replace delegate to their handlers; Normal
+mode resolves counts (`5j`, `10G`), motions, operators, and pending multi-key
+commands.  No I/O: the driver owns the buffer, registers, undo, and the screen;
+`feed` only transforms editor + input state so it stays deterministic and
+testable.""")
 fn feed(ed: Editor, st: InputState, b: Int) -> Step
     // Insert mode owns every byte until Esc.
     if st.mode == 1
@@ -1870,8 +1887,10 @@ struct ExResult
     quit: Bool
     save: Bool
 
-// Parse the text after `:` into quit/save signals.  `w` save, `q`/`q!`
-// quit, `wq`/`x` save+quit; anything else is ignored.
+@intent("""Parse the text after `:` into quit/save signals: `w` save, `q`/`q!`
+quit, `wq`/`x` save+quit.  Returns an ExResult the driver acts on; commands it
+doesn't recognise are ignored here (richer Ex commands are dispatched before
+this fallback).""")
 fn exec_ex(cmd: Str) -> ExResult
     let c = str.trim(cmd)
     if c == "w"
@@ -1925,7 +1944,10 @@ fn replace_in_line(line: Str, pat: Str, repl: Str, global: Bool) -> Str
             i = i + 1
     out
 
-// Apply a `:s` / `:%s` substitute, returning the new editor.
+@intent("""Apply a `:s` / `:%s` substitution and return the new editor.  Honours
+the leading `%` (whole buffer vs current line), any delimiter, and the `g`
+(global-in-line) flag; the pattern is a vim-magic-subset regex and the
+replacement supports `&` (whole match) and `\\1`-`\\9` backrefs.""")
 fn ex_substitute(ed: Editor, cmd: Str) -> Editor
     let c = str.trim(cmd)
     let alllines = (str.byte_at(c, 0) ?? 0) == 0x25
@@ -2214,6 +2236,9 @@ fn is_global(cmd: Str) -> Bool
     else
         false
 
+@intent("""Apply a `:g/pat/d` family command: delete every line matching `pat`
+(`:g!`/`:v` invert to delete non-matching lines).  The pattern is the same
+vim-magic-subset regex used by search and `:s`.""")
 fn ex_global(ed: Editor, cmd: Str) -> Editor
     let c = str.trim(cmd)
     let c0 = str.byte_at(c, 0) ?? 0
@@ -3049,8 +3074,9 @@ fn find_next(ed: Editor, pattern: Str, forward: Bool) -> Editor
 // Decodes `\e`=Esc, `\n`/`\r`=Enter, `\t`=Tab, `\b`=Backspace,
 // `\\`=backslash so test sequences embed control keys in ASCII
 // (e.g. `iHello\e`, `:w\n`).  `:` opens the Ex command line.
-// Feed one already-decoded Normal-mode byte through `feed`, expanding a
-// keymap remap (in Normal mode) into its sequence first.  Threads ed+st.
+@intent("""Feed one already-decoded byte through `feed`, first expanding any
+Normal-mode keymap remap of `b` into its byte sequence (replayed through `feed`
+so remapped sequences behave exactly like typed ones).""")
 fn feed_mapped(ed: Editor, st: InputState, km: Keymap, b: Int) -> Step
     let seq = if st.mode == 0 then keymap_lookup(km, b) else ""
     if str.len(seq) == 0
@@ -3692,6 +3718,10 @@ fn macro_replay(ed: Editor, st: InputState, km: Keymap, es: EditState, b: Int) -
         j = j + 1
     EditStep { ed: e, st: s, es: ess }
 
+@intent("""The driver-facing edit entry point: wraps feed_edit_core with macro
+recording/replay (`q<reg>…q`, `@<reg>`) and remembers the last f/F/t/T target
+for `;`/`,`.  Returns an EditStep carrying the new editor, input state, and the
+session EditState (registers, marks, undo/redo, dot, macros).""")
 fn feed_edit(ed: Editor, st: InputState, km: Keymap, es: EditState, b: Int) -> EditStep
     if es.awaitmac == 1                                         // byte after q — register
         return EditStep { ed: ed, st: st, es: macro_start(es, b) }
@@ -3734,6 +3764,10 @@ fn feed_edit(ed: Editor, st: InputState, km: Keymap, es: EditState, b: Int) -> E
         return EditStep { ed: result4.ed, st: result4.st, es: macro_capture(result4.es, b) }
     result4
 
+@intent("""`--batch <keys> <file>` entry point: load the file, feed each decoded
+key through the same edit pipeline as interactive mode (no TUI, no LSP), and
+print the resulting buffer + cursor.  Deterministic — the test harness drives
+editor behaviour through this path.""")
 fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
     var ed = Editor { lines: buf_load(path), cy: 0, cx: 0 }
     var st = ist_new()
@@ -4071,6 +4105,13 @@ fn ends_with_nv(p: Str) -> Bool
     let n = str.len(p)
     n >= 3 and str.slice(p, n - 3, n) == ".nv"
 
+@intent("""Repaint the whole screen for one frame: the text viewport (scrolled
+to `top`/`left`, optional line-number gutter, tab expansion, Novo syntax
+highlighting, search-match and visual-selection highlighting, per-line
+diagnostic colouring) plus the status line (path, modified flag, cursor
+position, mode, diagnostic counts, and any transient `info` message).  Hides the
+cursor while painting and restores it at the end.  The sole rendering [io]
+sink — all drawing goes through here.""")
 fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool) [io]
     csi()
     emit("?25l")         // hide cursor while we repaint
@@ -4388,6 +4429,15 @@ fn screen_kind(b: Int) -> Int
 fn key_free(km: Keymap, b: Int) -> Bool
     str.len(keymap_lookup(km, b)) == 0
 
+@intent("""The interactive editor driver: set raw mode, load config + the first
+file (plus any `extra` newline-joined files as additional buffers), then loop —
+poll stdin and the language server, fold input bytes through `feed_edit`, run
+the deferred buffer/window switches, debounce `didChange`, route diagnostics by
+URI, and repaint.  Owns ALL session state the pure `feed` must not: the buffer
+list and per-buffer view/undo/marks/diagnostics, registers, the jumplist, the
+LSP connection, and the screen.  `path` is the first file; `extra` carries the
+rest (a Str, not [Str] — a [Str] param here reproducibly corrupted the
+buffer-switch codegen; see the bug filed in features/orbits/novim).""")
 fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     let _ = novo_pty_set_raw_mode_h()
     var curpath = path                   // the open file; `:e` switches it
@@ -5216,7 +5266,9 @@ fn default_config_path() -> Str [io]
 fn lsp_write_fd(fd: Int, s: Str) [io]
     let _ = novo_unix_write_str_h(fd, s)
 
-// Send a JSON-RPC message: `Content-Length: N\r\n\r\n<body>`.
+@intent("""Send one JSON-RPC message to the language server over `fd`, framed
+with the LSP `Content-Length: N\\r\\n\\r\\n<body>` header.  Writes in bulk via
+the host primitive, not byte-by-byte.""")
 fn lsp_send(fd: Int, body: Str) [io]
     let cr = str.from_char(13)
     let lf = str.from_char(10)
@@ -5945,8 +5997,9 @@ fn apply_rename(ed: Editor, triples: [Int], newtexts: [Str]) -> Editor
         k = k - 1
     Editor { lines: lines, cy: ed.cy, cx: ed.cx }
 
-// `--lsp-diag <file>`: spawn novols, open the file, print its diagnostics.
-// Deterministic transport smoke test.
+@intent("""`--lsp-diag <file>` entry point: spawn novols, run the full
+initialize/didOpen handshake, wait for publishDiagnostics, and print them.  A
+deterministic, headless smoke test of the language-server transport (no TUI).""")
 fn run_lsp_diag(path: Str) [io, time]
     // Use the free `proc.*` surface (pid-keyed) rather than the Subprocess
     // methods: the method-return slot-type inference is fragile (an fd binder
@@ -5976,6 +6029,10 @@ fn run_lsp_diag(path: Str) [io, time]
         let _ = proc.kill(pid, 15)
         proc.close(pid)
 
+@intent("""CLI entry point.  Parse argv and dispatch: `--batch <keys> <file>`
+(headless scripted edit), `--lsp-diag <file>` (language-server smoke test),
+`--config <path>` to override the config file, or one-or-more file paths →
+interactive mode (first file active, the rest opened as buffers).""")
 fn main() [io, time]
     let argv = env.args()
     let n = list.len(argv)
