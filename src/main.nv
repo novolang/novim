@@ -2013,12 +2013,23 @@ fn edit_cmd_path(cmd: Str) -> Str
 // Buffer-list commands: `:ls`/`:buffers`, `:bn`/`:bnext`, `:bp`/`:bprev`.
 fn is_bufcmd(cmd: Str) -> Bool
     let c = str.trim(cmd)
-    c == "ls" or c == "buffers" or c == "bn" or c == "bnext" or c == "bp" or c == "bprev" or c == "bprevious" or c == "bd" or c == "bdelete"
+    c == "ls" or c == "buffers" or c == "bn" or c == "bnext" or c == "bp" or c == "bprev" or c == "bprevious" or c == "bd" or c == "bdelete" or c == "bf" or c == "bfirst" or c == "bl" or c == "blast"
 
-// 0 = :ls, 1 = :bn (next), 2 = :bp (prev).
+// 0 = :ls, 1 = :bn (next), 2 = :bp (prev), 3 = :bd (close), 4 = :bfirst, 5 = :blast.
 fn bufcmd_kind(cmd: Str) -> Int
     let c = str.trim(cmd)
-    if c == "bn" or c == "bnext" then 1 elif c == "bp" or c == "bprev" or c == "bprevious" then 2 elif c == "bd" or c == "bdelete" then 3 else 0
+    if c == "bn" or c == "bnext" then 1 elif c == "bp" or c == "bprev" or c == "bprevious" then 2 elif c == "bd" or c == "bdelete" then 3 elif c == "bf" or c == "bfirst" then 4 elif c == "bl" or c == "blast" then 5 else 0
+
+// `:b <n>` / `:buffer <n>` — switch to buffer number <n> (1-based).
+fn is_bgoto(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    (str.len(c) > 2 and str.slice(c, 0, 2) == "b ") or (str.len(c) > 7 and str.slice(c, 0, 7) == "buffer ")
+
+// The 1-based buffer number from `:b <n>`, or -1.
+fn bgoto_target(cmd: Str) -> Int
+    let c = str.trim(cmd)
+    let sp = index_of_byte(c, 0x20)
+    if sp < 0 then 0 - 1 else (str.to_int(str.trim(str.slice(c, sp + 1, str.len(c)))) ?? (0 - 1))
 
 // The basename (last path component) of `p`.
 fn basename_of(p: Str) -> Str
@@ -2032,15 +2043,22 @@ fn basename_of(p: Str) -> Str
     str.slice(p, last, n)
 
 // A one-line buffer list for `:ls`, marking the current with [..].
-fn buf_list_str(paths: [Str], cur: Int) -> Str
-    var s = "buffers:"
-    var i = 0
-    while i < list.len(paths)
-        let nm = basename_of(paths[i])
-        let tag = if i == cur then " [" + str.from_int(i + 1) + " " + nm + "]" else " " + str.from_int(i + 1) + " " + nm
-        s = s + tag
-        i = i + 1
-    s
+// Render the `:ls` buffer-list overlay over the top rows; the current buffer is
+// marked with `>`.  Dismissed by the next keypress (the normal render repaints).
+fn draw_buflist(paths: [Str], cur: Int, rows: Int) [io]
+    var bi = 0
+    let maxn = if rows - 2 > 0 then rows - 2 else 1
+    while bi < list.len(paths) and bi < maxn
+        cup(bi + 1, 1)
+        csi()
+        emit("K")
+        let mark = if bi == cur then "> " else "  "
+        emit(mark + str.from_int(bi + 1) + "  " + basename_of(paths[bi]))
+        bi = bi + 1
+    cup(bi + 1, 1)
+    csi()
+    emit("K")
+    emit("-- :b <n> to switch · any key to dismiss --")
 
 // `:rename <newname>` — rename the symbol under the cursor across the file.
 fn is_rename(cmd: Str) -> Bool
@@ -4039,7 +4057,7 @@ fn screen_kind(b: Int) -> Int
 fn key_free(km: Keymap, b: Int) -> Bool
     str.len(keymap_lookup(km, b)) == 0
 
-fn run_interactive(cfg_path: Str, path: Str) [io, time]
+fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     let _ = novo_pty_set_raw_mode_h()
     var curpath = path                   // the open file; `:e` switches it
     var ed = Editor { lines: buf_load(path), cy: 0, cx: 0 }
@@ -4095,6 +4113,23 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
     var bufs_left: [Int] = [0]
     var bufs_disk: [Str] = [disk_text]
     var cur_buf = 0
+    // Extra command-line files (`novim a b c`) become additional buffers.  They
+    // arrive newline-joined in `extra` (a Str — passing a `[Str]` parameter to
+    // this function reproducibly corrupted the buffer-switch codegen).
+    let extra_files = str.split_lines(extra)
+    var efi = 0
+    while efi < list.len(extra_files)
+        let ef = extra_files[efi]
+        if str.len(ef) > 0
+            let eft = file_to_text(ef)
+            bufs_text = list.push(bufs_text, eft)
+            bufs_path = list.push(bufs_path, ef)
+            bufs_cy = list.push(bufs_cy, 0)
+            bufs_cx = list.push(bufs_cx, 0)
+            bufs_top = list.push(bufs_top, 0)
+            bufs_left = list.push(bufs_left, 0)
+            bufs_disk = list.push(bufs_disk, eft)
+        efi = efi + 1
     // Deferred buffer switch: `:e`/`:bn`/`:bp`/cross-file gd / cross-file
     // Ctrl-O all set `want_path` (+ target cursor, or `want_y < 0` to restore the
     // buffer's saved cursor); one block after the input drain finds-or-creates
@@ -4103,6 +4138,7 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
     var want_y = 0
     var want_x = 0
     var want_close = ""
+    var buflist = false                  // `:ls` — show the buffer-list overlay until the next key
     var lsp_dirty = false                // buffer changed since the last didChange
     var lsp_idle = 0                      // consecutive idle poll cycles (debounce)
     var lsp_phase = 0                    // 0 none · 1 init sent (awaiting result) · 2 ready
@@ -4127,6 +4163,7 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
         var changed = false
         if m % 2 == 1
             lsp_info = ""                 // a transient gd/K message lasts until the next key
+            buflist = false               // the :ls overlay is dismissed by the next key
             var done = false
             while not done
                 let b = novo_pty_stdin_read_byte_h()
@@ -4238,8 +4275,8 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                         elif is_bufcmd(cmd_buf)
                             let nb = list.len(bufs_path)
                             let bk = bufcmd_kind(cmd_buf)
-                            if bk == 0                    // :ls — list the open buffers
-                                lsp_info = buf_list_str(bufs_path, cur_buf)
+                            if bk == 0                    // :ls — show the buffer list overlay
+                                buflist = true
                             elif bk == 3                  // :bd — close current
                                 if nb <= 1
                                     lsp_info = "cannot close the last buffer"
@@ -4249,13 +4286,23 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                                     want_path = bufs_path[surv]
                                     want_y = 0 - 1
                                     want_x = 0
-                            else                          // :bn / :bp — cycle
-                                let tgt2 = if bk == 1 then (cur_buf + 1) % nb else (cur_buf + nb - 1) % nb
+                            else                          // navigation: bn/bp/bfirst/blast
+                                let tgt2 = if bk == 1 then (cur_buf + 1) % nb elif bk == 2 then (cur_buf + nb - 1) % nb elif bk == 4 then 0 else nb - 1
                                 jback = list.push(jback, jentry(curpath, ed.cy, ed.cx))
                                 jfwd = []
                                 want_path = bufs_path[tgt2]
                                 want_y = 0 - 1
                                 want_x = 0
+                        elif is_bgoto(cmd_buf)             // :b <n> / :buffer <n>
+                            let bn2 = bgoto_target(cmd_buf)
+                            if bn2 >= 1 and bn2 <= list.len(bufs_path)
+                                jback = list.push(jback, jentry(curpath, ed.cy, ed.cx))
+                                jfwd = []
+                                want_path = bufs_path[bn2 - 1]
+                                want_y = 0 - 1
+                                want_x = 0
+                            else
+                                lsp_info = "no buffer " + str.from_int(bn2)
                         else
                             let r = exec_ex(cmd_buf)
                             if r.save
@@ -4573,6 +4620,8 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                 csi()
                 emit("K")
                 emit("/" + search_buf)
+            if buflist
+                draw_buflist(bufs_path, cur_buf, rows)
         if novo_pty_winsize_changed_h() == 1
             rows = term_rows()
             cols = term_cols()
@@ -5352,7 +5401,8 @@ fn main() [io, time]
     let n = list.len(argv)
     var is_batch = false
     var batch_keys = ""
-    var file = ""
+    var file = ""                        // first file (the initial buffer)
+    var extra = ""                        // remaining files, newline-joined → extra buffers
     var cfg = ""
     var lsp_diag = false
     let mut i = 1
@@ -5368,15 +5418,18 @@ fn main() [io, time]
         elif a == "--lsp-diag"
             lsp_diag = true
             i = i + 1
-        else
+        elif file == ""
             file = a
+            i = i + 1
+        else
+            extra = if str.len(extra) == 0 then a else extra + str.from_char(10) + a
             i = i + 1
     let cfg_path = if cfg != "" then cfg else default_config_path()
     if file == ""
-        println("usage: novim [--config <toml>] [--batch <keys>] [--lsp-diag] <file>")
+        println("usage: novim [--config <toml>] [--batch <keys>] [--lsp-diag] <file>...")
     elif lsp_diag
         run_lsp_diag(file)
     elif is_batch
         run_batch(batch_keys, cfg_path, file)
     else
-        run_interactive(cfg_path, file)
+        run_interactive(cfg_path, file, extra)
