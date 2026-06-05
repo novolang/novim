@@ -1991,6 +1991,25 @@ fn sym_query(cmd: Str) -> Str
     let c = str.trim(cmd)
     if str.len(c) <= 4 then "" else str.trim(str.slice(c, 4, str.len(c)))
 
+// `:e <file>` / `:edit <file>` (with optional `!` to discard unsaved changes).
+fn is_edit_cmd(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    let h2 = if str.len(c) >= 2 then str.slice(c, 0, 2) else ""
+    let h3 = if str.len(c) >= 3 then str.slice(c, 0, 3) else ""
+    let h5 = if str.len(c) >= 5 then str.slice(c, 0, 5) else ""
+    let h6 = if str.len(c) >= 6 then str.slice(c, 0, 6) else ""
+    h2 == "e " or h3 == "e! " or h5 == "edit " or h6 == "edit! "
+
+fn edit_cmd_bang(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    index_of_byte(c, 0x21) >= 0          // contains '!'
+
+// The path after `:e`/`:edit` (and optional `!`), trimmed.
+fn edit_cmd_path(cmd: Str) -> Str
+    let c = str.trim(cmd)
+    let sp = index_of_byte(c, 0x20)      // first space
+    if sp < 0 then "" else str.trim(str.slice(c, sp + 1, str.len(c)))
+
 // `:rename <newname>` — rename the symbol under the cursor across the file.
 fn is_rename(cmd: Str) -> Bool
     let c = str.trim(cmd)
@@ -3974,7 +3993,9 @@ fn key_free(km: Keymap, b: Int) -> Bool
 
 fn run_interactive(cfg_path: Str, path: Str) [io, time]
     let _ = novo_pty_set_raw_mode_h()
+    var curpath = path                   // the open file; `:e` switches it
     var ed = Editor { lines: buf_load(path), cy: 0, cx: 0 }
+    var disk_text = buf_text(ed)         // last-saved/loaded text, for the :e dirty guard
     var st = ist_new()
     var es = edit_new()
     let km = load_keymaps(cfg_path)
@@ -4028,7 +4049,7 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
             lsp_phase = 1
     clear_screen()       // one-time clear of whatever was on screen before
     left = hscroll_for(left, ed, opts, cols)
-    render(ed, rows, cols, path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, lsp_info)
+    render(ed, rows, cols, curpath, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, lsp_info)
     var running = true
     while running
         // Short stdin poll keeps the editor responsive while leaving slack to
@@ -4134,10 +4155,44 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                                             lsp_ver = lsp_ver + 1
                                             lsp_send(lsp_in, lsp_didchange(lsp_uri, lsp_ver, lsp_lasttext))
                                             lsp_info = "renamed " + str.from_int(list.len(nts)) + " sites"
+                        elif is_edit_cmd(cmd_buf)
+                            let tgt = edit_cmd_path(cmd_buf)
+                            if str.len(tgt) == 0
+                                lsp_info = "edit: usage :e <file>"
+                            elif (not edit_cmd_bang(cmd_buf)) and buf_text(ed) != disk_text
+                                lsp_info = "unsaved changes (:e! to discard)"
+                            else
+                                if lsp_phase == 2          // close the old LSP document
+                                    lsp_send(lsp_in, lsp_didclose(lsp_uri))
+                                ed = clamp(Editor { lines: buf_load(tgt), cy: 0, cx: 0 })
+                                curpath = tgt
+                                disk_text = buf_text(ed)
+                                top = 0
+                                left = 0
+                                es = edit_new()            // fresh undo history
+                                diag_li = []
+                                diag_msgs = []
+                                jback = []
+                                jfwd = []
+                                lsp_uri = "file://" + tgt
+                                if ends_with_nv(tgt)
+                                    if lsp_pid < 0         // no server yet — spawn + init async
+                                        lsp_pid = lsp_spawn()
+                                        if lsp_pid >= 0
+                                            lsp_in = proc.stdin_fd(lsp_pid)
+                                            lsp_out = proc.stdout_fd(lsp_pid)
+                                            lsp_send(lsp_in, lsp_init_req(lsp_uri))
+                                            lsp_phase = 1
+                                    elif lsp_phase == 2    // server ready — open the new document
+                                        lsp_lasttext = buf_text(ed)
+                                        lsp_ver = lsp_ver + 1
+                                        lsp_send(lsp_in, lsp_didopen(lsp_uri, lsp_lasttext))
+                                lsp_info = str.from_char(34) + tgt + str.from_char(34)
                         else
                             let r = exec_ex(cmd_buf)
                             if r.save
-                                save_buf(path, ed.lines)
+                                save_buf(curpath, ed.lines)
+                                disk_text = buf_text(ed)
                             if r.quit
                                 running = false
                                 done = true
@@ -4353,7 +4408,7 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
         if changed
             top = scroll_to(top, ed.cy, rows - 1)
             left = hscroll_for(left, ed, opts, cols)
-            render(ed, rows, cols, path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, lsp_info)
+            render(ed, rows, cols, curpath, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, lsp_info)
             if cmd_mode
                 cup(rows, 1)
                 csi()
@@ -4370,7 +4425,7 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
             top = scroll_to(top, ed.cy, rows - 1)
             left = hscroll_for(left, ed, opts, cols)
             clear_screen()   // dimensions changed — clear stale content once
-            render(ed, rows, cols, path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, lsp_info)
+            render(ed, rows, cols, curpath, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, lsp_info)
     if lsp_pid >= 0                       // tear the language server down
         let _ = proc.kill(lsp_pid, 15)
         proc.close(lsp_pid)
@@ -4503,6 +4558,9 @@ fn lsp_initialized() -> Str
 
 fn lsp_didopen(uri: Str, text: Str) -> Str
     "{" + lsp_q("jsonrpc") + ":" + lsp_q("2.0") + "," + lsp_q("method") + ":" + lsp_q("textDocument/didOpen") + "," + lsp_q("params") + ":{" + lsp_q("textDocument") + ":{" + lsp_q("uri") + ":" + lsp_q(uri) + "," + lsp_q("languageId") + ":" + lsp_q("novo") + "," + lsp_q("version") + ":1," + lsp_q("text") + ":" + lsp_q(json_escape(text)) + "}}}"
+
+fn lsp_didclose(uri: Str) -> Str
+    "{" + lsp_q("jsonrpc") + ":" + lsp_q("2.0") + "," + lsp_q("method") + ":" + lsp_q("textDocument/didClose") + "," + lsp_q("params") + ":{" + lsp_q("textDocument") + ":{" + lsp_q("uri") + ":" + lsp_q(uri) + "}}}"
 
 // Diagnostic's start line (range.start.line), or -1.
 fn lsp_diag_line(d: JsonValueH) -> Int
