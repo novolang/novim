@@ -4029,11 +4029,17 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
     var comp_cands: [Str] = []           // filtered candidate labels
     var comp_idx = 0                     // current candidate
     var comp_start = 0                   // column where the completed prefix begins
-    // Jumplist (browser-style back/forward) for Ctrl-O / Ctrl-I.  Each stack is
-    // flat [y0, x0, y1, x1, …]; a jump pushes the origin onto `jback` and clears
-    // `jfwd`.  Recorded for gd / :sym / :N / search — the driver-level jumps.
-    var jback: [Int] = []
-    var jfwd: [Int] = []
+    // Jumplist (browser-style back/forward) for Ctrl-O / Ctrl-I.  Each stack
+    // holds "y|x|path" entries (file-aware, so a jump across files round-trips);
+    // a jump pushes the origin onto `jback` and clears `jfwd`.
+    var jback: [Str] = []
+    var jfwd: [Str] = []
+    // Deferred file switch: a cross-file jump or `:e` sets `want_open` (+ target
+    // cursor + whether to reset the jumplist); a single block after the input
+    // drain performs the load + LSP didClose/didOpen.
+    var want_open = ""
+    var want_y = 0
+    var want_x = 0
     var lsp_dirty = false                // buffer changed since the last didChange
     var lsp_idle = 0                      // consecutive idle poll cycles (debounce)
     var lsp_phase = 0                    // 0 none · 1 init sent (awaiting result) · 2 ready
@@ -4076,7 +4082,7 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                             es = edit_push_undo(es, ed)
                             ed = ex_global(ed, cmd_buf)
                         elif is_goto(cmd_buf)
-                            jback = list.push(list.push(jback, ed.cy), ed.cx)
+                            jback = list.push(jback, jentry(curpath, ed.cy, ed.cx))
                             jfwd = []
                             ed = ex_goto(ed, cmd_buf)
                         elif is_set(cmd_buf)
@@ -4122,7 +4128,7 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                                             found = si
                                         si = si + 1
                                     if found >= 0 and found * 2 + 1 < list.len(spos)
-                                        jback = list.push(list.push(jback, ed.cy), ed.cx)
+                                        jback = list.push(jback, jentry(curpath, ed.cy, ed.cx))
                                         jfwd = []
                                         ed = clamp(Editor { lines: ed.lines, cy: spos[found * 2], cx: spos[found * 2 + 1] })
                                         lsp_info = "sym: " + snames[found]
@@ -4161,32 +4167,12 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                                 lsp_info = "edit: usage :e <file>"
                             elif (not edit_cmd_bang(cmd_buf)) and buf_text(ed) != disk_text
                                 lsp_info = "unsaved changes (:e! to discard)"
-                            else
-                                if lsp_phase == 2          // close the old LSP document
-                                    lsp_send(lsp_in, lsp_didclose(lsp_uri))
-                                ed = clamp(Editor { lines: buf_load(tgt), cy: 0, cx: 0 })
-                                curpath = tgt
-                                disk_text = buf_text(ed)
-                                top = 0
-                                left = 0
-                                es = edit_new()            // fresh undo history
-                                diag_li = []
-                                diag_msgs = []
-                                jback = []
+                            else                          // record a jump (Ctrl-O returns here) then defer the switch
+                                jback = list.push(jback, jentry(curpath, ed.cy, ed.cx))
                                 jfwd = []
-                                lsp_uri = "file://" + tgt
-                                if ends_with_nv(tgt)
-                                    if lsp_pid < 0         // no server yet — spawn + init async
-                                        lsp_pid = lsp_spawn()
-                                        if lsp_pid >= 0
-                                            lsp_in = proc.stdin_fd(lsp_pid)
-                                            lsp_out = proc.stdout_fd(lsp_pid)
-                                            lsp_send(lsp_in, lsp_init_req(lsp_uri))
-                                            lsp_phase = 1
-                                    elif lsp_phase == 2    // server ready — open the new document
-                                        lsp_lasttext = buf_text(ed)
-                                        lsp_ver = lsp_ver + 1
-                                        lsp_send(lsp_in, lsp_didopen(lsp_uri, lsp_lasttext))
+                                want_open = tgt
+                                want_y = 0
+                                want_x = 0
                                 lsp_info = str.from_char(34) + tgt + str.from_char(34)
                         else
                             let r = exec_ex(cmd_buf)
@@ -4209,7 +4195,7 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                 elif search_mode
                     if b == 13 or b == 10
                         st = ist_set_search(st, search_buf)
-                        jback = list.push(list.push(jback, ed.cy), ed.cx)
+                        jback = list.push(jback, jentry(curpath, ed.cy, ed.cx))
                         jfwd = []
                         ed = find_next(ed, search_buf, not search_back)
                         search_mode = false
@@ -4240,12 +4226,19 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                             if list.len(dpos) >= 2
                                 let duri = lsp_def_uri(resp)
                                 if duri == lsp_uri or duri == ""
-                                    jback = list.push(list.push(jback, ed.cy), ed.cx)
+                                    jback = list.push(jback, jentry(curpath, ed.cy, ed.cx))
                                     jfwd = []
                                     ed = clamp(Editor { lines: ed.lines, cy: dpos[0], cx: dpos[1] })
                                     lsp_info = "definition"
-                                else
-                                    lsp_info = "def: " + duri + ":" + str.from_int(dpos[0] + 1)
+                                elif buf_text(ed) != disk_text     // cross-file def, but unsaved edits here
+                                    lsp_info = "def in " + uri_to_path(duri) + " — :w first"
+                                else                               // cross-file: record + defer the open
+                                    jback = list.push(jback, jentry(curpath, ed.cy, ed.cx))
+                                    jfwd = []
+                                    want_open = uri_to_path(duri)
+                                    want_y = dpos[0]
+                                    want_x = dpos[1]
+                                    lsp_info = "definition"
                             else
                                 lsp_info = "no definition found"
                     else                              // not `gd` — replay g + this byte
@@ -4260,7 +4253,7 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                         st = g2.st
                         es = g2.es
                         if b == 0x67 and ed.cy != jy   // gg moved — record the jump
-                            jback = list.push(list.push(jback, jy), jx)
+                            jback = list.push(jback, jentry(curpath, jy, jx))
                             jfwd = []
                 elif lsp_phase == 2 and scroll_idle(st, es) and key_free(km, 0x67) and b == 0x67   // 'g' — await d (gd)
                     gpend = true
@@ -4298,20 +4291,36 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                     if ncy > top + body - 1
                         ncy = top + body - 1
                     ed = clamp(Editor { lines: ed.lines, cy: ncy, cx: ed.cx })
-                elif scroll_idle(st, es) and key_free(km, b) and b == 0x0F and list.len(jback) >= 2   // Ctrl-O — jump back
-                    let nb = list.len(jback)
-                    let ty = jback[nb - 2]
-                    let tx = jback[nb - 1]
-                    jfwd = list.push(list.push(jfwd, ed.cy), ed.cx)
-                    jback = drop_last2(jback)
-                    ed = clamp(Editor { lines: ed.lines, cy: ty, cx: tx })
-                elif scroll_idle(st, es) and key_free(km, b) and b == 0x09 and list.len(jfwd) >= 2   // Ctrl-I / Tab — jump forward
-                    let nf = list.len(jfwd)
-                    let ty = jfwd[nf - 2]
-                    let tx = jfwd[nf - 1]
-                    jback = list.push(list.push(jback, ed.cy), ed.cx)
-                    jfwd = drop_last2(jfwd)
-                    ed = clamp(Editor { lines: ed.lines, cy: ty, cx: tx })
+                elif scroll_idle(st, es) and key_free(km, b) and b == 0x0F and list.len(jback) >= 1   // Ctrl-O — jump back
+                    let e = jback[list.len(jback) - 1]
+                    let tf = jentry_path(e)
+                    if tf == curpath                       // in-buffer jump
+                        jfwd = list.push(jfwd, jentry(curpath, ed.cy, ed.cx))
+                        jback = drop_last_str(jback)
+                        ed = clamp(Editor { lines: ed.lines, cy: jentry_y(e), cx: jentry_x(e) })
+                    elif buf_text(ed) != disk_text         // cross-file: can't abandon unsaved edits
+                        lsp_info = "unsaved changes (:w first)"
+                    else
+                        jfwd = list.push(jfwd, jentry(curpath, ed.cy, ed.cx))
+                        jback = drop_last_str(jback)
+                        want_open = tf
+                        want_y = jentry_y(e)
+                        want_x = jentry_x(e)
+                elif scroll_idle(st, es) and key_free(km, b) and b == 0x09 and list.len(jfwd) >= 1   // Ctrl-I / Tab — jump forward
+                    let e = jfwd[list.len(jfwd) - 1]
+                    let tf = jentry_path(e)
+                    if tf == curpath
+                        jback = list.push(jback, jentry(curpath, ed.cy, ed.cx))
+                        jfwd = drop_last_str(jfwd)
+                        ed = clamp(Editor { lines: ed.lines, cy: jentry_y(e), cx: jentry_x(e) })
+                    elif buf_text(ed) != disk_text
+                        lsp_info = "unsaved changes (:w first)"
+                    else
+                        jback = list.push(jback, jentry(curpath, ed.cy, ed.cx))
+                        jfwd = drop_last_str(jfwd)
+                        want_open = tf
+                        want_y = jentry_y(e)
+                        want_x = jentry_x(e)
                 elif b == 58 and st.mode == 0        // ':' — open the Ex line
                     cmd_mode = true
                     cmd_buf = ""
@@ -4366,8 +4375,36 @@ fn run_interactive(cfg_path: Str, path: Str) [io, time]
                     st = estep.st
                     es = estep.es
                     if wasjump and ed.cy != jy
-                        jback = list.push(list.push(jback, jy), jx)
+                        jback = list.push(jback, jentry(curpath, jy, jx))
                         jfwd = []
+            changed = true
+        // Deferred file switch (from `:e` or a cross-file gd / Ctrl-O / Ctrl-I).
+        // One place loads the file + retargets the language server.
+        if str.len(want_open) > 0
+            if lsp_phase == 2                  // close the document we're leaving
+                lsp_send(lsp_in, lsp_didclose(lsp_uri))
+            ed = clamp(Editor { lines: buf_load(want_open), cy: want_y, cx: want_x })
+            curpath = want_open
+            disk_text = buf_text(ed)
+            top = 0
+            left = 0
+            es = edit_new()
+            diag_li = []
+            diag_msgs = []
+            lsp_uri = "file://" + want_open
+            if ends_with_nv(want_open)
+                if lsp_pid < 0                 // no server yet — spawn + init async
+                    lsp_pid = lsp_spawn()
+                    if lsp_pid >= 0
+                        lsp_in = proc.stdin_fd(lsp_pid)
+                        lsp_out = proc.stdout_fd(lsp_pid)
+                        lsp_send(lsp_in, lsp_init_req(lsp_uri))
+                        lsp_phase = 1
+                elif lsp_phase == 2            // server ready — open the new document
+                    lsp_lasttext = buf_text(ed)
+                    lsp_ver = lsp_ver + 1
+                    lsp_send(lsp_in, lsp_didopen(lsp_uri, lsp_lasttext))
+            want_open = ""
             changed = true
         // Live document sync, TIME-debounced: mark the buffer dirty on any
         // input, and only send `didChange` after typing pauses (~150 ms of idle
@@ -5082,6 +5119,41 @@ fn drop_last2(xs: [Int]) -> [Int]
         out = list.push(out, xs[i])
         i = i + 1
     out
+
+// Drop the last element of a [Str] (one jumplist entry).
+fn drop_last_str(xs: [Str]) -> [Str]
+    var out: [Str] = []
+    var i = 0
+    let n = list.len(xs) - 1
+    while i < n
+        out = list.push(out, xs[i])
+        i = i + 1
+    out
+
+// A jumplist entry packs the origin as "y|x|path" — y/x first so the path
+// (which may contain anything) is simply everything after the second '|'.
+fn jentry(path: Str, y: Int, x: Int) -> Str
+    str.from_int(y) + "|" + str.from_int(x) + "|" + path
+
+fn jentry_y(e: Str) -> Int
+    let p = index_of_byte(e, 0x7C)
+    if p < 0 then 0 else (str.to_int(str.slice(e, 0, p)) ?? 0)
+
+fn jentry_x(e: Str) -> Int
+    let p1 = index_of_byte(e, 0x7C)
+    let after = str.slice(e, p1 + 1, str.len(e))
+    let p2 = index_of_byte(after, 0x7C)
+    if p2 < 0 then 0 else (str.to_int(str.slice(after, 0, p2)) ?? 0)
+
+fn jentry_path(e: Str) -> Str
+    let p1 = index_of_byte(e, 0x7C)
+    let after = str.slice(e, p1 + 1, str.len(e))
+    let p2 = index_of_byte(after, 0x7C)
+    if p2 < 0 then "" else str.slice(after, p2 + 1, str.len(after))
+
+// Strip a "file://" URI down to a filesystem path.
+fn uri_to_path(uri: Str) -> Str
+    if str.len(uri) >= 7 and str.slice(uri, 0, 7) == "file://" then str.slice(uri, 7, str.len(uri)) else uri
 
 // Replace [start, endc) on the cursor line with `ins`; cursor lands after it.
 fn comp_apply(ed: Editor, start: Int, endc: Int, ins: Str) -> Editor
