@@ -4236,6 +4236,50 @@ fn term_cols() -> Int [io]
     let c = bits.band(packed, 65535)
     if c > 0 then c else 80
 
+// Drain the rest of a CSI/SS3 escape sequence (after the leading `ESC [` or
+// `ESC O`) and return its FINAL byte (0x40–0x7E), or -1/-2 if the stream ended
+// mid-sequence.  Parameter bytes (0x30–0x3F) and intermediates (0x20–0x2F)
+// precede the final byte: `ESC [ 1 ; 5 A` → returns `A`.  This lets novim
+// recognise terminal sequences (arrow keys, focus events, device-attribute and
+// cursor-position replies) instead of feeding their letters in as commands —
+// e.g. a focus-in `ESC [ I` would otherwise read as `I` (insert mode).
+fn csi_final() -> Int [io]
+    var b = novo_pty_stdin_read_byte_h()
+    while b >= 0x20 and b <= 0x3F
+        b = novo_pty_stdin_read_byte_h()
+    b
+
+// Apply an arrow / Home / End key (decoded from a CSI/SS3 final byte) as a
+// cursor move; any other final byte is ignored (returns `ed` unchanged), so
+// focus events and report replies are harmless no-ops.  `allow_eol` lets the
+// cursor sit one past the last char (insert/replace mode); otherwise it clamps
+// to the last char like normal-mode motions.
+fn arrow_move(ed: Editor, fin: Int, allow_eol: Bool) -> Editor
+    let nl = list.len(ed.lines)
+    if fin == 0x44                                  // ← left
+        Editor { lines: ed.lines, cy: ed.cy, cx: if ed.cx > 0 then ed.cx - 1 else 0 }
+    elif fin == 0x43                                // → right
+        let m = str.len(line_at(ed, ed.cy))
+        let cap = if allow_eol then m elif m > 0 then m - 1 else 0
+        Editor { lines: ed.lines, cy: ed.cy, cx: if ed.cx < cap then ed.cx + 1 else cap }
+    elif fin == 0x41                                // ↑ up
+        let ny = if ed.cy > 0 then ed.cy - 1 else 0
+        let m = str.len(line_at(ed, ny))
+        let cap = if allow_eol then m elif m > 0 then m - 1 else 0
+        Editor { lines: ed.lines, cy: ny, cx: if ed.cx < cap then ed.cx else cap }
+    elif fin == 0x42                                // ↓ down
+        let ny = if ed.cy + 1 < nl then ed.cy + 1 else nl - 1
+        let m = str.len(line_at(ed, ny))
+        let cap = if allow_eol then m elif m > 0 then m - 1 else 0
+        Editor { lines: ed.lines, cy: ny, cx: if ed.cx < cap then ed.cx else cap }
+    elif fin == 0x48                                // Home
+        Editor { lines: ed.lines, cy: ed.cy, cx: 0 }
+    elif fin == 0x46                                // End
+        let m = str.len(line_at(ed, ed.cy))
+        Editor { lines: ed.lines, cy: ed.cy, cx: if allow_eol then m elif m > 0 then m - 1 else 0 }
+    else
+        ed
+
 // Recompute the horizontal offset for the current cursor: the text area is
 // `cols` minus the line-number gutter, and the cursor's visual column must
 // stay inside it.  Pure wrapper around hscroll_to used at each repaint site.
@@ -4366,6 +4410,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var search_buf = ""
     var search_back = false
     var zpend = false                    // awaiting the 2nd byte of a `z` scroll command
+    var esc_pushback = 0 - 99            // one-byte pushback: the key after a lone ESC
     var last_subst = ""                  // last :s command, for `&`
     // ── LSP (novols) live state — Phase B.  All async I/O lives here in the
     // driver, never in the pure `feed` path.  `lsp_pid < 0` means no server.
@@ -4472,8 +4517,30 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
             buflist = false               // the :ls overlay is dismissed by the next key
             var done = false
             while not done
-                let b = novo_pty_stdin_read_byte_h()
-                if b == -2
+                var b = 0
+                if esc_pushback != 0 - 99             // a key stashed after a lone ESC
+                    b = esc_pushback
+                    esc_pushback = 0 - 99
+                else
+                    b = novo_pty_stdin_read_byte_h()
+                // Resolve terminal escape sequences (CSI `ESC [`, SS3 `ESC O`)
+                // before dispatch so their final letters aren't read as editor
+                // commands.  Arrow / Home / End move the cursor; everything else
+                // (focus events, device-attribute / cursor-position replies) is
+                // ignored.  A lone ESC, or ESC + another key, is delivered as ESC.
+                var esc_skip = false
+                if b == 27
+                    let nx = novo_pty_stdin_read_byte_h()
+                    if nx == 0x5B or nx == 0x4F
+                        let fin = csi_final()
+                        if not cmd_mode and not search_mode
+                            ed = arrow_move(ed, fin, st.mode == 1 or st.mode == 4)
+                        esc_skip = true
+                    elif nx >= 0
+                        esc_pushback = nx
+                if esc_skip
+                    done = done                      // sequence consumed — no editor action
+                elif b == -2
                     done = true
                 elif b == -1
                     done = true
