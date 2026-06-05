@@ -4237,17 +4237,22 @@ fn term_cols() -> Int [io]
     if c > 0 then c else 80
 
 // Drain the rest of a CSI/SS3 escape sequence (after the leading `ESC [` or
-// `ESC O`) and return its FINAL byte (0x40–0x7E), or -1/-2 if the stream ended
-// mid-sequence.  Parameter bytes (0x30–0x3F) and intermediates (0x20–0x2F)
-// precede the final byte: `ESC [ 1 ; 5 A` → returns `A`.  This lets novim
-// recognise terminal sequences (arrow keys, focus events, device-attribute and
-// cursor-position replies) instead of feeding their letters in as commands —
-// e.g. a focus-in `ESC [ I` would otherwise read as `I` (insert mode).
-fn csi_final() -> Int [io]
+// `ESC O`) and return `param * 256 + finalByte`, or a negative value if the
+// stream ended mid-sequence.  `param` is the leading decimal number (0 if none)
+// — needed because the tilde-final keys share one final byte and differ only by
+// it: `ESC[3~` Delete, `ESC[5~` PageUp, `ESC[6~` PageDown.  Remaining parameter
+// / intermediate bytes (e.g. the `;5` of a `ESC[1;5A` Ctrl-arrow) are skipped.
+// Recognising these stops their letters being fed in as editor commands —
+// e.g. a focus-in `ESC[I` would otherwise read as `I` (insert mode).
+fn csi_seq() -> Int [io]
+    var param = 0
     var b = novo_pty_stdin_read_byte_h()
-    while b >= 0x20 and b <= 0x3F
+    while b >= 0x30 and b <= 0x39                 // leading decimal parameter
+        param = param * 10 + (b - 0x30)
         b = novo_pty_stdin_read_byte_h()
-    b
+    while b >= 0x20 and b <= 0x3F                 // further params / intermediates
+        b = novo_pty_stdin_read_byte_h()
+    if b < 0 then b else param * 256 + b
 
 // Apply an arrow / Home / End key (decoded from a CSI/SS3 final byte) as a
 // cursor move; any other final byte is ignored (returns `ed` unchanged), so
@@ -4532,9 +4537,35 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 if b == 27
                     let nx = novo_pty_stdin_read_byte_h()
                     if nx == 0x5B or nx == 0x4F
-                        let fin = csi_final()
-                        if not cmd_mode and not search_mode
-                            ed = arrow_move(ed, fin, st.mode == 1 or st.mode == 4)
+                        let packed = csi_seq()
+                        if packed >= 0 and not cmd_mode and not search_mode
+                            let fin = packed % 256
+                            let prm = packed / 256
+                            let ins = st.mode == 1 or st.mode == 4
+                            if fin == 0x7E and prm == 5         // PageUp (~ Ctrl-B)
+                                ed = clamp(Editor { lines: ed.lines, cy: scroll_new_cy(ed, rows, 3), cx: ed.cx })
+                                top = scroll_new_top(ed.cy, top, rows, 3)
+                            elif fin == 0x7E and prm == 6       // PageDown (~ Ctrl-F)
+                                ed = clamp(Editor { lines: ed.lines, cy: scroll_new_cy(ed, rows, 2), cx: ed.cx })
+                                top = scroll_new_top(ed.cy, top, rows, 2)
+                            elif fin == 0x7E and prm == 3       // Delete — forward-delete the char at the cursor
+                                if ins
+                                    let ln = line_at(ed, ed.cy)
+                                    if ed.cx < str.len(ln)
+                                        es = edit_push_undo(es, ed)
+                                        let newln = str.slice(ln, 0, ed.cx) + str.slice(ln, ed.cx + 1, str.len(ln))
+                                        ed = Editor { lines: set_line(ed.lines, ed.cy, newln), cy: ed.cy, cx: ed.cx }
+                                else
+                                    let dstep = feed_edit(ed, st, km, es, 0x78)   // normal/visual: like `x`
+                                    ed = dstep.ed
+                                    st = dstep.st
+                                    es = dstep.es
+                            elif fin == 0x7E and (prm == 1 or prm == 7)   // Home
+                                ed = arrow_move(ed, 0x48, ins)
+                            elif fin == 0x7E and (prm == 4 or prm == 8)   // End
+                                ed = arrow_move(ed, 0x46, ins)
+                            elif fin != 0x7E                    // arrows / Home(H) / End(F)
+                                ed = arrow_move(ed, fin, ins)
                         esc_skip = true
                     elif nx >= 0
                         esc_pushback = nx
