@@ -2015,6 +2015,14 @@ fn is_bufcmd(cmd: Str) -> Bool
     let c = str.trim(cmd)
     c == "ls" or c == "buffers" or c == "bn" or c == "bnext" or c == "bp" or c == "bprev" or c == "bprevious" or c == "bd" or c == "bdelete" or c == "bf" or c == "bfirst" or c == "bl" or c == "blast"
 
+// `:wa`/`:wqa`/`:xa`/`:qa` family — commands that act on *all* buffers at once.
+// 0 = not one, 1 = write all (`:wa`/`:wall`), 2 = write all + quit
+// (`:wqa`/`:wqall`/`:xa`/`:xall`), 3 = quit all guarded (`:qa`/`:qall`),
+// 4 = quit all forced (`:qa!`/`:qall!`).
+fn writeall_kind(cmd: Str) -> Int
+    let c = str.trim(cmd)
+    if c == "wa" or c == "wall" then 1 elif c == "wqa" or c == "wqall" or c == "xa" or c == "xall" then 2 elif c == "qa" or c == "qall" then 3 elif c == "qa!" or c == "qall!" then 4 else 0
+
 // 0 = :ls, 1 = :bn (next), 2 = :bp (prev), 3 = :bd (close), 4 = :bfirst, 5 = :blast.
 fn bufcmd_kind(cmd: Str) -> Int
     let c = str.trim(cmd)
@@ -2046,6 +2054,34 @@ fn buffers_modified(bt: [Str], bd: [Str], cur: Int, atext: Str, adisk: Str) -> B
             return true
         i = i + 1
     false
+
+// Write every modified buffer to disk; returns the count written.  The active
+// buffer's live copy is `ed` (vs `adisk`); stored buffers compare their joined
+// text to their saved text.
+fn write_all_bufs(paths: [Str], texts: [Str], disks: [Str], cur: Int, ed: Editor, adisk: Str) -> Int [io]
+    var wrote = 0
+    var i = 0
+    let nb = list.len(paths)
+    while i < nb
+        if i == cur
+            if buf_text(ed) != adisk
+                save_buf(paths[i], ed.lines)
+                wrote = wrote + 1
+        else
+            if texts[i] != disks[i]
+                save_buf_text(paths[i], texts[i])
+                wrote = wrote + 1
+        i = i + 1
+    wrote
+
+// Mark every buffer clean (saved-text := current-text) after a write-all.
+fn mark_all_saved(texts: [Str], disks: [Str]) -> [Str]
+    var d = disks
+    var i = 0
+    while i < list.len(texts)
+        d = set_str_at(d, i, texts[i])
+        i = i + 1
+    d
 
 // Index of the first buffer whose basename or path contains `name`, or -1.
 fn buf_find_by_name(paths: [Str], name: Str) -> Int
@@ -2164,6 +2200,11 @@ fn buf_to_str(lines: [Str]) -> Str
 
 fn save_buf(path: Str, lines: [Str]) [io]
     fs.write(path, buf_to_str(lines))
+
+// Save a buffer held as newline-joined text (a stored, non-active buffer) —
+// splits to lines so the on-disk form matches `:w` (one trailing newline/line).
+fn save_buf_text(path: Str, text: Str) [io]
+    save_buf(path, str.split_lines(text))
 
 // ── Key-sequence decoding + keymaps (slice 8) ───────────────────
 
@@ -4356,6 +4397,19 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                 want_x = 0
                             else
                                 lsp_info = "no buffer matching " + barg
+                        elif writeall_kind(cmd_buf) > 0   // :wa / :wqa / :xa / :qa
+                            let wk = writeall_kind(cmd_buf)
+                            if wk == 1 or wk == 2
+                                let n = write_all_bufs(bufs_path, bufs_text, bufs_disk, cur_buf, ed, disk_text)
+                                disk_text = buf_text(ed)
+                                bufs_disk = mark_all_saved(bufs_text, bufs_disk)
+                                lsp_info = "wrote " + str.from_int(n) + " buffer(s)"
+                            let blocked = wk == 3 and buffers_modified(bufs_text, bufs_disk, cur_buf, buf_text(ed), disk_text)
+                            if blocked
+                                lsp_info = "unsaved buffers (:qa! to override)"
+                            elif wk == 2 or wk == 3 or wk == 4
+                                running = false
+                                done = true
                         else
                             let r = exec_ex(cmd_buf)
                             if r.save
