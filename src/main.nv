@@ -2010,6 +2010,12 @@ fn edit_cmd_path(cmd: Str) -> Str
     let sp = index_of_byte(c, 0x20)      // first space
     if sp < 0 then "" else str.trim(str.slice(c, sp + 1, str.len(c)))
 
+// Bare `:e`/`:e!`/`:edit`/`:edit!` (no filename) — reload the current file from
+// disk (`!` discards unsaved changes).
+fn is_reload(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    c == "e" or c == "e!" or c == "edit" or c == "edit!"
+
 // Buffer-list commands: `:ls`/`:buffers`, `:bn`/`:bnext`, `:bp`/`:bprev`.
 fn is_bufcmd(cmd: Str) -> Bool
     let c = str.trim(cmd)
@@ -4453,6 +4459,21 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                             lsp_ver = lsp_ver + 1
                                             lsp_send(lsp_in, lsp_didchange(lsp_uri, lsp_ver, lsp_lasttext))
                                             lsp_info = "renamed " + str.from_int(list.len(nts)) + " sites"
+                        elif is_reload(cmd_buf)            // bare :e / :e! — reload from disk
+                            let bang = index_of_byte(cmd_buf, 0x21) >= 0
+                            if (not bang) and buf_text(ed) != disk_text
+                                lsp_info = "unsaved changes (:e! to override)"
+                            else
+                                let fresh = file_to_text(curpath)
+                                es = edit_push_undo(es, ed)
+                                let fl = str.split_lines(fresh)
+                                ed = clamp(Editor { lines: if list.len(fl) == 0 then [""] else fl, cy: ed.cy, cx: ed.cx })
+                                disk_text = buf_text(ed)
+                                if lsp_phase == 2
+                                    lsp_lasttext = buf_text(ed)
+                                    lsp_ver = lsp_ver + 1
+                                    lsp_send(lsp_in, lsp_didchange(lsp_uri, lsp_ver, lsp_lasttext))
+                                lsp_info = "reloaded " + basename_of(curpath)
                         elif is_edit_cmd(cmd_buf)
                             let tgt = edit_cmd_path(cmd_buf)
                             if str.len(tgt) == 0
