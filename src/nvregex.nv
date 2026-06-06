@@ -44,9 +44,9 @@ fn caps_empty() -> [Int]
 
 // Class members for a \d \w \s shortcut letter.
 fn re_shortcut_cls(letter: Int) -> Str
-    if letter == 0x64 or letter == 0x44              // d / D
+    if letter == 'd' or letter == 'D'              // d / D
         "0-9"
-    elif letter == 0x77 or letter == 0x57            // w / W
+    elif letter == 'w' or letter == 'W'            // w / W
         "0-9a-zA-Z_"
     else                                             // s / S
         str.from_char(32) + str.from_char(9)         // space + tab
@@ -57,7 +57,7 @@ fn re_class_has(cls: Str, c: Int) -> Bool
     var i = 0
     while i < n
         let ch = str.byte_at(cls, i) ?? 0
-        if i + 2 < n and (str.byte_at(cls, i + 1) ?? 0) == 0x2D
+        if i + 2 < n and (str.byte_at(cls, i + 1) ?? 0) == '-'
             if c >= ch and c <= (str.byte_at(cls, i + 2) ?? 0)
                 return true
             i = i + 3
@@ -152,41 +152,41 @@ fn re_compile_one(pat: Str) -> [ReAtom]
         var ch = 0
         var cls = ""
         var neg = false
-        if c == 0x5E and i == 0                      // ^ at start
+        if c == '^' and i == 0                      // ^ at start
             kind = 3
             i = i + 1
-        elif c == 0x24 and i == n - 1                // $ at end
+        elif c == '$' and i == n - 1                // $ at end
             kind = 4
             i = i + 1
-        elif c == 0x2E                               // .
+        elif c == '.'                               // .
             kind = 1
             i = i + 1
-        elif c == 0x5B                               // [ class
+        elif c == '['                               // [ class
             var j = i + 1
-            if j < n and (str.byte_at(pat, j) ?? 0) == 0x5E
+            if j < n and (str.byte_at(pat, j) ?? 0) == '^'
                 neg = true
                 j = j + 1
             let cs = j
-            while j < n and (str.byte_at(pat, j) ?? 0) != 0x5D
+            while j < n and (str.byte_at(pat, j) ?? 0) != ']'
                 j = j + 1
             cls = str.slice(pat, cs, j)
             kind = 2
             i = if j < n then j + 1 else j
-        elif c == 0x5C and i + 1 < n                 // backslash escape
+        elif c == '\\' and i + 1 < n                 // backslash escape
             let nx = str.byte_at(pat, i + 1) ?? 0
-            if nx == 0x64 or nx == 0x77 or nx == 0x73        // \d \w \s
+            if nx == 'd' or nx == 'w' or nx == 's'        // \d \w \s
                 kind = 2
                 cls = re_shortcut_cls(nx)
-            elif nx == 0x44 or nx == 0x57 or nx == 0x53      // \D \W \S
+            elif nx == 'D' or nx == 'W' or nx == 'S'      // \D \W \S
                 kind = 2
                 cls = re_shortcut_cls(nx)
                 neg = true
-            elif nx == 0x28                                  // \( group start
+            elif nx == '('                                  // \( group start
                 kind = 5
                 groupcount = groupcount + 1
                 ch = groupcount
                 gstack = list.append(gstack, [groupcount])
-            elif nx == 0x29                                  // \) group end
+            elif nx == ')'                                  // \) group end
                 kind = 6
                 ch = if list.len(gstack) > 0 then gstack[list.len(gstack) - 1] else 0
                 gstack = if list.len(gstack) > 0 then list.slice(gstack, 0, list.len(gstack) - 1) else gstack
@@ -200,13 +200,13 @@ fn re_compile_one(pat: Str) -> [ReAtom]
             i = i + 1
         var quant = 0
         if kind == 0 or kind == 1 or kind == 2       // quantifier lookahead
-            if i < n and (str.byte_at(pat, i) ?? 0) == 0x2A
+            if i < n and (str.byte_at(pat, i) ?? 0) == '*'
                 quant = 1
                 i = i + 1
-            elif i + 1 < n and (str.byte_at(pat, i) ?? 0) == 0x5C and (str.byte_at(pat, i + 1) ?? 0) == 0x2B
+            elif i + 1 < n and (str.byte_at(pat, i) ?? 0) == '\\' and (str.byte_at(pat, i + 1) ?? 0) == '+'
                 quant = 2
                 i = i + 2
-            elif i + 1 < n and (str.byte_at(pat, i) ?? 0) == 0x5C and (str.byte_at(pat, i + 1) ?? 0) == 0x3F
+            elif i + 1 < n and (str.byte_at(pat, i) ?? 0) == '\\' and (str.byte_at(pat, i + 1) ?? 0) == '?'
                 quant = 3
                 i = i + 2
         atoms = list.append(atoms, [re_atom(kind, ch, cls, neg, quant)])
@@ -225,23 +225,23 @@ fn re_split_top(pat: Str) -> [Str]
         let c = str.byte_at(pat, i) ?? 0
         let nx = if i + 1 < n then str.byte_at(pat, i + 1) ?? 0 else 0
         if inclass
-            if c == 0x5D                             // ]
+            if c == ']'                             // ]
                 inclass = false
             i = i + 1
-        elif c == 0x5B                               // [
+        elif c == '['                               // [
             inclass = true
             i = i + 1
-        elif c == 0x5C and nx == 0x28                // \(
+        elif c == '\\' and nx == '('                // \(
             depth = depth + 1
             i = i + 2
-        elif c == 0x5C and nx == 0x29                // \)
+        elif c == '\\' and nx == ')'                // \)
             depth = depth - 1
             i = i + 2
-        elif c == 0x5C and nx == 0x7C and depth == 0 // top-level \|
+        elif c == '\\' and nx == '|' and depth == 0 // top-level \|
             parts = list.append(parts, [str.slice(pat, start, i)])
             i = i + 2
             start = i
-        elif c == 0x5C and i + 1 < n                 // other escape — skip both
+        elif c == '\\' and i + 1 < n                 // other escape — skip both
             i = i + 2
         else
             i = i + 1
@@ -316,13 +316,13 @@ fn re_expand_repl(repl: Str, matched: Str, caps: [Int], line: Str) -> Str
     var i = 0
     while i < n
         let c = str.byte_at(repl, i) ?? 0
-        if c == 0x26                                 // &
+        if c == '&'                                 // &
             out = out + matched
             i = i + 1
-        elif c == 0x5C and i + 1 < n                 // \1-\9 backref, else \x
+        elif c == '\\' and i + 1 < n                 // \1-\9 backref, else \x
             let nx = str.byte_at(repl, i + 1) ?? 0
-            if nx >= 0x31 and nx <= 0x39
-                let g = nx - 0x30
+            if nx >= '1' and nx <= '9'
+                let g = nx - '0'
                 let gs = caps[2 * g]
                 let ge = caps[2 * g + 1]
                 if gs >= 0 and ge >= gs

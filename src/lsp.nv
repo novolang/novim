@@ -25,8 +25,8 @@ fn lsp_content_length(hdr: Str) -> Int
     while i < n and (str.byte_at(hdr, i) ?? 0) == 32          // skip spaces
         i = i + 1
     var v = 0
-    while i < n and (str.byte_at(hdr, i) ?? 0) >= 0x30 and (str.byte_at(hdr, i) ?? 0) <= 0x39
-        v = v * 10 + ((str.byte_at(hdr, i) ?? 0) - 0x30)
+    while i < n and (str.byte_at(hdr, i) ?? 0) >= '0' and (str.byte_at(hdr, i) ?? 0) <= '9'
+        v = v * 10 + ((str.byte_at(hdr, i) ?? 0) - '0')
         i = i + 1
     v
 
@@ -348,7 +348,7 @@ fn lsp_hover_text(msg: Str) -> Str
 
 // True when `s` opens a markdown code fence (```).
 fn starts_with_fence(s: Str) -> Bool
-    str.len(s) >= 3 and (str.byte_at(s, 0) ?? 0) == 0x60 and (str.byte_at(s, 1) ?? 0) == 0x60 and (str.byte_at(s, 2) ?? 0) == 0x60
+    str.len(s) >= 3 and (str.byte_at(s, 0) ?? 0) == '`' and (str.byte_at(s, 1) ?? 0) == '`' and (str.byte_at(s, 2) ?? 0) == '`'
 
 // First meaningful line of a hover markdown blob (skipping ``` fences and
 // blank lines) — the one line that fits the status bar.
