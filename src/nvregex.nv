@@ -49,7 +49,7 @@ fn re_shortcut_cls(letter: Int) -> Str
     elif letter == 'w' or letter == 'W'            // w / W
         "0-9a-zA-Z_"
     else                                             // s / S
-        str.from_char(32) + str.from_char(9)         // space + tab
+        str.from_char(32) + str.from_char('\t')         // space + tab
 
 // Does class string `cls` contain byte `c` (handles `a-z` ranges)?
 fn re_class_has(cls: Str, c: Int) -> Bool
@@ -121,7 +121,7 @@ fn re_match_here(atoms: [ReAtom], ai: Int, s: Str, si: Int, caps: [Int]) -> ReRe
         if r.end >= 0
             return r
         return re_match_here(atoms, ai + a.ch, s, si, caps)
-    if a.kind == 8                                   // jump (skip 2nd alternative)
+    if a.kind == '\b'                                   // jump (skip 2nd alternative)
         return re_match_here(atoms, ai + a.ch, s, si, caps)
     if a.quant == 1                                  // *
         return re_match_star(atoms, ai, s, si, 0, caps)

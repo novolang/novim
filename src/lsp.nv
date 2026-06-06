@@ -9,8 +9,8 @@ fn lsp_write_fd(fd: Int, s: Str) [io]
     let _ = novo_unix_write_str_h(fd, s)
 
 fn lsp_send(fd: Int, body: Str) [io]
-    let cr = str.from_char(13)
-    let lf = str.from_char(10)
+    let cr = str.from_char('\r')
+    let lf = str.from_char('\n')
     lsp_write_fd(fd, "Content-Length: " + str.from_int(str.len(body)) + cr + lf + cr + lf)
     lsp_write_fd(fd, body)
 
@@ -22,7 +22,7 @@ fn lsp_content_length(hdr: Str) -> Int
         return 0
     var i = at + str.len(key)
     let n = str.len(hdr)
-    while i < n and (str.byte_at(hdr, i) ?? 0) == 32          // skip spaces
+    while i < n and (str.byte_at(hdr, i) ?? 0) == ' '          // skip spaces
         i = i + 1
     var v = 0
     while i < n and (str.byte_at(hdr, i) ?? 0) >= '0' and (str.byte_at(hdr, i) ?? 0) <= '9'
@@ -41,7 +41,7 @@ fn lsp_read_message(fd: Int) -> Str [io]
             return ""
         hdr = hdr + str.from_char(b)
         let m = str.len(hdr)
-        if m >= 4 and (str.byte_at(hdr, m - 4) ?? 0) == 13 and (str.byte_at(hdr, m - 3) ?? 0) == 10 and (str.byte_at(hdr, m - 2) ?? 0) == 13 and (str.byte_at(hdr, m - 1) ?? 0) == 10
+        if m >= 4 and (str.byte_at(hdr, m - 4) ?? 0) == '\r' and (str.byte_at(hdr, m - 3) ?? 0) == '\n' and (str.byte_at(hdr, m - 2) ?? 0) == '\r' and (str.byte_at(hdr, m - 1) ?? 0) == '\n'
             hdone = true
         if m > 4096
             return ""
@@ -72,21 +72,21 @@ fn json_escape(s: Str) -> Str
     let n = str.len(s)
     while i < n
         let b = str.byte_at(s, i) ?? 0
-        if b == 34
-            str.builder_append_char(sb, 92)
-            str.builder_append_char(sb, 34)
-        elif b == 92
-            str.builder_append_char(sb, 92)
-            str.builder_append_char(sb, 92)
-        elif b == 10
-            str.builder_append_char(sb, 92)
-            str.builder_append_char(sb, 110)
-        elif b == 13
-            str.builder_append_char(sb, 92)
-            str.builder_append_char(sb, 114)
-        elif b == 9
-            str.builder_append_char(sb, 92)
-            str.builder_append_char(sb, 116)
+        if b == '"'
+            str.builder_append_char(sb, '\\')
+            str.builder_append_char(sb, '"')
+        elif b == '\\'
+            str.builder_append_char(sb, '\\')
+            str.builder_append_char(sb, '\\')
+        elif b == '\n'
+            str.builder_append_char(sb, '\\')
+            str.builder_append_char(sb, 'n')
+        elif b == '\r'
+            str.builder_append_char(sb, '\\')
+            str.builder_append_char(sb, 'r')
+        elif b == '\t'
+            str.builder_append_char(sb, '\\')
+            str.builder_append_char(sb, 't')
         else
             str.builder_append_char(sb, b)
         i = i + 1
@@ -95,7 +95,7 @@ fn json_escape(s: Str) -> Str
     out
 
 fn lsp_q(s: Str) -> Str
-    str.from_char(34) + s + str.from_char(34)
+    str.from_char('"') + s + str.from_char('"')
 
 // Request / notification builders.
 fn lsp_init_req(uri: Str) -> Str
@@ -360,7 +360,7 @@ fn hover_oneline(s: Str) -> Str
     var done = false
     while i < n and not done
         let b = str.byte_at(s, i) ?? 0
-        if b == 10
+        if b == '\n'
             if str.len(line) > 0 and not starts_with_fence(line)
                 out = line
                 done = true

@@ -111,7 +111,7 @@ fn first_nonblank(line: Str) -> Int
 fn leading_ws(line: Str) -> Str
     let n = str.len(line)
     var i = 0
-    while i < n and ((str.byte_at(line, i) ?? 0) == 32 or (str.byte_at(line, i) ?? 0) == 9)
+    while i < n and ((str.byte_at(line, i) ?? 0) == ' ' or (str.byte_at(line, i) ?? 0) == '\t')
         i = i + 1
     str.slice(line, 0, i)
 
@@ -142,7 +142,7 @@ fn repeat_hjkl(ed: Editor, b: Int, times: Int) -> Editor
 // separates.  class 0 = whitespace, 1 = word, 2 = punctuation.
 
 fn char_class_of(c: Int) -> Int
-    if c == 32 or c == 9
+    if c == ' ' or c == '\t'
         0
     elif (c >= 48 and c <= 57) or (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or c == 95
         1
@@ -154,7 +154,7 @@ fn char_class_of(c: Int) -> Int
 fn class_at(ed: Editor, y: Int, x: Int) -> Int
     let line = line_at(ed, y)
     if x >= 0 and x < str.len(line)
-        char_class_of(str.byte_at(line, x) ?? 32)
+        char_class_of(str.byte_at(line, x) ?? ' ')
     else
         0
 
@@ -444,7 +444,7 @@ fn join_lines(ed: Editor, n: Int) -> Str
     var cnt = 0
     while i < total and cnt < n
         if cnt > 0
-            acc = acc + str.from_char(10)
+            acc = acc + str.from_char('\n')
         acc = acc + ed.lines[i]
         i = i + 1
         cnt = cnt + 1
@@ -617,7 +617,7 @@ fn op_join_lines(ed: Editor, n: Int, space: Bool) -> Editor
 // width without `feed` needing to see Options.  Blank lines are left alone
 // (vim doesn't indent them).
 fn indent_one(line: Str) -> Str
-    if str.len(line) == 0 then line else str.from_char(9) + line
+    if str.len(line) == 0 then line else str.from_char('\t') + line
 
 // Remove one indent level: a single leading tab, or — for space-indented
 // files — up to a tab's worth (capped at 8) of leading spaces.
@@ -625,10 +625,10 @@ fn dedent_one(line: Str) -> Str
     let n = str.len(line)
     if n == 0
         return line
-    if (str.byte_at(line, 0) ?? 0) == 9
+    if (str.byte_at(line, 0) ?? 0) == '\t'
         return str.slice(line, 1, n)
     var k = 0
-    while k < 8 and k < n and (str.byte_at(line, k) ?? 0) == 32
+    while k < 8 and k < n and (str.byte_at(line, k) ?? 0) == ' '
         k = k + 1
     str.slice(line, k, n)
 
@@ -912,7 +912,7 @@ fn apply_linewise_op(ed: Editor, st: InputState, opb: Int, ty: Int) -> Step
     var i = lo
     while i <= hi
         if i > lo
-            payload = payload + str.from_char(10)
+            payload = payload + str.from_char('\n')
         payload = payload + ed.lines[i]
         i = i + 1
     if opb == 'y'                                // y — yank, cursor to lo
@@ -1034,11 +1034,11 @@ fn vyank_char_text(ed: Editor, vr: VRange) -> Str
         var acc = str.slice(first, vr.sx, str.len(first))
         var i = vr.sy + 1
         while i < vr.ey
-            acc = acc + str.from_char(10) + line_at(ed, i)
+            acc = acc + str.from_char('\n') + line_at(ed, i)
             i = i + 1
         let last = line_at(ed, vr.ey)
         let hi = if vr.ex + 1 > str.len(last) then str.len(last) else vr.ex + 1
-        acc + str.from_char(10) + str.slice(last, 0, hi)
+        acc + str.from_char('\n') + str.slice(last, 0, hi)
 
 // Buffer after deleting a charwise selection (first/last partial line merged,
 // middle lines removed).
@@ -1130,20 +1130,20 @@ fn textobj_word(ed: Editor, around: Bool, big: Bool) -> TObj
     if n == 0
         return tobj_none()
     let cx = if ed.cx >= n then n - 1 else ed.cx
-    let cls = wcls(str.byte_at(line, cx) ?? 32, big)
+    let cls = wcls(str.byte_at(line, cx) ?? ' ', big)
     var lo = cx
-    while lo > 0 and wcls(str.byte_at(line, lo - 1) ?? 32, big) == cls
+    while lo > 0 and wcls(str.byte_at(line, lo - 1) ?? ' ', big) == cls
         lo = lo - 1
     var hi = cx
-    while hi + 1 < n and wcls(str.byte_at(line, hi + 1) ?? 32, big) == cls
+    while hi + 1 < n and wcls(str.byte_at(line, hi + 1) ?? ' ', big) == cls
         hi = hi + 1
     if around
         var added = false
-        while hi + 1 < n and wcls(str.byte_at(line, hi + 1) ?? 32, big) == 0
+        while hi + 1 < n and wcls(str.byte_at(line, hi + 1) ?? ' ', big) == 0
             hi = hi + 1
             added = true
         if not added
-            while lo > 0 and wcls(str.byte_at(line, lo - 1) ?? 32, big) == 0
+            while lo > 0 and wcls(str.byte_at(line, lo - 1) ?? ' ', big) == 0
                 lo = lo - 1
     tobj(ed.cy, lo, ed.cy, hi)
 
@@ -1504,11 +1504,11 @@ selection.""")
 fn feed_visual(ed: Editor, st: InputState, b: Int) -> Step
     let cntp = if st.count > 0 then st.count else 1
     // Pending multi-key motions (extend the selection, stay visual).
-    if st.pending == 8                           // f<char>
+    if st.pending == '\b'                           // f<char>
         return Step { ed: move_find(ed, b, true, false, cntp), st: ist_visual_keep(st, st.mode) }
-    if st.pending == 9                           // F<char>
+    if st.pending == '\t'                           // F<char>
         return Step { ed: move_find(ed, b, false, false, cntp), st: ist_visual_keep(st, st.mode) }
-    if st.pending == 10                          // t<char>
+    if st.pending == '\n'                          // t<char>
         return Step { ed: move_find(ed, b, true, true, cntp), st: ist_visual_keep(st, st.mode) }
     if st.pending == 11                          // T<char>
         return Step { ed: move_find(ed, b, false, true, cntp), st: ist_visual_keep(st, st.mode) }
@@ -1521,7 +1521,7 @@ fn feed_visual(ed: Editor, st: InputState, b: Int) -> Step
         return visual_set_textobj(ed, st, b, false)
     if st.pending == 49                          // a<obj> — around text object
         return visual_set_textobj(ed, st, b, true)
-    if b == 27                                   // Esc — leave visual
+    if b == '\e'                                   // Esc — leave visual
         return Step { ed: ed, st: ist_done(st) }
     if b == 'v'                                 // v
         if st.mode == 2
@@ -1581,14 +1581,14 @@ fn feed_visual(ed: Editor, st: InputState, b: Int) -> Step
 cursor left, vim-style), Enter splits the line, Backspace deletes back, and
 printables (plus tab) insert at the cursor.  Other control bytes are ignored.""")
 fn feed_insert(ed: Editor, st: InputState, b: Int) -> Step
-    if b == 27                         // Esc → Normal (cursor steps left, vim)
+    if b == '\e'                         // Esc → Normal (cursor steps left, vim)
         let e = clamp(Editor { lines: ed.lines, cy: ed.cy, cx: ed.cx - 1 })
         return Step { ed: e, st: ist_done(st) }
-    if b == 13 or b == 10              // Enter → split line
+    if b == '\r' or b == '\n'              // Enter → split line
         return Step { ed: insert_newline(ed), st: st }
-    if b == 127 or b == 8              // Backspace / DEL
+    if b == '\x7f' or b == '\b'              // Backspace / DEL
         return Step { ed: backspace(ed), st: st }
-    if b == 9 or (b >= 32 and b < 127) // printable (+ tab) → insert
+    if b == '\t' or (b >= ' ' and b < '\x7f') // printable (+ tab) → insert
         return Step { ed: insert_char(ed, b), st: st }
     Step { ed: ed, st: st }            // ignore other control bytes
 
@@ -1604,13 +1604,13 @@ fn overtype_char(ed: Editor, b: Int) -> Editor
 at the cursor instead of inserting.  Backspace just steps left (it does not
 restore the overwritten character).""")
 fn feed_replace(ed: Editor, st: InputState, b: Int) -> Step
-    if b == 27                         // Esc → Normal (cursor steps left)
+    if b == '\e'                         // Esc → Normal (cursor steps left)
         return Step { ed: clamp(Editor { lines: ed.lines, cy: ed.cy, cx: ed.cx - 1 }), st: ist_done(st) }
-    if b == 13 or b == 10              // Enter → split line
+    if b == '\r' or b == '\n'              // Enter → split line
         return Step { ed: insert_newline(ed), st: st }
-    if b == 127 or b == 8              // Backspace → step left
+    if b == '\x7f' or b == '\b'              // Backspace → step left
         return Step { ed: clamp_insert(Editor { lines: ed.lines, cy: ed.cy, cx: ed.cx - 1 }), st: st }
-    if b == 9 or (b >= 32 and b < 127) // printable → overwrite
+    if b == '\t' or (b >= ' ' and b < '\x7f') // printable → overwrite
         return Step { ed: overtype_char(ed, b), st: st }
     Step { ed: ed, st: st }
 
@@ -1662,7 +1662,7 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
     if st.pending == 7                 // `c` — operator awaiting a motion (or cc)
         return feed_operator(ed, st, 'c', 7, b)
     if st.pending == 4                 // `r<c>` — next byte is the replacement
-        if b == 27                     // Esc cancels the replace
+        if b == '\e'                     // Esc cancels the replace
             return Step { ed: ed, st: ist_done(st) }
         return Step { ed: op_replace_char(ed, b, if st.count > 0 then st.count else 1), st: ist_done(st) }
     if st.pending == 5                 // `>` — indent right (>> or >motion)
@@ -1670,27 +1670,27 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
     if st.pending == 6                 // `<` — indent left (<< or <motion)
         return feed_indent(ed, st, false, b)
     // Find-char motions: pending 8=f 9=F 10=t 11=T await the target.
-    if st.pending == 8                 // f<char>
-        if b == 27
+    if st.pending == '\b'                 // f<char>
+        if b == '\e'
             return Step { ed: ed, st: ist_done(st) }
         return Step { ed: move_find(ed, b, true, false, if st.count > 0 then st.count else 1), st: ist_done(st) }
-    if st.pending == 9                 // F<char>
-        if b == 27
+    if st.pending == '\t'                 // F<char>
+        if b == '\e'
             return Step { ed: ed, st: ist_done(st) }
         return Step { ed: move_find(ed, b, false, false, if st.count > 0 then st.count else 1), st: ist_done(st) }
-    if st.pending == 10                // t<char>
-        if b == 27
+    if st.pending == '\n'                // t<char>
+        if b == '\e'
             return Step { ed: ed, st: ist_done(st) }
         return Step { ed: move_find(ed, b, true, true, if st.count > 0 then st.count else 1), st: ist_done(st) }
     if st.pending == 11                // T<char>
-        if b == 27
+        if b == '\e'
             return Step { ed: ed, st: ist_done(st) }
         return Step { ed: move_find(ed, b, false, true, if st.count > 0 then st.count else 1), st: ist_done(st) }
     // Operator + find-char: pending 20..31 encodes (operator,
     // find-type); the byte is the target char.  df{c} / dt{c} / dF{c} / dT{c}
     // for d / c / y.
     if st.pending >= 20 and st.pending <= 31
-        if b == 27
+        if b == '\e'
             return Step { ed: ed, st: ist_done(st) }
         let code = st.pending - 20
         let opidx = code / 4
@@ -1701,9 +1701,9 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
         let tgt = find_target(ed, b, forward, till, if st.count > 0 then st.count else 1)
         return apply_motion_op(ed, st, opb, tgt)
     // Operator + gg: pending 32/33/34 = d/c/y awaiting the second g.
-    if st.pending >= 32 and st.pending <= 34
+    if st.pending >= ' ' and st.pending <= 34
         if b == 'g'                   // second g — linewise [top, cursor]
-            let opb = if st.pending == 32 then 'd' elif st.pending == 33 then 'c' else 'y'
+            let opb = if st.pending == ' ' then 'd' elif st.pending == 33 then 'c' else 'y'
             return apply_linewise_op(ed, st, opb, if st.count > 0 then st.count - 1 else 0)
         return feed(ed, ist_clear_pending(st), b)   // not gg — cancel + reprocess
     // Operator + text object: pending 40..45 encodes (operator,
@@ -1804,9 +1804,9 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
         return apply_linewise_op(ed, st, 'y', ed.cy + (if cnt > 1 then cnt - 1 else 0))
     if b == 'S'                       // 'S' — change whole line(s) (= cc)
         return apply_linewise_op(ed, st, 'c', ed.cy + (if cnt > 1 then cnt - 1 else 0))
-    if b == 0x01                       // Ctrl-A — increment the number
+    if b == '\x01'                       // Ctrl-A — increment the number
         return Step { ed: op_incdec(ed, cnt), st: ist_done(st) }
-    if b == 0x18                       // Ctrl-X — decrement the number
+    if b == '\x18'                       // Ctrl-X — decrement the number
         return Step { ed: op_incdec(ed, 0 - cnt), st: ist_done(st) }
     // Visual mode entry: anchor the selection at the cursor.  A
     // count pre-extends the selection (`3v` = 3 chars, `2V` = 2 lines).
@@ -2250,7 +2250,7 @@ fn buf_to_str(lines: [Str]) -> Str
     let n = list.len(lines)
     let mut i = 0
     while i < n
-        s = s + lines[i] + str.from_char(10)
+        s = s + lines[i] + str.from_char('\n')
         i = i + 1
     s
 
@@ -2284,19 +2284,19 @@ fn decode_escapes(s: Str) -> Str
     let mut i = 0
     while i < n
         let b = str.byte_at(s, i) ?? 0
-        if b == 92 and i + 1 < n
+        if b == '\\' and i + 1 < n
             let nx = str.byte_at(s, i + 1) ?? 0
             if nx == 'e'
-                out = out + str.from_char(27)
+                out = out + str.from_char('\e')
                 i = i + 2
             elif nx == 'n' or nx == 'r'
-                out = out + str.from_char(13)
+                out = out + str.from_char('\r')
                 i = i + 2
             elif nx == 't'
-                out = out + str.from_char(9)
+                out = out + str.from_char('\t')
                 i = i + 2
             elif nx == 'b'
-                out = out + str.from_char(127)
+                out = out + str.from_char('\x7f')
                 i = i + 2
             elif nx == '\\'
                 out = out + str.from_char(92)
@@ -2335,7 +2335,7 @@ fn keymap_lookup(km: Keymap, b: Int) -> Str
 // Strip a single pair of surrounding double-quotes from `s`.
 fn strip_quotes(s: Str) -> Str
     let n = str.len(s)
-    if n >= 2 and (str.byte_at(s, 0) ?? 0) == 34 and (str.byte_at(s, n - 1) ?? 0) == 34
+    if n >= 2 and (str.byte_at(s, 0) ?? 0) == '"' and (str.byte_at(s, n - 1) ?? 0) == '"'
         str.slice(s, 1, n - 1)
     else
         s
@@ -2348,7 +2348,7 @@ fn strip_inline_comment(s: Str) -> Str
     var inq = false
     while i < n
         let b = str.byte_at(s, i) ?? 0
-        if b == 34
+        if b == '"'
             inq = not inq
         elif b == 35 and (not inq)
             return str.slice(s, 0, i)
@@ -2613,7 +2613,7 @@ fn apply_set(o: Options, cmd: Str) -> Options
     let m = str.len(args)
     while i < m
         let b = str.byte_at(args, i) ?? 0
-        if b == 32
+        if b == ' '
             if str.len(tok) > 0
                 result = apply_set_token(result, tok)
                 tok = ""
@@ -2728,7 +2728,7 @@ fn feed_mapped(ed: Editor, st: InputState, km: Keymap, b: Int) -> Step
 // made insert mode crawl on large files.
 @intent("Serialize the buffer's lines to a single newline-joined string.")
 fn buf_text(ed: Editor) -> Str
-    str.join(str.from_char(10), ed.lines)
+    str.join(str.from_char('\n'), ed.lines)
 
 // Counts are included (a leading digit may precede an edit, e.g. `3x`).  Yank
 // (`y`) is excluded: it changes no buffer text, so `.` never repeats it.
@@ -2740,7 +2740,7 @@ fn is_edit_start(b: Int) -> Bool
     if b >= '0' and b <= '9'                               // count digit (may precede an edit)
         return true
     // i a I A · o O · x X D · J ~ r · s S c C · p P · d > < · R · ^A ^X · g · v V
-    let edits = ['i', 'a', 'I', 'A', 'o', 'O', 'x', 'X', 'D', 'J', '~', 'r', 's', 'S', 'c', 'C', 'p', 'P', 'd', '>', '<', 'R', 0x01, 0x18, 'g', 'v', 'V']
+    let edits = ['i', 'a', 'I', 'A', 'o', 'O', 'x', 'X', 'D', 'J', '~', 'r', 's', 'S', 'c', 'C', 'p', 'P', 'd', '>', '<', 'R', '\x01', '\x18', 'g', 'v', 'V']
     var found = false
     let mut i = 0
     let n = list.len(edits)
@@ -2836,7 +2836,7 @@ fn snap_of(ed: Editor) -> Snapshot
 // Serialize one snapshot as "cy,cx,LEN:TEXT" (TEXT = lines joined by \n; the
 // LEN prefix makes each record self-delimiting whatever TEXT contains).
 fn snap_ser(s: Snapshot) -> Str
-    let text = str.join(str.from_char(10), s.lines)
+    let text = str.join(str.from_char('\n'), s.lines)
     str.from_int(s.cy) + "," + str.from_int(s.cx) + "," + str.from_int(str.len(text)) + ":" + text
 
 // Serialize a snapshot stack as the concatenation of its records.
@@ -2915,7 +2915,7 @@ fn ints_de_csv(s: Str) -> [Int]
         p = if c < 0 then n + 1 else c + 1
     out
 
-// Split `s` on byte 0x01 into fields (the per-buffer diagnostic message store).
+// Split `s` on byte '\x01' into fields (the per-buffer diagnostic message store).
 fn str_split_b1(s: Str) -> [Str]
     var out: [Str] = []
     let n = str.len(s)
@@ -2930,7 +2930,7 @@ fn str_split_b1(s: Str) -> [Str]
     out
 
 // Serialize a buffer's diagnostics: the flat line/sev ints (comma-joined), a
-// NUL separator, then the messages joined by 0x01.  Per-buffer diagnostics let
+// NUL separator, then the messages joined by '\x01'.  Per-buffer diagnostics let
 // every open document keep its own diagnostics live across switches.
 fn diag_ser(li: [Int], msgs: [Str]) -> Str
     ints_ser(li) + str.from_char(0) + str.join(str.from_char(1), msgs)
@@ -2980,7 +2980,7 @@ fn buf_index_of(paths: [Str], p: Str) -> Int
 
 // Load a file from disk as one newline-joined string (a buffer's stored text).
 fn file_to_text(path: Str) -> Str [io]
-    str.join(str.from_char(10), buf_load(path))
+    str.join(str.from_char('\n'), buf_load(path))
 
 // 26 unset marks (a-z), value -1.
 fn marks_empty() -> [Int]
@@ -3097,8 +3097,8 @@ fn edit_gi(ed: Editor, st: InputState, es: EditState) -> EditStep
 // 11 T (f/t go forward; t/T stop one short of the target).
 fn edit_repeat_find(ed: Editor, st: InputState, es: EditState, reverse: Bool) -> EditStep
     let cnt = if st.count > 0 then st.count else 1
-    let fwd0 = es.findt == 8 or es.findt == 10
-    let till = es.findt == 10 or es.findt == 11
+    let fwd0 = es.findt == '\b' or es.findt == '\n'
+    let till = es.findt == '\n' or es.findt == 11
     let fwd = if reverse then not fwd0 else fwd0
     // ; / , is motion-only; reset any recording a leading count digit started.
     EditStep { ed: move_find(ed, es.findc, fwd, till, cnt), st: ist_done(st), es: EditState { last: es.last, cur: "", snaptxt: "", active: false, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: es.recording, macrobuf: es.macrobuf, awaitmac: es.awaitmac, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt, giy: es.giy, gix: es.gix } }
@@ -3149,7 +3149,7 @@ actually changed.""")
 fn feed_edit_inner(ed: Editor, st: InputState, km: Keymap, es: EditState, b: Int) -> EditStep
     if st.mode == 0 and st.pending == 0 and b == 'u'            // 'u' — undo
         return edit_undo(ed, st, es)
-    if st.mode == 0 and st.pending == 0 and b == 0x12            // Ctrl-R — redo
+    if st.mode == 0 and st.pending == 0 and b == '\x12'            // Ctrl-R — redo
         return edit_redo(ed, st, es)
     if st.mode == 0 and st.pending == 0 and b == '.'            // '.' — repeat
         return edit_dot(ed, st, km, es)
@@ -3202,7 +3202,7 @@ fn edit_persist_reg(step: EditStep) -> EditStep
         let wrote = if app then (not same) else true
         // Line-wise append joins with a newline (registers hold lines without a
         // trailing \n); skip the separator when the target is still empty.
-        let sep = if step.st.reg_lw and str.len(old) > 0 then str.from_char(10) else ""
+        let sep = if step.st.reg_lw and str.len(old) > 0 then str.from_char('\n') else ""
         let newval = if app then old + sep + step.st.reg else step.st.reg
         let newlw = step.st.reg_lw     // append keeps the appended chunk's line-wise flag
         let regs2 = if wrote then util.set_str_at(step.es.regs, idx, newval) else step.es.regs
@@ -3309,7 +3309,7 @@ fn feed_edit(ed: Editor, st: InputState, km: Keymap, es: EditState, b: Int) -> E
         return EditStep { ed: ed, st: st, es: macro_await(es, 2) }
     let result = feed_edit_core(ed, st, km, es, b)
     // A completed f/F/t/T (pending 8-11 + a target byte) → remember for ; / ,.
-    let result1 = if st.pending >= 8 and st.pending <= 11 and b != 27
+    let result1 = if st.pending >= 8 and st.pending <= 11 and b != '\e'
         EditStep { ed: result.ed, st: result.st, es: edit_save_find(result.es, b, st.pending) }
     else
         result
@@ -3361,7 +3361,7 @@ fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
     while i < n and not quit
         let b = str.byte_at(decoded, i) ?? 0
         if cmd_mode
-            if b == 13 or b == 10            // Enter — run the command
+            if b == '\r' or b == '\n'            // Enter — run the command
                 if is_substitute(cmd_buf)
                     es = edit_push_undo(es, ed)
                     ed = ex_substitute(ed, cmd_buf)
@@ -3379,27 +3379,27 @@ fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
                         quit = true
                 cmd_mode = false
                 cmd_buf = ""
-            elif b == 27                     // Esc — cancel
+            elif b == '\e'                     // Esc — cancel
                 cmd_mode = false
                 cmd_buf = ""
-            elif b == 127 or b == 8          // Backspace
+            elif b == '\x7f' or b == '\b'          // Backspace
                 if str.len(cmd_buf) > 0
                     cmd_buf = str.slice(cmd_buf, 0, str.len(cmd_buf) - 1)
-            elif b >= 32 and b < 127
+            elif b >= ' ' and b < '\x7f'
                 cmd_buf = cmd_buf + str.from_char(b)
         elif search_mode
-            if b == 13 or b == 10            // Enter — run the search
+            if b == '\r' or b == '\n'            // Enter — run the search
                 st = ist_set_search(st, search_buf)
                 ed = find_next(ed, search_buf, not search_back)
                 search_mode = false
                 search_buf = ""
-            elif b == 27                     // Esc — cancel
+            elif b == '\e'                     // Esc — cancel
                 search_mode = false
                 search_buf = ""
-            elif b == 127 or b == 8
+            elif b == '\x7f' or b == '\b'
                 if str.len(search_buf) > 0
                     search_buf = str.slice(search_buf, 0, str.len(search_buf) - 1)
-            elif b >= 32 and b < 127
+            elif b >= ' ' and b < '\x7f'
                 search_buf = search_buf + str.from_char(b)
         elif b == 58 and st.mode == 0        // ':' — open the Ex line
             cmd_mode = true
@@ -3450,7 +3450,7 @@ fn emit(s: Str) [io]
 // ESC [ — start a CSI sequence.  ESC is spelled as byte 27 rather than
 // a string escape (Novo source convention; see novomux/render.nv).
 fn csi() [io]
-    emit_byte(27)
+    emit_byte('\e')
     emit_byte(91)         // '['
 
 fn cup(row: Int, col: Int) [io]   // 1-based cursor position
@@ -3495,7 +3495,7 @@ fn expand_tabs(s: Str, ts: Int) -> Str
     let mut i = 0
     while i < n
         let b = str.byte_at(s, i) ?? 0
-        if b == 9
+        if b == '\t'
             let nextstop = ((col / ts) + 1) * ts
             while col < nextstop
                 out = out + " "
@@ -3515,7 +3515,7 @@ fn vis_col(s: Str, cx: Int, ts: Int) -> Int
     let stop = if cx > str.len(s) then str.len(s) else cx
     while i < stop
         let b = str.byte_at(s, i) ?? 0
-        if b == 9 and ts > 0
+        if b == '\t' and ts > 0
             col = ((col / ts) + 1) * ts
         elif not is_utf8_cont(b)               // UTF-8 continuation bytes add no column
             col = col + 1
@@ -3565,7 +3565,7 @@ fn emit_line_hl(expanded: Str, left: Int, width: Int, vlo: Int, vhi: Int) [io]
         if not want and insel
             sgr("0")
             insel = false
-        emit_byte(str.byte_at(expanded, c) ?? 32)
+        emit_byte(str.byte_at(expanded, c) ?? ' ')
         c = c + 1
     if insel
         sgr("0")
@@ -3669,7 +3669,7 @@ fn emit_line_styled(expanded: Str, left: Int, width: Int, vlo: Int, vhi: Int, sr
             elif want >= 1000
                 sgr("38;5;" + str.from_int(want - 1000))
             cur = want
-        emit_byte(str.byte_at(expanded, c) ?? 32)
+        emit_byte(str.byte_at(expanded, c) ?? ' ')
         c = c + 1
     if cur != 0
         sgr("0")
@@ -3976,7 +3976,7 @@ fn scroll_z_kind(b: Int) -> Int
 
 // Decode a Ctrl paging byte into a kind (0..3), or -1 if not a paging key.
 fn scroll_ctrl_kind(b: Int) -> Int
-    if b == 0x04 then 0 elif b == 0x15 then 1 elif b == 0x06 then 2 elif b == 0x02 then 3 else 0 - 1
+    if b == '\x04' then 0 elif b == '\x15' then 1 elif b == '\x06' then 2 elif b == '\x02' then 3 else 0 - 1
 
 // Target buffer line for the screen motions H / M / L (kind 0/1/2) given the
 // current viewport [top, top+body) clamped to the buffer.
@@ -4151,7 +4151,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 // (focus events, device-attribute / cursor-position replies) is
                 // ignored.  A lone ESC, or ESC + another key, is delivered as ESC.
                 var esc_skip = false
-                if b == 27
+                if b == '\e'
                     let nx = novo_pty_stdin_read_byte_h()
                     if nx == '[' or nx == 'O'
                         let packed = csi_seq()
@@ -4179,7 +4179,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                     es = dstep.es
                             elif fin == '~' and (prm == 1 or prm == 7)   // Home
                                 ed = arrow_move(ed, 'H', ins)
-                            elif fin == '~' and (prm == 4 or prm == 8)   // End
+                            elif fin == '~' and (prm == 4 or prm == '\b')   // End
                                 ed = arrow_move(ed, 'F', ins)
                             elif fin != '~'                    // arrows / Home(H) / End(F)
                                 ed = arrow_move(ed, fin, ins)
@@ -4194,7 +4194,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                     done = true
                     running = false
                 elif cmd_mode
-                    if b == 13 or b == 10            // Enter — run command
+                    if b == '\r' or b == '\n'            // Enter — run command
                         if is_substitute(cmd_buf)
                             es = edit_push_undo(es, ed)
                             ed = ex_substitute(ed, cmd_buf)
@@ -4307,7 +4307,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                 want_path = tgt
                                 want_y = 0 - 1            // restore the buffer's saved cursor
                                 want_x = 0
-                                lsp_info = str.from_char(34) + tgt + str.from_char(34)
+                                lsp_info = str.from_char('"') + tgt + str.from_char('"')
                         elif is_bufdo(cmd_buf)            // :bufdo <subcmd> — substitute across all buffers
                             let sub = cmd_arg(cmd_buf)
                             if not is_substitute(sub)
@@ -4434,29 +4434,29 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                     done = true
                         cmd_mode = false
                         cmd_buf = ""
-                    elif b == 27                     // Esc — cancel
+                    elif b == '\e'                     // Esc — cancel
                         cmd_mode = false
                         cmd_buf = ""
-                    elif b == 127 or b == 8
+                    elif b == '\x7f' or b == '\b'
                         if str.len(cmd_buf) > 0
                             cmd_buf = str.slice(cmd_buf, 0, str.len(cmd_buf) - 1)
-                    elif b >= 32 and b < 127
+                    elif b >= ' ' and b < '\x7f'
                         cmd_buf = cmd_buf + str.from_char(b)
                 elif search_mode
-                    if b == 13 or b == 10
+                    if b == '\r' or b == '\n'
                         st = ist_set_search(st, search_buf)
                         jback = list.push(jback, jentry(curpath, ed.cy, ed.cx))
                         jfwd = []
                         ed = find_next(ed, search_buf, not search_back)
                         search_mode = false
                         search_buf = ""
-                    elif b == 27
+                    elif b == '\e'
                         search_mode = false
                         search_buf = ""
-                    elif b == 127 or b == 8
+                    elif b == '\x7f' or b == '\b'
                         if str.len(search_buf) > 0
                             search_buf = str.slice(search_buf, 0, str.len(search_buf) - 1)
-                    elif b >= 32 and b < 127
+                    elif b >= ' ' and b < '\x7f'
                         search_buf = search_buf + str.from_char(b)
                 elif zpend                            // 2nd byte of a `z` command
                     zpend = false
@@ -4526,10 +4526,10 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 elif scroll_idle(st, es) and key_free(km, b) and b == '&' and str.len(last_subst) > 0   // & — repeat last :s
                     es = edit_push_undo(es, ed)
                     ed = ex_substitute(ed, subst_current_line(last_subst))
-                elif scroll_idle(st, es) and key_free(km, b) and (b == 0x05 or b == 0x19)   // Ctrl-E / Ctrl-Y — scroll one line
+                elif scroll_idle(st, es) and key_free(km, b) and (b == '\x05' or b == '\x19')   // Ctrl-E / Ctrl-Y — scroll one line
                     let body = rows - 1
                     let nl = list.len(ed.lines)
-                    if b == 0x05                     // Ctrl-E — view down
+                    if b == '\x05'                     // Ctrl-E — view down
                         top = if top + 1 < nl then top + 1 else top
                     else                             // Ctrl-Y — view up
                         top = if top - 1 > 0 then top - 1 else 0
@@ -4539,7 +4539,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                     if ncy > top + body - 1
                         ncy = top + body - 1
                     ed = clamp(Editor { lines: ed.lines, cy: ncy, cx: ed.cx })
-                elif scroll_idle(st, es) and key_free(km, b) and b == 0x0F and list.len(jback) >= 1   // Ctrl-O — jump back
+                elif scroll_idle(st, es) and key_free(km, b) and b == '\x0f' and list.len(jback) >= 1   // Ctrl-O — jump back
                     let e = jback[list.len(jback) - 1]
                     let tf = jentry_path(e)
                     if tf == curpath                       // in-buffer jump
@@ -4565,7 +4565,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                         want_path = tf
                         want_y = jentry_y(e)
                         want_x = jentry_x(e)
-                elif scroll_idle(st, es) and key_free(km, b) and b == 0x1E and alt_buf >= 0 and alt_buf < list.len(bufs_path) and alt_buf != cur_buf   // Ctrl-^ — alternate buffer
+                elif scroll_idle(st, es) and key_free(km, b) and b == '\x1e' and alt_buf >= 0 and alt_buf < list.len(bufs_path) and alt_buf != cur_buf   // Ctrl-^ — alternate buffer
                     jback = list.push(jback, jentry(curpath, ed.cy, ed.cx))
                     jfwd = []
                     want_path = bufs_path[alt_buf]
@@ -4582,7 +4582,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                     search_mode = true
                     search_buf = ""
                     search_back = true
-                elif st.mode == 1 and lsp_phase == 2 and (b == 0x0E or b == 0x10)   // Ctrl-N/P — completion
+                elif st.mode == 1 and lsp_phase == 2 and (b == '\x0e' or b == '\x10')   // Ctrl-N/P — completion
                     if not comp_active
                         let curline = line_at(ed, ed.cy)
                         comp_start = ident_start_before(curline, ed.cx)
@@ -4601,14 +4601,14 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                             lsp_info = "no completions"
                         else
                             comp_cands = cands
-                            comp_idx = if b == 0x10 then list.len(cands) - 1 else 0
+                            comp_idx = if b == '\x10' then list.len(cands) - 1 else 0
                             ed = comp_apply(ed, comp_start, ed.cx, comp_cands[comp_idx])
                             lsp_info = "match " + str.from_int(comp_idx + 1) + "/" + str.from_int(list.len(comp_cands)) + ": " + comp_cands[comp_idx]
                             comp_active = true
                     else
                         let n = list.len(comp_cands)
                         if n > 0
-                            if b == 0x0E
+                            if b == '\x0e'
                                 comp_idx = (comp_idx + 1) % n
                             else
                                 comp_idx = (comp_idx + n - 1) % n
@@ -5040,7 +5040,7 @@ fn main() [io, time]
             file = a
             i = i + 1
         else
-            extra = if str.len(extra) == 0 then a else extra + str.from_char(10) + a
+            extra = if str.len(extra) == 0 then a else extra + str.from_char('\n') + a
             i = i + 1
     let cfg_path = if cfg != "" then cfg else default_config_path()
     if file == ""
