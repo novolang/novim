@@ -2021,6 +2021,11 @@ fn is_vsplit(cmd: Str) -> Bool
     let c = str.trim(cmd)
     c == "vsplit" or c == "vs" or c == "vsp" or c == "vnew"
 
+// `:only` / `:on` — close every window except the active one.
+fn is_only(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    c == "only" or c == "on"
+
 // `:close` / `:clo` / `:q` / `:quit` — close the current window.  Only treated
 // as a window-close when more than one window is open; with a single window
 // `:q` falls through to the normal quit-the-editor path.
@@ -3964,7 +3969,7 @@ rows); for a single full-screen window (rx=ry=0) these reduce to absolute
 coordinates.  Does NOT touch cursor visibility or place the hardware cursor —
 the orchestrator (`render` / `render_all`) hides the cursor once, draws every
 window, then places it in the active window.""")
-fn draw_window(ed: Editor, win: Rect, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, clip: Bool) [io]
+fn draw_window(ed: Editor, win: Rect, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, clip: Bool, active: Bool) [io]
     let rows = win.h
     let cols = win.w
     let rx = win.x
@@ -4078,7 +4083,9 @@ fn draw_window(ed: Editor, win: Rect, path: Str, top: Int, left: Int, mode: Int,
             r = r + 1
             li = li + 1
     cup(ry + rows, rx + 1)
-    sgr(status_sgr(cs))
+    // The focused window keeps the full status styling (reverse / colourscheme
+    // colours); inactive panes draw a plain status bar so the focus is obvious.
+    sgr(if active then status_sgr(cs) else "0")
     let modestr = if mode == 1 then "-- INSERT -- " elif mode == 2 then "-- VISUAL -- " elif mode == 3 then "-- VISUAL LINE -- " elif mode == 4 then "-- REPLACE -- " else "-- NORMAL -- "
     // Diagnostics summary (E:n W:m) plus, when the cursor sits on a diagnostic
     // line, that diagnostic's message — the low-effort surface before any popup.
@@ -4133,7 +4140,7 @@ driver calls this whenever there is exactly one window.""")
 fn render(ed: Editor, win: Rect, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool) [io]
     csi()
     emit("?25l")         // hide cursor while we repaint
-    draw_window(ed, win, path, top, left, mode, avy, avx, search, cs, opts, diag_li, diag_msgs, info, modified, false)
+    draw_window(ed, win, path, top, left, mode, avy, avx, search, cs, opts, diag_li, diag_msgs, info, modified, false, true)
     place_cursor(ed, win, top, left, opts)
     cursor_shape(mode)   // block in normal/visual, bar in insert, underline in replace
     csi()
@@ -4167,7 +4174,7 @@ fn render_all(ed: Editor, lay: Layout, awin: Int, screen: Rect, win_cy: [Int], w
         // A window whose right edge is left of the screen edge (a vsplit's left
         // pane) must bounded-fill its rows, not erase-to-EOL into its neighbour.
         let clip = wr.x + wr.w < screen.w
-        draw_window(view, wr, path, wtop, wleft, wmode, wavy, wavx, search, cs, opts, diag_li, diag_msgs, winfo, modified, clip)
+        draw_window(view, wr, path, wtop, wleft, wmode, wavy, wavx, search, cs, opts, diag_li, diag_msgs, winfo, modified, clip, isact)
         i = i + 5
     place_cursor(ed, window_rect(lay, awin, screen), top, left, opts)
     cursor_shape(mode)
@@ -4795,6 +4802,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                             pending_wcmd = 4
                         elif is_winclose(cmd_buf) and layout_count(lay) > 1   // :close / :q with splits → close window
                             pending_wcmd = 3
+                        elif is_only(cmd_buf)            // :only — keep just the active window
+                            pending_wcmd = 5
                         else
                             let r = exec_ex(cmd_buf)
                             if r.save
@@ -4855,6 +4864,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                         pending_focus = window_in_dir(lay, awin, Rect { x: 0, y: 0, w: cols, h: rows }, 3)
                     elif b == 'c' or b == 'q' or b == 17 // Ctrl-W c / q / Ctrl-Q — close active window
                         pending_wcmd = 3
+                    elif b == 'o' or b == 15             // Ctrl-W o / Ctrl-O — close all but the active window
+                        pending_wcmd = 5
                 elif gpend                            // 2nd byte of a `g` (gd intercept)
                     gpend = false
                     if b == 'd' and lsp_phase == 2      // `gd` — go to definition
@@ -5159,6 +5170,11 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                     left = win_left[awin]
                     lsp_info = "closed (" + str.from_int(layout_count(lay)) + " windows)"
                     changed = true
+        elif pending_wcmd == 5                // Ctrl-W o / :only — keep just the active window
+            if layout_count(lay) > 1
+                lay = LWin(awin)              // active window keeps its live ed/top/left
+                lsp_info = "only"
+                changed = true
         pending_wcmd = 0
         // Deferred focus change (Ctrl-W w / h / j / k / l): save the active
         // window's live cursor/viewport into win_*, then make the target active
