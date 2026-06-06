@@ -4146,14 +4146,22 @@ fn render(ed: Editor, win: Rect, path: Str, top: Int, left: Int, mode: Int, avy:
     csi()
     emit("?25h")         // show the cursor at its new home
 
+// Split joined buffer text into lines, guaranteeing at least one (empty) line
+// so an empty buffer still renders a cursor row.
+fn lines_of(text: Str) -> [Str]
+    let bl = str.split_lines(text)
+    if list.len(bl) == 0 then [""] else bl
+
 @intent("""Multi-window frame: hide the cursor once, draw every window in the
-layout into its computed rect, then home the cursor in the active window.  All
-windows view the one active buffer (`ed.lines`) — slice 102 supports stacked
-(`:split`) windows only, each spanning the full terminal width so draw_window's
-`el()` clears correctly.  The active window draws from the live ed cursor /
-top / left and the real mode (selection, INSERT, gd/K info); every other window
-draws from its saved win_* cursor/viewport in plain NORMAL mode.""")
-fn render_all(ed: Editor, lay: Layout, awin: Int, screen: Rect, win_cy: [Int], win_cx: [Int], win_top: [Int], win_left: [Int], path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool) [io]
+layout into its computed rect, then home the cursor in the active window.  Each
+window draws its OWN buffer (win_buf): the active window and any pane showing
+the same buffer draw the live `ed.lines`; a pane on a different buffer draws
+that buffer's stored text (bufs_text), with its own path in the status line.
+The active window draws from the live ed cursor / top / left and the real mode
+(selection, INSERT, gd/K info); every other pane draws from its saved win_*
+cursor/viewport in plain NORMAL mode.  Diagnostics + modified flag only follow
+the live active buffer for now.""")
+fn render_all(ed: Editor, lay: Layout, awin: Int, screen: Rect, win_cy: [Int], win_cx: [Int], win_top: [Int], win_left: [Int], win_buf: [Int], cur_buf: Int, bufs_text: [Str], bufs_path: [Str], path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool) [io]
     csi()
     emit("?25l")
     let rects = layout_rects(lay, screen, [])
@@ -4162,6 +4170,8 @@ fn render_all(ed: Editor, lay: Layout, awin: Int, screen: Rect, win_cy: [Int], w
         let wid = rects[i]
         let wr = Rect { x: rects[i + 1], y: rects[i + 2], w: rects[i + 3], h: rects[i + 4] }
         let isact = wid == awin
+        let bi = win_buf[wid]
+        let same = bi == cur_buf            // shows the live (active) buffer
         let wcy = if isact then ed.cy else win_cy[wid]
         let wcx = if isact then ed.cx else win_cx[wid]
         let wtop = if isact then top else win_top[wid]
@@ -4170,11 +4180,16 @@ fn render_all(ed: Editor, lay: Layout, awin: Int, screen: Rect, win_cy: [Int], w
         let wavy = if isact then avy else wcy
         let wavx = if isact then avx else wcx
         let winfo = if isact then info else ""
-        let view = Editor { lines: ed.lines, cy: wcy, cx: wcx }
+        let wpath = if same then path else bufs_path[bi]
+        let wlines = if same then ed.lines else lines_of(bufs_text[bi])
+        let wdiag_li = if same then diag_li else []
+        let wdiag_msgs = if same then diag_msgs else []
+        let wmod = if same then modified else false
+        let view = Editor { lines: wlines, cy: wcy, cx: wcx }
         // A window whose right edge is left of the screen edge (a vsplit's left
         // pane) must bounded-fill its rows, not erase-to-EOL into its neighbour.
         let clip = wr.x + wr.w < screen.w
-        draw_window(view, wr, path, wtop, wleft, wmode, wavy, wavx, search, cs, opts, diag_li, diag_msgs, winfo, modified, clip, isact)
+        draw_window(view, wr, wpath, wtop, wleft, wmode, wavy, wavx, search, cs, opts, wdiag_li, wdiag_msgs, winfo, wmod, clip, isact)
         i = i + 5
     place_cursor(ed, window_rect(lay, awin, screen), top, left, opts)
     cursor_shape(mode)
@@ -4184,12 +4199,12 @@ fn render_all(ed: Editor, lay: Layout, awin: Int, screen: Rect, win_cy: [Int], w
 @intent("""Paint one frame, dispatching on window count: a single window keeps
 the proven byte-identical render path; two or more go through render_all.  (Not
 named `frame` — that is a reserved word in Novo.)""")
-fn paint_frame(ed: Editor, lay: Layout, awin: Int, cols: Int, rows: Int, win_cy: [Int], win_cx: [Int], win_top: [Int], win_left: [Int], path: Str, top: Int, left: Int, st: InputState, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool) [io]
+fn paint_frame(ed: Editor, lay: Layout, awin: Int, cols: Int, rows: Int, win_cy: [Int], win_cx: [Int], win_top: [Int], win_left: [Int], win_buf: [Int], cur_buf: Int, bufs_text: [Str], bufs_path: [Str], path: Str, top: Int, left: Int, st: InputState, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool) [io]
     let screen = Rect { x: 0, y: 0, w: cols, h: rows }
     if layout_count(lay) == 1
         render(ed, window_rect(lay, awin, screen), path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, info, modified)
     else
-        render_all(ed, lay, awin, screen, win_cy, win_cx, win_top, win_left, path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, info, modified)
+        render_all(ed, lay, awin, screen, win_cy, win_cx, win_top, win_left, win_buf, cur_buf, bufs_text, bufs_path, path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, info, modified)
 
 fn term_rows() -> Int [io]
     let packed = novo_pty_get_winsize_h()
@@ -4416,6 +4431,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var win_cx: [Int] = [0]
     var win_top: [Int] = [0]
     var win_left: [Int] = [0]
+    var win_buf: [Int] = [0]             // which buffer index each window displays
     var wpend = false                    // awaiting the 2nd byte of a Ctrl-W command
     var comp_active = false              // Ctrl-N/P completion cycle in progress
     var comp_cands: [Str] = []           // filtered candidate labels
@@ -4502,7 +4518,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
             lsp_phase = 1
     clear_screen()       // one-time clear of whatever was on screen before
     left = hscroll_for(left, ed, opts, cols)
-    paint_frame(ed, lay, awin, cols, rows, win_cy, win_cx, win_top, win_left, curpath, top, left, st, cs, opts, diag_li, diag_msgs, lsp_info, modified)
+    paint_frame(ed, lay, awin, cols, rows, win_cy, win_cx, win_top, win_left, win_buf, cur_buf, bufs_text, bufs_path, curpath, top, left, st, cs, opts, diag_li, diag_msgs, lsp_info, modified)
     var running = true
     while running
         // Short stdin poll keeps the editor responsive while leaving slack to
@@ -5033,6 +5049,80 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                         jback = list.push(jback, jentry(curpath, jy, jx))
                         jfwd = []
             changed = true
+        // ── Deferred window + buffer commands ───────────────────────────────
+        // Order matters: window split/close/focus run FIRST and may set
+        // `want_path` (when a focus/close move lands on a window showing a
+        // different buffer); the buffer-switch block runs AFTER so the switch
+        // completes in the same iteration, before the next keystroke is read.
+        // A window owns its view (win_cy/cx/top/left) and which buffer it shows
+        // (win_buf); a buffer owns its content + history (bufs_*).
+        if pending_wcmd == 1 or pending_wcmd == 4   // :split/Ctrl-W s (stacked) · :vsplit/Ctrl-W v (side-by-side)
+            let vertical = pending_wcmd == 4
+            win_cy = util.set_int_at(win_cy, awin, ed.cy)
+            win_cx = util.set_int_at(win_cx, awin, ed.cx)
+            win_top = util.set_int_at(win_top, awin, top)
+            win_left = util.set_int_at(win_left, awin, left)
+            let newid = list.len(win_cy)
+            win_cy = list.push(win_cy, ed.cy)
+            win_cx = list.push(win_cx, ed.cx)
+            win_top = list.push(win_top, top)
+            win_left = list.push(win_left, left)
+            win_buf = list.push(win_buf, cur_buf)   // new window shows the current buffer
+            lay = layout_split(lay, awin, newid, vertical)
+            awin = newid                                   // focus the new window
+            lsp_info = (if vertical then "vsplit (" else "split (") + str.from_int(layout_count(lay)) + " windows)"
+            changed = true
+        elif pending_wcmd == 3                // Ctrl-W c / Ctrl-W q / :close / :q — close active window
+            if layout_count(lay) > 1
+                let rem = layout_remove(lay, awin)
+                if list.len(rem) > 0
+                    lay = rem[0]
+                    let ids = layout_winids(lay, [])
+                    let surv = ids[0]            // first surviving window takes focus
+                    awin = surv
+                    if win_buf[surv] == cur_buf
+                        ed = clamp(Editor { lines: ed.lines, cy: win_cy[surv], cx: win_cx[surv] })
+                        top = win_top[surv]
+                        left = win_left[surv]
+                    else                         // survivor shows another buffer → route via want_path
+                        let tb = win_buf[surv]
+                        bufs_top = util.set_int_at(bufs_top, tb, win_top[surv])
+                        bufs_left = util.set_int_at(bufs_left, tb, win_left[surv])
+                        want_path = bufs_path[tb]
+                        want_y = win_cy[surv]
+                        want_x = win_cx[surv]
+                    lsp_info = "closed (" + str.from_int(layout_count(lay)) + " windows)"
+                    changed = true
+        elif pending_wcmd == 5                // Ctrl-W o / :only — keep just the active window
+            if layout_count(lay) > 1
+                lay = LWin(awin)              // active window keeps its live ed/top/left
+                lsp_info = "only"
+                changed = true
+        pending_wcmd = 0
+        // Deferred focus change (Ctrl-W w / h / j / k / l): save the active
+        // window's view, then activate the target — directly when it shows the
+        // same buffer, else by routing a buffer switch through `want_path` below.
+        if pending_focus >= 0 and pending_focus != awin
+            let tgt = pending_focus
+            win_cy = util.set_int_at(win_cy, awin, ed.cy)
+            win_cx = util.set_int_at(win_cx, awin, ed.cx)
+            win_top = util.set_int_at(win_top, awin, top)
+            win_left = util.set_int_at(win_left, awin, left)
+            if win_buf[tgt] == cur_buf
+                awin = tgt
+                ed = clamp(Editor { lines: ed.lines, cy: win_cy[tgt], cx: win_cx[tgt] })
+                top = win_top[tgt]
+                left = win_left[tgt]
+            else
+                let tb = win_buf[tgt]
+                bufs_top = util.set_int_at(bufs_top, tb, win_top[tgt])
+                bufs_left = util.set_int_at(bufs_left, tb, win_left[tgt])
+                want_path = bufs_path[tb]
+                want_y = win_cy[tgt]
+                want_x = win_cx[tgt]
+                awin = tgt
+            changed = true
+        pending_focus = 0 - 1
         // Deferred buffer switch — find-or-create the buffer for `want_path`,
         // save the current buffer's working copy, and activate the target
         // (restoring its content/cursor and retargeting the language server).
@@ -5107,6 +5197,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                         bufs_lspopen = util.set_bool_at(bufs_lspopen, idx, true)
             elif want_y >= 0                   // same buffer — just move the cursor
                 ed = clamp(Editor { lines: ed.lines, cy: want_y, cx: want_x })
+            win_buf = util.set_int_at(win_buf, awin, cur_buf)   // active window now shows cur_buf
             want_path = ""
             changed = true
         if str.len(want_close) > 0
@@ -5133,64 +5224,18 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                     alt_buf = 0 - 1
                 elif ci < alt_buf
                     alt_buf = alt_buf - 1
+                // shift win_buf past the removed buffer; a window that showed it
+                // falls back to the now-active buffer so no window dangles
+                var wbi = 0
+                while wbi < list.len(win_buf)
+                    if win_buf[wbi] == ci
+                        win_buf = util.set_int_at(win_buf, wbi, cur_buf)
+                    elif win_buf[wbi] > ci
+                        win_buf = util.set_int_at(win_buf, wbi, win_buf[wbi] - 1)
+                    wbi = wbi + 1
                 lsp_info = "closed; " + str.from_int(list.len(bufs_path)) + " left"
             want_close = ""
             changed = true
-        // Deferred window command — runs once after the input drain so the
-        // win_* arrays / layout mutate in one place.  All windows share the one
-        // active buffer (slice 102: stacked `:split` only); a window is a view
-        // with its own cursor/viewport.  The active window's live state lives in
-        // ed.cy/ed.cx/top/left; win_* holds every window's saved copy.
-        if pending_wcmd == 1 or pending_wcmd == 4   // :split/Ctrl-W s (stacked) · :vsplit/Ctrl-W v (side-by-side)
-            let vertical = pending_wcmd == 4
-            win_cy = util.set_int_at(win_cy, awin, ed.cy)
-            win_cx = util.set_int_at(win_cx, awin, ed.cx)
-            win_top = util.set_int_at(win_top, awin, top)
-            win_left = util.set_int_at(win_left, awin, left)
-            let newid = list.len(win_cy)
-            win_cy = list.push(win_cy, ed.cy)
-            win_cx = list.push(win_cx, ed.cx)
-            win_top = list.push(win_top, top)
-            win_left = list.push(win_left, left)
-            lay = layout_split(lay, awin, newid, vertical)
-            awin = newid                                   // focus the new window
-            lsp_info = (if vertical then "vsplit (" else "split (") + str.from_int(layout_count(lay)) + " windows)"
-            changed = true
-        elif pending_wcmd == 3                // Ctrl-W c / Ctrl-W q / :close / :q — close active window
-            if layout_count(lay) > 1
-                let rem = layout_remove(lay, awin)
-                if list.len(rem) > 0
-                    lay = rem[0]
-                    // focus the first surviving window; its saved view in win_*
-                    // is current (focus changes always write win_* before moving)
-                    let ids = layout_winids(lay, [])
-                    awin = ids[0]
-                    ed = clamp(Editor { lines: ed.lines, cy: win_cy[awin], cx: win_cx[awin] })
-                    top = win_top[awin]
-                    left = win_left[awin]
-                    lsp_info = "closed (" + str.from_int(layout_count(lay)) + " windows)"
-                    changed = true
-        elif pending_wcmd == 5                // Ctrl-W o / :only — keep just the active window
-            if layout_count(lay) > 1
-                lay = LWin(awin)              // active window keeps its live ed/top/left
-                lsp_info = "only"
-                changed = true
-        pending_wcmd = 0
-        // Deferred focus change (Ctrl-W w / h / j / k / l): save the active
-        // window's live cursor/viewport into win_*, then make the target active
-        // and restore its saved state.  A no-op when the target is the active
-        // window (edge of the layout / single window).
-        if pending_focus >= 0 and pending_focus != awin
-            win_cy = util.set_int_at(win_cy, awin, ed.cy)
-            win_cx = util.set_int_at(win_cx, awin, ed.cx)
-            win_top = util.set_int_at(win_top, awin, top)
-            win_left = util.set_int_at(win_left, awin, left)
-            awin = pending_focus
-            ed = clamp(Editor { lines: ed.lines, cy: win_cy[awin], cx: win_cx[awin] })
-            top = win_top[awin]
-            left = win_left[awin]
-            changed = true
-        pending_focus = 0 - 1
         // Live document sync, TIME-debounced: mark the buffer dirty on any
         // input, and only send `didChange` after typing pauses (~150 ms of idle
         // poll cycles).  This coalesces a burst of insert-mode keystrokes into a
@@ -5247,7 +5292,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
             top = scroll_to(top, ed.cy, rows - 1)
             left = hscroll_for(left, ed, opts, cols)
             modified = buf_text(ed) != disk_text
-            paint_frame(ed, lay, awin, cols, rows, win_cy, win_cx, win_top, win_left, curpath, top, left, st, cs, opts, diag_li, diag_msgs, lsp_info, modified)
+            paint_frame(ed, lay, awin, cols, rows, win_cy, win_cx, win_top, win_left, win_buf, cur_buf, bufs_text, bufs_path, curpath, top, left, st, cs, opts, diag_li, diag_msgs, lsp_info, modified)
             if cmd_mode
                 cup(rows, 1)
                 csi()
@@ -5266,7 +5311,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
             top = scroll_to(top, ed.cy, rows - 1)
             left = hscroll_for(left, ed, opts, cols)
             clear_screen()   // dimensions changed — clear stale content once
-            paint_frame(ed, lay, awin, cols, rows, win_cy, win_cx, win_top, win_left, curpath, top, left, st, cs, opts, diag_li, diag_msgs, lsp_info, modified)
+            paint_frame(ed, lay, awin, cols, rows, win_cy, win_cx, win_top, win_left, win_buf, cur_buf, bufs_text, bufs_path, curpath, top, left, st, cs, opts, diag_li, diag_msgs, lsp_info, modified)
     if lsp_pid >= 0                       // tear the language server down
         let _ = proc.kill(lsp_pid, 15)
         proc.close(lsp_pid)
