@@ -1,0 +1,121 @@
+// ts.nv — optional tree-sitter syntax highlighting for novim, via the
+// orbit/novo-treesitter libtree-sitter FFI shim.
+//
+// novim's native per-line tokenizer (syntax_colors) is the always-available
+// fallback; when the tree-sitter-novo grammar + libtree-sitter shim are present
+// at runtime, `ts_spans` parses the whole buffer and returns capture spans the
+// renderer folds into its per-column colour model.  Captures map to a small set
+// of "kinds" the [colorscheme] colours (keyword / type / string / comment /
+// function / number / constant / variable / operator / module).
+//
+// The @ffi(library=...) names resolve against the [ffi.tree_sitter] and
+// [ffi.novo_treesitter_shim] sections in novo.toml.
+
+// ── libtree-sitter (system) ──────────────────────────────────────────────
+@ffi(library = "tree_sitter", symbol = "ts_parser_new")
+fn ts_parser_new() -> Int
+@ffi(library = "tree_sitter", symbol = "ts_parser_delete")
+fn ts_parser_delete(parser: Int)
+@ffi(library = "tree_sitter", symbol = "ts_parser_set_language")
+fn ts_parser_set_language(parser: Int, lang: Int) -> Int
+@ffi(library = "tree_sitter", symbol = "ts_parser_parse_string")
+fn ts_parser_parse_string(parser: Int, old_tree: Int, source: Str, length: Int) -> Int
+@ffi(library = "tree_sitter", symbol = "ts_tree_delete")
+fn ts_tree_delete(tree: Int)
+
+// ── novo_treesitter_shim (TSNode-by-value wrappers + query API) ───────────
+@ffi(library = "novo_treesitter_shim", symbol = "novo_ts_load_grammar")
+fn novo_ts_load_grammar(gpath: Str, sym: Str) -> Int
+@ffi(library = "novo_treesitter_shim", symbol = "novo_ts_tree_root_node")
+fn novo_ts_tree_root_node(tree: Int, out_node_addr: Int)
+@ffi(library = "novo_treesitter_shim", symbol = "novo_ts_query_new")
+fn novo_ts_query_new(lang: Int, source: Str, source_len: Int) -> Int
+@ffi(library = "novo_treesitter_shim", symbol = "novo_ts_query_delete")
+fn novo_ts_query_delete(query: Int)
+@ffi(library = "novo_treesitter_shim", symbol = "novo_ts_query_cursor_new")
+fn novo_ts_query_cursor_new() -> Int
+@ffi(library = "novo_treesitter_shim", symbol = "novo_ts_query_cursor_delete")
+fn novo_ts_query_cursor_delete(cursor: Int)
+@ffi(library = "novo_treesitter_shim", symbol = "novo_ts_query_cursor_exec")
+fn novo_ts_query_cursor_exec(cursor: Int, query: Int, node_addr: Int)
+@ffi(library = "novo_treesitter_shim", symbol = "novo_ts_next_capture")
+fn novo_ts_next_capture(cursor: Int, query: Int, out_name_addr_ptr: Int, out_start_ptr: Int, out_end_ptr: Int) -> Int
+
+// Capture-name → colour kind.  Matches the leading dotted family so the whole
+// @keyword.* / @string.* / @function.* groups collapse to one kind.  -1 means
+// "don't colour" (punctuation/operators stay default).
+//   0 keyword · 1 type · 2 string · 3 comment · 4 function · 5 number
+//   6 constant · 7 variable · 8 module
+fn ts_capture_kind(name: Str) -> Int
+    if str.starts_with(name, "keyword")
+        0
+    elif str.starts_with(name, "type")
+        1
+    elif str.starts_with(name, "string") or str.starts_with(name, "character")
+        2
+    elif str.starts_with(name, "comment")
+        3
+    elif str.starts_with(name, "function")
+        4
+    elif str.starts_with(name, "number") or str.starts_with(name, "boolean")
+        5
+    elif str.starts_with(name, "constant")
+        6
+    elif str.starts_with(name, "variable") or str.starts_with(name, "property")
+        7
+    elif str.starts_with(name, "module")
+        8
+    else
+        0 - 1
+
+// Parse `source` with the tree-sitter-novo grammar at `grammar_path` and run the
+// highlight `queries`; return a flat [Int] of (start_byte, end_byte, kind)
+// triples (later captures override earlier on overlap — the renderer applies
+// them in order).  Returns [] if the grammar/shim can't load or parsing fails,
+// so the caller falls back to the native tokenizer.
+fn ts_spans(grammar_path: Str, queries: Str, source: Str) -> [Int]
+    let lang = novo_ts_load_grammar(grammar_path, "tree_sitter_novo")
+    if lang == 0
+        return []
+    let p = ts_parser_new()
+    if p == 0
+        return []
+    let _ = ts_parser_set_language(p, lang)
+    let tree = ts_parser_parse_string(p, 0, source, str.len(source))
+    if tree == 0
+        ts_parser_delete(p)
+        return []
+    let q = novo_ts_query_new(lang, queries, str.len(queries))
+    if q == 0
+        ts_tree_delete(tree)
+        ts_parser_delete(p)
+        return []
+    let cursor = novo_ts_query_cursor_new()
+    let out_buf = ptr.alloc(32)
+    novo_ts_tree_root_node(tree, out_buf)
+    novo_ts_query_cursor_exec(cursor, q, out_buf)
+    ptr.free(out_buf)
+    let name_slot = ptr.alloc_word()
+    let start_slot = ptr.alloc_word()
+    let end_slot = ptr.alloc_word()
+    var spans: [Int] = []
+    var keep = true
+    while keep
+        let ok = novo_ts_next_capture(cursor, q, name_slot, start_slot, end_slot)
+        if ok == 0
+            keep = false
+        else
+            let name_addr = ptr.read_word(name_slot)
+            let name = if name_addr == 0 then "" else ptr.read_str(name_addr)
+            let kind = ts_capture_kind(name)
+            if kind >= 0
+                spans = list.push(spans, ptr.read_word(start_slot))
+                spans = list.push(spans, ptr.read_word(end_slot))
+                spans = list.push(spans, kind)
+    ptr.free(name_slot)
+    ptr.free(start_slot)
+    ptr.free(end_slot)
+    novo_ts_query_cursor_delete(cursor)
+    ts_tree_delete(tree)
+    ts_parser_delete(p)
+    spans

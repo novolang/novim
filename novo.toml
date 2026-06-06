@@ -6,3 +6,17 @@ main        = "src/main.nv"
 
 [dependencies]
 # No external dependencies in v1.
+#
+# NOTE: optional tree-sitter highlighting lives in src/ts.nv (proven working —
+# novim links libtree-sitter + the orbit/novo-treesitter shim, loads the
+# grammar .so at runtime, and extracts capture spans).  It is NOT wired into
+# the build yet: the @ffi linking gives the binary a hard runtime dependency on
+# libnovo_treesitter_shim.so, and an $ORIGIN-relative rpath can't satisfy both
+# the dev path (orbit/novim/) and an installed ~/.novo/bin/novim.  Enabling it
+# needs a packaging slice — install the shim + grammar .so to a stable lib dir
+# (~/.novo/lib) with an absolute rpath — then re-add the [ffi.*] sections:
+#   [ffi.tree_sitter]
+#   pkg_config = "tree-sitter"
+#   [ffi.novo_treesitter_shim]
+#   linker = "-L<libdir> -lnovo_treesitter_shim -Wl,-rpath,<libdir> -ldl"
+# and `use ts` in main.nv.  Until then novim uses its native tokenizer.
