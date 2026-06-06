@@ -11,6 +11,7 @@
 // libutil is pulled in.
 
 use util
+use nvregex
 
 // Editor state.  The cursor is 0-based (line, col); the buffer is a line vector.
 struct Editor
@@ -1934,17 +1935,17 @@ fn ex_substitute(ed: Editor, cmd: Str) -> Editor
     let repl = if d2 < 0 then after1 else str.slice(after1, 0, d2)
     let flags = if d2 < 0 then "" else str.slice(after1, d2 + 1, str.len(after1))
     let global = util.index_of_byte(flags, 0x67) >= 0                // 'g'
-    let atoms = re_compile(pat)
+    let atoms = nvregex.re_compile(pat)
     if alllines
         var ls: [Str] = []
         let total = list.len(ed.lines)
         let mut i = 0
         while i < total
-            ls = list.append(ls, [re_replace_line(atoms, ed.lines[i], repl, global)])
+            ls = list.append(ls, [nvregex.re_replace_line(atoms, ed.lines[i], repl, global)])
             i = i + 1
         clamp(Editor { lines: ls, cy: ed.cy, cx: 0 })
     else
-        clamp(Editor { lines: set_line(ed.lines, ed.cy, re_replace_line(atoms, line_at(ed, ed.cy), repl, global)), cy: ed.cy, cx: 0 })
+        clamp(Editor { lines: set_line(ed.lines, ed.cy, nvregex.re_replace_line(atoms, line_at(ed, ed.cy), repl, global)), cy: ed.cy, cx: 0 })
 
 // ── :g / :v global delete ────────────────────────────────────
 // `:g/pat/d` deletes every line containing `pat`; `:v/pat/d` (or `:g!/pat/d`)
@@ -2225,12 +2226,12 @@ fn ex_global(ed: Editor, cmd: Str) -> Editor
     let cmdpart = if d1 < 0 then "" else str.trim(str.slice(body, d1 + 1, str.len(body)))
     if cmdpart != "d" or str.len(pat) == 0
         return ed                                             // only :…/d supported
-    let atoms = re_compile(pat)
+    let atoms = nvregex.re_compile(pat)
     var ls: [Str] = []
     let total = list.len(ed.lines)
     let mut i = 0
     while i < total
-        let matches = re_matches_line(atoms, ed.lines[i])
+        let matches = nvregex.re_matches_line(atoms, ed.lines[i])
         let keep = if invert then matches else not matches
         if keep
             ls = list.append(ls, [ed.lines[i]])
@@ -2654,370 +2655,19 @@ fn find_last_in_line(hay: Str, needle: Str, before: Int) -> Int
         i = i + 1
     found
 
-// ── Regex engine ─────────────────────────────────────────────
-// A small backtracking matcher, vim "magic" subset: literals, `.` any, `*` /
-// `\+` / `\?` quantifiers, `^` / `$` anchors, `[..]` / `[^..]` classes with
-// `a-z` ranges, and the `\d \w \s \D \W \S` shortcuts.  `:s` replacement
-// supports `&` (whole match).  Powers `/`, `?`, `n`, `*`, `#`, `:s`, `:g`.
-
-struct ReAtom
-    kind:  Int      // 0 lit, 1 any, 2 class, 3 ^, 4 $, 5 (grp, 6 )grp, 7 split, 8 jmp
-                    // for kind 7/8, `ch` is a forward offset (relative to this atom's index)
-    ch:    Int      // literal byte
-    cls:   Str      // class members (raw; `a-z` ranges interpreted at match time)
-    neg:   Bool     // negated class
-    quant: Int      // 0 none, 1 * (>=0), 2 + (>=1), 3 ? (0 or 1)
-
-fn re_atom(kind: Int, ch: Int, cls: Str, neg: Bool, quant: Int) -> ReAtom
-    ReAtom { kind: kind, ch: ch, cls: cls, neg: neg, quant: quant }
-
-// Match result: `end` is the match end index (-1 on failure); `caps` holds
-// 2 ints per group 0-9 (start, end) — group `g` occupies caps[2g], caps[2g+1].
-struct ReResult
-    end:  Int
-    caps: [Int]
-
-fn re_fail() -> ReResult
-    ReResult { end: 0 - 1, caps: [] }
-
-// Fresh capture array: 20 entries (groups 0-9), all -1 (unset).
-fn caps_empty() -> [Int]
-    var xs: [Int] = []
-    var i = 0
-    while i < 20
-        xs = list.append(xs, [0 - 1])
-        i = i + 1
-    xs
-
-// Class members for a \d \w \s shortcut letter.
-fn re_shortcut_cls(letter: Int) -> Str
-    if letter == 0x64 or letter == 0x44              // d / D
-        "0-9"
-    elif letter == 0x77 or letter == 0x57            // w / W
-        "0-9a-zA-Z_"
-    else                                             // s / S
-        str.from_char(32) + str.from_char(9)         // space + tab
-
-// Does class string `cls` contain byte `c` (handles `a-z` ranges)?
-fn re_class_has(cls: Str, c: Int) -> Bool
-    let n = str.len(cls)
-    var i = 0
-    while i < n
-        let ch = str.byte_at(cls, i) ?? 0
-        if i + 2 < n and (str.byte_at(cls, i + 1) ?? 0) == 0x2D
-            if c >= ch and c <= (str.byte_at(cls, i + 2) ?? 0)
-                return true
-            i = i + 3
-        else
-            if c == ch
-                return true
-            i = i + 1
-    false
-
-fn re_atom_matches(a: ReAtom, s: Str, si: Int) -> Bool
-    if si >= str.len(s)
-        return false
-    let c = str.byte_at(s, si) ?? 0
-    if a.kind == 0
-        c == a.ch
-    elif a.kind == 1
-        true
-    elif a.kind == 2
-        if a.neg then not re_class_has(a.cls, c) else re_class_has(a.cls, c)
-    else
-        false
-
-// Greedy match of atom `ai`'s quantifier (minc = 1 for +, 0 for *), then the
-// rest; backtracks from the longest run down to `minc`.  Returns the match end
-// index, or -1.
-fn re_match_star(atoms: [ReAtom], ai: Int, s: Str, si: Int, minc: Int, caps: [Int]) -> ReResult
-    let a = atoms[ai]
-    var matched = 0
-    while re_atom_matches(a, s, si + matched)
-        matched = matched + 1
-    var m = matched
-    while m >= minc
-        let r = re_match_here(atoms, ai + 1, s, si + m, caps)
-        if r.end >= 0
-            return r
-        m = m - 1
-    re_fail()
-
-// Match the atoms from index `ai` against `s` at `si`, threading capture state
-// `caps` (so backtracking discards captures from failed branches).  Returns a
-// ReResult whose `end` is the match end index (-1 on failure) and whose `caps`
-// reflect the successful path.
-fn re_match_here(atoms: [ReAtom], ai: Int, s: Str, si: Int, caps: [Int]) -> ReResult
-    if ai >= list.len(atoms)
-        return ReResult { end: si, caps: caps }
-    let a = atoms[ai]
-    if a.kind == 3                                   // ^
-        if si == 0
-            return re_match_here(atoms, ai + 1, s, si, caps)
-        return re_fail()
-    if a.kind == 4                                   // $
-        if si == str.len(s)
-            return re_match_here(atoms, ai + 1, s, si, caps)
-        return re_fail()
-    if a.kind == 5                                   // ( group start — zero-width
-        return re_match_here(atoms, ai + 1, s, si, util.set_int_at(caps, 2 * a.ch, si))
-    if a.kind == 6                                   // ) group end — zero-width
-        return re_match_here(atoms, ai + 1, s, si, util.set_int_at(caps, 2 * a.ch + 1, si))
-    if a.kind == 7                                   // split (alternation) — try branch 1, then 2
-        let r = re_match_here(atoms, ai + 1, s, si, caps)
-        if r.end >= 0
-            return r
-        return re_match_here(atoms, ai + a.ch, s, si, caps)
-    if a.kind == 8                                   // jump (skip 2nd alternative)
-        return re_match_here(atoms, ai + a.ch, s, si, caps)
-    if a.quant == 1                                  // *
-        return re_match_star(atoms, ai, s, si, 0, caps)
-    if a.quant == 2                                  // +
-        return re_match_star(atoms, ai, s, si, 1, caps)
-    if a.quant == 3                                  // ?
-        if re_atom_matches(a, s, si)
-            let r = re_match_here(atoms, ai + 1, s, si + 1, caps)
-            if r.end >= 0
-                return r
-        return re_match_here(atoms, ai + 1, s, si, caps)
-    if re_atom_matches(a, s, si)
-        return re_match_here(atoms, ai + 1, s, si + 1, caps)
-    re_fail()
-
-// Compile a single alternative (no top-level `\|`) into atoms.  Handles
-// literals, `.`, `[..]`/`[^..]` classes, `\d\w\s\D\W\S`, `\(..\)` capture
-// groups, `\x` escapes, `^`/`$` anchors, and `*`/`\+`/`\?` quantifiers.
-fn re_compile_one(pat: Str) -> [ReAtom]
-    var atoms: [ReAtom] = []
-    let n = str.len(pat)
-    var i = 0
-    var groupcount = 0
-    var gstack: [Int] = []
-    while i < n
-        let c = str.byte_at(pat, i) ?? 0
-        var kind = 0
-        var ch = 0
-        var cls = ""
-        var neg = false
-        if c == 0x5E and i == 0                      // ^ at start
-            kind = 3
-            i = i + 1
-        elif c == 0x24 and i == n - 1                // $ at end
-            kind = 4
-            i = i + 1
-        elif c == 0x2E                               // .
-            kind = 1
-            i = i + 1
-        elif c == 0x5B                               // [ class
-            var j = i + 1
-            if j < n and (str.byte_at(pat, j) ?? 0) == 0x5E
-                neg = true
-                j = j + 1
-            let cs = j
-            while j < n and (str.byte_at(pat, j) ?? 0) != 0x5D
-                j = j + 1
-            cls = str.slice(pat, cs, j)
-            kind = 2
-            i = if j < n then j + 1 else j
-        elif c == 0x5C and i + 1 < n                 // backslash escape
-            let nx = str.byte_at(pat, i + 1) ?? 0
-            if nx == 0x64 or nx == 0x77 or nx == 0x73        // \d \w \s
-                kind = 2
-                cls = re_shortcut_cls(nx)
-            elif nx == 0x44 or nx == 0x57 or nx == 0x53      // \D \W \S
-                kind = 2
-                cls = re_shortcut_cls(nx)
-                neg = true
-            elif nx == 0x28                                  // \( group start
-                kind = 5
-                groupcount = groupcount + 1
-                ch = groupcount
-                gstack = list.append(gstack, [groupcount])
-            elif nx == 0x29                                  // \) group end
-                kind = 6
-                ch = if list.len(gstack) > 0 then gstack[list.len(gstack) - 1] else 0
-                gstack = if list.len(gstack) > 0 then list.slice(gstack, 0, list.len(gstack) - 1) else gstack
-            else                                             // \x → literal x
-                kind = 0
-                ch = nx
-            i = i + 2
-        else                                         // literal
-            kind = 0
-            ch = c
-            i = i + 1
-        var quant = 0
-        if kind == 0 or kind == 1 or kind == 2       // quantifier lookahead
-            if i < n and (str.byte_at(pat, i) ?? 0) == 0x2A
-                quant = 1
-                i = i + 1
-            elif i + 1 < n and (str.byte_at(pat, i) ?? 0) == 0x5C and (str.byte_at(pat, i + 1) ?? 0) == 0x2B
-                quant = 2
-                i = i + 2
-            elif i + 1 < n and (str.byte_at(pat, i) ?? 0) == 0x5C and (str.byte_at(pat, i + 1) ?? 0) == 0x3F
-                quant = 3
-                i = i + 2
-        atoms = list.append(atoms, [re_atom(kind, ch, cls, neg, quant)])
-    atoms
-
-// Split a pattern into top-level alternatives at `\|` (depth 0 — `\|` inside
-// `\(..\)` or `[..]` does not split).  Other `\x` escapes are skipped whole.
-fn re_split_top(pat: Str) -> [Str]
-    var parts: [Str] = []
-    let n = str.len(pat)
-    var start = 0
-    var i = 0
-    var depth = 0
-    var inclass = false
-    while i < n
-        let c = str.byte_at(pat, i) ?? 0
-        let nx = if i + 1 < n then str.byte_at(pat, i + 1) ?? 0 else 0
-        if inclass
-            if c == 0x5D                             // ]
-                inclass = false
-            i = i + 1
-        elif c == 0x5B                               // [
-            inclass = true
-            i = i + 1
-        elif c == 0x5C and nx == 0x28                // \(
-            depth = depth + 1
-            i = i + 2
-        elif c == 0x5C and nx == 0x29                // \)
-            depth = depth - 1
-            i = i + 2
-        elif c == 0x5C and nx == 0x7C and depth == 0 // top-level \|
-            parts = list.append(parts, [str.slice(pat, start, i)])
-            i = i + 2
-            start = i
-        elif c == 0x5C and i + 1 < n                 // other escape — skip both
-            i = i + 2
-        else
-            i = i + 1
-    list.append(parts, [str.slice(pat, start, n)])
-
-// Compile a pattern into atoms.  Top-level alternation `a\|b\|c` lowers to a
-// relative-offset split/jump NFA (folded iteratively, no recursion); a pattern
-// with no top-level `\|` compiles straight through `re_compile_one`.
-fn re_compile(pat: Str) -> [ReAtom]
-    let parts = re_split_top(pat)
-    let np = list.len(parts)
-    var acc = re_compile_one(parts[np - 1])
-    var idx = np - 2
-    while idx >= 0
-        let fi = re_compile_one(parts[idx])
-        let l1 = list.len(fi)
-        let lacc = list.len(acc)
-        var out: [ReAtom] = [re_atom(7, l1 + 2, "", false, 0)]   // split → branch2
-        out = list.append(out, fi)
-        out = list.append(out, [re_atom(8, lacc + 1, "", false, 0)])   // jmp over branch2
-        out = list.append(out, acc)
-        acc = out
-        idx = idx - 1
-    acc
-
-// First match start at/after `from` (-1 if none).
-fn re_find_in_line(atoms: [ReAtom], line: Str, from: Int) -> Int
-    var i = if from < 0 then 0 else from
-    let n = str.len(line)
-    while i <= n
-        if re_match_here(atoms, 0, line, i, caps_empty()).end >= 0
-            return i
-        i = i + 1
-    0 - 1
-
-// Byte ranges of every non-overlapping match on `line`, as a flat list
-// [start0, end0, start1, end1, …] (for search highlighting).
-fn re_match_ranges(atoms: [ReAtom], line: Str) -> [Int]
-    var out: [Int] = []
-    let n = str.len(line)
-    var i = 0
-    while i <= n
-        let e = re_match_here(atoms, 0, line, i, caps_empty()).end
-        if e > i
-            out = list.append(out, [i])
-            out = list.append(out, [e])
-            i = e                    // non-overlapping: skip past this match
-        else
-            i = i + 1
-    out
-
-// Last match start strictly before `before` (before < 0 → whole line).
-fn re_find_last_in_line(atoms: [ReAtom], line: Str, before: Int) -> Int
-    let lim = if before < 0 then str.len(line) + 1 else before
-    var last = 0 - 1
-    var i = 0
-    while i < lim
-        if re_match_here(atoms, 0, line, i, caps_empty()).end >= 0
-            last = i
-        i = i + 1
-    last
-
-// Does `line` contain a match (for :g)?
-fn re_matches_line(atoms: [ReAtom], line: Str) -> Bool
-    re_find_in_line(atoms, line, 0) >= 0
-
-// Expand a replacement string: `&` → the matched text, `\1`-`\9` → the text of
-// capture group N (sliced from `line` via `caps`), `\&` → literal `&`, `\x` → x.
-fn re_expand_repl(repl: Str, matched: Str, caps: [Int], line: Str) -> Str
-    var out = ""
-    let n = str.len(repl)
-    var i = 0
-    while i < n
-        let c = str.byte_at(repl, i) ?? 0
-        if c == 0x26                                 // &
-            out = out + matched
-            i = i + 1
-        elif c == 0x5C and i + 1 < n                 // \1-\9 backref, else \x
-            let nx = str.byte_at(repl, i + 1) ?? 0
-            if nx >= 0x31 and nx <= 0x39
-                let g = nx - 0x30
-                let gs = caps[2 * g]
-                let ge = caps[2 * g + 1]
-                if gs >= 0 and ge >= gs
-                    out = out + str.slice(line, gs, ge)
-            else
-                out = out + str.from_char(nx)
-            i = i + 2
-        else
-            out = out + str.from_char(c)
-            i = i + 1
-    out
-
-// Regex replace within a line (first match, or all if global).
-fn re_replace_line(atoms: [ReAtom], line: Str, repl: Str, global: Bool) -> Str
-    var out = ""
-    let n = str.len(line)
-    var i = 0
-    var did = false
-    while i < n
-        let r = if global or not did then re_match_here(atoms, 0, line, i, caps_empty()) else re_fail()
-        let e = r.end
-        if e > i                                      // non-empty match [i, e)
-            out = out + re_expand_repl(repl, str.slice(line, i, e), r.caps, line)
-            did = true
-            i = e
-        elif e == i                                  // zero-width match
-            out = out + re_expand_repl(repl, "", r.caps, line)
-            did = true
-            out = out + str.from_char(str.byte_at(line, i) ?? 0)
-            i = i + 1
-        else
-            out = out + str.from_char(str.byte_at(line, i) ?? 0)
-            i = i + 1
-    out
-
 // Move the cursor to the next (`forward`) / previous occurrence of
 // `pattern`, wrapping around the buffer.  Unchanged if no match anywhere.
 fn find_next(ed: Editor, pattern: Str, forward: Bool) -> Editor
     if str.len(pattern) == 0
         return ed
-    let atoms = re_compile(pattern)
+    let atoms = nvregex.re_compile(pattern)
     let total = list.len(ed.lines)
     if forward
         var y = ed.cy
         var startcol = ed.cx + 1
         var steps = 0
         while steps <= total
-            let col = re_find_in_line(atoms, line_at(ed, y), startcol)
+            let col = nvregex.re_find_in_line(atoms, line_at(ed, y), startcol)
             if col >= 0
                 return Editor { lines: ed.lines, cy: y, cx: col }
             y = (y + 1) % total
@@ -3029,7 +2679,7 @@ fn find_next(ed: Editor, pattern: Str, forward: Bool) -> Editor
         var before = ed.cx
         var steps = 0
         while steps <= total
-            let col = re_find_last_in_line(atoms, line_at(ed, y), before)
+            let col = nvregex.re_find_last_in_line(atoms, line_at(ed, y), before)
             if col >= 0
                 return Editor { lines: ed.lines, cy: y, cx: col }
             y = y - 1
@@ -3930,8 +3580,8 @@ fn col_in_ranges(sr: [Int], c: Int) -> Bool
     false
 
 // Convert a regex match's byte ranges on `raw` to visual-column ranges.
-fn search_vis_ranges(atoms: [ReAtom], raw: Str, ts: Int) -> [Int]
-    let br = re_match_ranges(atoms, raw)
+fn search_vis_ranges(atoms: [nvregex.ReAtom], raw: Str, ts: Int) -> [Int]
+    let br = nvregex.re_match_ranges(atoms, raw)
     var out: [Int] = []
     var k = 0
     let m = list.len(br)
@@ -4041,7 +3691,7 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode
     let body = rows - 1
     let nl = list.len(ed.lines)
     let dohl = opts.hlsearch and str.len(search) > 0     // search highlighting
-    let satoms = if dohl then re_compile(search) else []
+    let satoms = if dohl then nvregex.re_compile(search) else []
     let dosyn = opts.syntax and ends_with_nv(path)        // Novo syntax highlighting
     let synkw = cs_or(cs.kw_fg, 170)
     let synstr = cs_or(cs.str_fg, 150)
