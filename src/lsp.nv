@@ -6,7 +6,7 @@ use util
 // Write a whole string to a fd in one bulk call (not byte-at-a-time — a large
 // didChange written one byte per syscall froze the loop for hundreds of ms).
 fn lsp_write_fd(fd: Int, s: Str) [io]
-    let _ = novo_unix_write_str_h(fd, s)
+    let _ = proc.write(fd, s)
 
 fn lsp_send(fd: Int, body: Str) [io]
     let cr = str.from_char('\r')
@@ -36,7 +36,7 @@ fn lsp_read_message(fd: Int) -> Str [io]
     var hdr = ""
     var hdone = false
     while not hdone
-        let b = novo_unix_read_byte_h(fd)
+        let b = proc.read_byte(fd)
         if b < 0
             return ""
         hdr = hdr + str.from_char(b)
@@ -49,7 +49,7 @@ fn lsp_read_message(fd: Int) -> Str [io]
     var body = ""
     var k = 0
     while k < clen
-        let b = novo_unix_read_byte_h(fd)
+        let b = proc.read_byte(fd)
         if b < 0
             return body
         body = body + str.from_char(b)
@@ -58,7 +58,7 @@ fn lsp_read_message(fd: Int) -> Str [io]
 
 // Poll-gated read: returns "" if nothing arrives within `timeout` ms.
 fn lsp_poll_message(fd: Int, timeout: Int) -> Str [io, time]
-    if novo_unix_poll_h(fd, timeout) == 1
+    if proc.poll(fd, timeout) == 1
         lsp_read_message(fd)
     else
         ""
