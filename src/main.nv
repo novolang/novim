@@ -2017,6 +2017,13 @@ fn is_split(cmd: Str) -> Bool
     let c = str.trim(cmd)
     c == "split" or c == "sp" or c == "new"
 
+// `:close` / `:clo` / `:q` / `:quit` — close the current window.  Only treated
+// as a window-close when more than one window is open; with a single window
+// `:q` falls through to the normal quit-the-editor path.
+fn is_winclose(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    c == "close" or c == "clo" or c == "q" or c == "quit"
+
 // The argument after the first space of an Ex command, trimmed.
 fn cmd_arg(cmd: Str) -> Str
     let c = str.trim(cmd)
@@ -3828,6 +3835,41 @@ fn layout_winids(lay: Layout, acc: [Int]) -> [Int]
                 i = i + 1
             a
 
+@intent("""Remove window `winid` from the tree, returning a 0-or-1 element list
+(the surviving subtree, or empty if `winid` was the whole tree).  An LRow/LCol
+that loses a child and is left with exactly one collapses to that child (no
+empty or single-child rows linger).  Returns a LIST so a removed leaf yields
+`[]` and the parent flattens — relies on the perceus empty-vec-singleton fix
+(closed/llvm-recursive-fn-returning-list-of-recursive-enum-segfault).""")
+fn layout_remove(lay: Layout, winid: Int) -> [Layout]
+    match lay
+        LWin(id) =>
+            if id == winid then [] else [LWin(id)]
+        LRow(parts) =>
+            var np: [Layout] = []
+            var i = 0
+            while i < list.len(parts)
+                np = list.append(np, layout_remove(parts[i], winid))
+                i = i + 1
+            if list.len(np) == 0
+                []
+            elif list.len(np) == 1
+                [np[0]]
+            else
+                [LRow(np)]
+        LCol(parts) =>
+            var np: [Layout] = []
+            var i = 0
+            while i < list.len(parts)
+                np = list.append(np, layout_remove(parts[i], winid))
+                i = i + 1
+            if list.len(np) == 0
+                []
+            elif list.len(np) == 1
+                [np[0]]
+            else
+                [LCol(np)]
+
 @intent("""Draw ONE window's frame into its rect: the text viewport (scrolled
 to `top`/`left`, optional line-number gutter, tab expansion, Novo syntax
 highlighting, search-match and visual-selection highlighting, per-line
@@ -4657,6 +4699,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                 done = true
                         elif is_split(cmd_buf)            // :split / :sp — stacked window split
                             pending_wcmd = 1
+                        elif is_winclose(cmd_buf) and layout_count(lay) > 1   // :close / :q with splits → close window
+                            pending_wcmd = 3
                         else
                             let r = exec_ex(cmd_buf)
                             if r.save
@@ -4705,6 +4749,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                         pending_wcmd = 1
                     elif b == 'w' or b == 23             // Ctrl-W w / Ctrl-W Ctrl-W — cycle focus
                         pending_wcmd = 2
+                    elif b == 'c' or b == 'q' or b == 17 // Ctrl-W c / q / Ctrl-Q — close active window
+                        pending_wcmd = 3
                 elif gpend                            // 2nd byte of a `g` (gd intercept)
                     gpend = false
                     if b == 'd' and lsp_phase == 2      // `gd` — go to definition
@@ -5014,6 +5060,20 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 top = win_top[nextid]
                 left = win_left[nextid]
                 changed = true
+        elif pending_wcmd == 3                // Ctrl-W c / Ctrl-W q / :close / :q — close active window
+            if layout_count(lay) > 1
+                let rem = layout_remove(lay, awin)
+                if list.len(rem) > 0
+                    lay = rem[0]
+                    // focus the first surviving window; its saved view in win_*
+                    // is current (focus changes always write win_* before moving)
+                    let ids = layout_winids(lay, [])
+                    awin = ids[0]
+                    ed = clamp(Editor { lines: ed.lines, cy: win_cy[awin], cx: win_cx[awin] })
+                    top = win_top[awin]
+                    left = win_left[awin]
+                    lsp_info = "closed (" + str.from_int(layout_count(lay)) + " windows)"
+                    changed = true
         pending_wcmd = 0
         // Live document sync, TIME-debounced: mark the buffer dirty on any
         // input, and only send `didChange` after typing pauses (~150 ms of idle
