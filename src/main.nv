@@ -13,6 +13,7 @@
 use util
 use lsp
 use nvregex
+use ts
 
 // Editor state.  The cursor is 0-based (line, col); the buffer is a line vector.
 struct Editor
@@ -2593,6 +2594,26 @@ fn is_set(cmd: Str) -> Bool
     let c = str.trim(cmd)
     c == "set" or (str.len(c) >= 4 and str.slice(c, 0, 4) == "set ")
 
+// The option token of a `:set <opt>` command (after "set ", trimmed).
+fn set_arg(cmd: Str) -> Str
+    let c = str.trim(cmd)
+    if str.len(c) >= 4 and str.slice(c, 0, 4) == "set " then str.trim(str.slice(c, 4, str.len(c))) else ""
+
+// `:set treesitter` family — the tree-sitter toggle is a driver concern (not an
+// Options field), so it's handled outside apply_set.
+fn is_ts_set(cmd: Str) -> Bool
+    let a = set_arg(cmd)
+    a == "treesitter" or a == "ts" or a == "notreesitter" or a == "nots" or a == "treesitter!" or a == "ts!"
+
+fn ts_set_value(cmd: Str, cur: Bool) -> Bool
+    let a = set_arg(cmd)
+    if a == "treesitter!" or a == "ts!"
+        not cur
+    elif str.starts_with(a, "no")
+        false
+    else
+        true
+
 // Apply one `:set` token to the options.
 fn apply_set_token(o: Options, tok: Str) -> Options
     let t = str.trim(tok)
@@ -3638,6 +3659,79 @@ fn nv_ident_char(b: Int) -> Bool
 fn nv_keyword(w: Str) -> Bool
     w == "fn" or w == "let" or w == "var" or w == "mut" or w == "if" or w == "elif" or w == "else" or w == "while" or w == "for" or w == "in" or w == "return" or w == "struct" or w == "enum" or w == "trait" or w == "impl" or w == "match" or w == "and" or w == "or" or w == "not" or w == "true" or w == "false" or w == "async" or w == "await" or w == "import" or w == "type" or w == "break" or w == "continue" or w == "then" or w == "pub" or w == "as" or w == "None" or w == "Some"
 
+// Byte offset of line `n` in the newline-joined buffer (sum of preceding line
+// lengths + 1 per join) — maps tree-sitter byte spans onto a rendered line.
+fn byte_offset_of_line(lines: [Str], n: Int) -> Int
+    var off = 0
+    var i = 0
+    while i < n and i < list.len(lines)
+        off = off + str.len(lines[i]) + 1
+        i = i + 1
+    off
+
+// 256-colour fg for a tree-sitter capture kind (see ts.ts_capture_kind).  The
+// keyword/string/comment/number kinds honour the [colorscheme] (so themes drive
+// them, like the native tokenizer); type/function/constant/module use sensible
+// defaults.  -1 = no colour (variables stay default fg).
+fn ts_color_for_kind(kind: Int, cs: Colorscheme) -> Int
+    if kind == 0
+        cs_or(cs.kw_fg, 170)
+    elif kind == 1
+        81                        // type — cyan (no dedicated [colorscheme] slot yet)
+    elif kind == 2
+        cs_or(cs.str_fg, 150)
+    elif kind == 3
+        cs_or(cs.cmt_fg, 245)
+    elif kind == 4
+        78
+    elif kind == 5
+        cs_or(cs.num_fg, 215)
+    elif kind == 6
+        215
+    elif kind == 8
+        80
+    else
+        0 - 1
+
+// Per-(expanded-)column 256-colour fg for one line, from tree-sitter capture
+// `spans` (flat start/end/kind triples over the whole buffer).  `line_start` is
+// the line's byte offset; tabs expand to `tabstop` columns so the colours line
+// up with emit_line_styled's expanded view.  Later spans override earlier on
+// overlap.  Returns [] semantics-compatible with syntax_colors (0 = default).
+fn ts_line_syncols(spans: [Int], line_start: Int, raw: Str, tabstop: Int, cs: Colorscheme) -> [Int]
+    let rlen = str.len(raw)
+    let line_end = line_start + rlen
+    // line-local spans (filtered once): start, end (line-relative), colour
+    var ls: [Int] = []
+    var k = 0
+    while k < list.len(spans)
+        if spans[k + 1] > line_start and spans[k] < line_end
+            ls = list.append(ls, [spans[k] - line_start, spans[k + 1] - line_start, ts_color_for_kind(spans[k + 2], cs)])
+        k = k + 3
+    var cols: [Int] = []
+    var b = 0
+    var vc = 0
+    while b < rlen
+        var color = 0
+        var m = 0
+        while m < list.len(ls)
+            if b >= ls[m] and b < ls[m + 1] and ls[m + 2] >= 0
+                color = ls[m + 2]
+            m = m + 3
+        let ch = str.byte_at(raw, b) ?? 0
+        if ch == '\t'
+            let w = tabstop - (vc % tabstop)
+            var t = 0
+            while t < w
+                cols = list.append(cols, [color])
+                t = t + 1
+            vc = vc + w
+        else
+            cols = list.append(cols, [color])
+            vc = vc + 1
+        b = b + 1
+    cols
+
 // Per-column 256-colour fg index for a (tab-expanded) Novo line.  0 = default.
 // `kw`/`strc`/`cmt`/`num` are the keyword/string/comment/number colours.
 fn syntax_colors(s: Str, kw: Int, strc: Int, cmt: Int, num: Int) -> [Int]
@@ -4008,7 +4102,7 @@ rows); for a single full-screen window (rx=ry=0) these reduce to absolute
 coordinates.  Does NOT touch cursor visibility or place the hardware cursor —
 the orchestrator (`render` / `render_all`) hides the cursor once, draws every
 window, then places it in the active window.""")
-fn draw_window(ed: Editor, win: Rect, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, clip: Bool, active: Bool) [io]
+fn draw_window(ed: Editor, win: Rect, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, clip: Bool, active: Bool, ts_spans: [Int]) [io]
     let rows = win.h
     let cols = win.w
     let rx = win.x
@@ -4040,6 +4134,8 @@ fn draw_window(ed: Editor, win: Rect, path: Str, top: Int, left: Int, mode: Int,
     // several screen rows, so the two are tracked separately.
     var r = 0
     var li = top
+    let dots = list.len(ts_spans) > 0            // tree-sitter spans available for this buffer
+    var line_byte = byte_offset_of_line(ed.lines, top)   // byte offset of the first visible line
     while r < body
         if li < nl
             let raw = ed.lines[li]
@@ -4057,7 +4153,7 @@ fn draw_window(ed: Editor, win: Rect, path: Str, top: Int, left: Int, mode: Int,
                     vlo = vis_col(raw, blo, opts.tabstop)
                     vhi = vis_col(raw, bhi, opts.tabstop)
             let srng = if dohl then search_vis_ranges(satoms, raw, opts.tabstop) else []
-            let syncols = if dosyn then syntax_colors(expanded, synkw, synstr, syncmt, synnum) else []
+            let syncols = if dots then ts_line_syncols(ts_spans, line_byte, raw, opts.tabstop, cs) elif dosyn then syntax_colors(expanded, synkw, synstr, syncmt, synnum) else []
             let segs = if opts.wrap and vlen > width then (vlen + width - 1) / width else 1
             var seg = 0
             while seg < segs and r < body
@@ -4109,6 +4205,7 @@ fn draw_window(ed: Editor, win: Rect, path: Str, top: Int, left: Int, mode: Int,
                 eol(clip, width - shown)
                 r = r + 1
                 seg = seg + 1
+            line_byte = line_byte + str.len(ed.lines[li]) + 1   // advance past this line + its \n
             li = li + 1
         else
             cup(ry + r + 1, rx + 1)
@@ -4176,10 +4273,10 @@ fn place_cursor(ed: Editor, win: Rect, top: Int, left: Int, opts: Options) [io]
 @intent("""Single-window frame: hide the cursor, draw the one window, place the
 cursor, restore it.  Byte-identical to the pre-split render — the interactive
 driver calls this whenever there is exactly one window.""")
-fn render(ed: Editor, win: Rect, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool) [io]
+fn render(ed: Editor, win: Rect, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, ts_spans: [Int]) [io]
     csi()
     emit("?25l")         // hide cursor while we repaint
-    draw_window(ed, win, path, top, left, mode, avy, avx, search, cs, opts, diag_li, diag_msgs, info, modified, false, true)
+    draw_window(ed, win, path, top, left, mode, avy, avx, search, cs, opts, diag_li, diag_msgs, info, modified, false, true, ts_spans)
     place_cursor(ed, win, top, left, opts)
     cursor_shape(mode)   // block in normal/visual, bar in insert, underline in replace
     csi()
@@ -4200,7 +4297,7 @@ The active window draws from the live ed cursor / top / left and the real mode
 (selection, INSERT, gd/K info); every other pane draws from its saved win_*
 cursor/viewport in plain NORMAL mode.  Diagnostics + modified flag only follow
 the live active buffer for now.""")
-fn render_all(ed: Editor, lay: Layout, awin: Int, screen: Rect, win_cy: [Int], win_cx: [Int], win_top: [Int], win_left: [Int], win_buf: [Int], win_ww: [Int], win_hw: [Int], cur_buf: Int, bufs_text: [Str], bufs_path: [Str], path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool) [io]
+fn render_all(ed: Editor, lay: Layout, awin: Int, screen: Rect, win_cy: [Int], win_cx: [Int], win_top: [Int], win_left: [Int], win_buf: [Int], win_ww: [Int], win_hw: [Int], cur_buf: Int, bufs_text: [Str], bufs_path: [Str], path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, ts_spans: [Int]) [io]
     csi()
     emit("?25l")
     let rects = layout_rects(lay, screen, win_ww, win_hw, [])
@@ -4228,7 +4325,8 @@ fn render_all(ed: Editor, lay: Layout, awin: Int, screen: Rect, win_cy: [Int], w
         // A window whose right edge is left of the screen edge (a vsplit's left
         // pane) must bounded-fill its rows, not erase-to-EOL into its neighbour.
         let clip = wr.x + wr.w < screen.w
-        draw_window(view, wr, wpath, wtop, wleft, wmode, wavy, wavx, search, cs, opts, wdiag_li, wdiag_msgs, winfo, wmod, clip, isact)
+        let wts = if same then ts_spans else []   // ts spans only for the live (active) buffer
+        draw_window(view, wr, wpath, wtop, wleft, wmode, wavy, wavx, search, cs, opts, wdiag_li, wdiag_msgs, winfo, wmod, clip, isact, wts)
         i = i + 5
     place_cursor(ed, window_rect(lay, awin, screen, win_ww, win_hw), top, left, opts)
     cursor_shape(mode)
@@ -4238,12 +4336,12 @@ fn render_all(ed: Editor, lay: Layout, awin: Int, screen: Rect, win_cy: [Int], w
 @intent("""Paint one frame, dispatching on window count: a single window keeps
 the proven byte-identical render path; two or more go through render_all.  (Not
 named `frame` — that is a reserved word in Novo.)""")
-fn paint_frame(ed: Editor, lay: Layout, awin: Int, cols: Int, rows: Int, win_cy: [Int], win_cx: [Int], win_top: [Int], win_left: [Int], win_buf: [Int], win_ww: [Int], win_hw: [Int], cur_buf: Int, bufs_text: [Str], bufs_path: [Str], path: Str, top: Int, left: Int, st: InputState, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool) [io]
+fn paint_frame(ed: Editor, lay: Layout, awin: Int, cols: Int, rows: Int, win_cy: [Int], win_cx: [Int], win_top: [Int], win_left: [Int], win_buf: [Int], win_ww: [Int], win_hw: [Int], cur_buf: Int, bufs_text: [Str], bufs_path: [Str], path: Str, top: Int, left: Int, st: InputState, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, ts_spans: [Int]) [io]
     let screen = Rect { x: 0, y: 0, w: cols, h: rows }
     if layout_count(lay) == 1
-        render(ed, window_rect(lay, awin, screen, win_ww, win_hw), path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, info, modified)
+        render(ed, window_rect(lay, awin, screen, win_ww, win_hw), path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, info, modified, ts_spans)
     else
-        render_all(ed, lay, awin, screen, win_cy, win_cx, win_top, win_left, win_buf, win_ww, win_hw, cur_buf, bufs_text, bufs_path, path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, info, modified)
+        render_all(ed, lay, awin, screen, win_cy, win_cx, win_top, win_left, win_buf, win_ww, win_hw, cur_buf, bufs_text, bufs_path, path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, info, modified, ts_spans)
 
 fn term_rows() -> Int [io]
     let packed = novo_pty_get_winsize_h()
@@ -4453,6 +4551,20 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var lsp_ver = 1
     var lsp_uri = "file://" + path
     var lsp_lasttext = ""
+    // ── Tree-sitter highlighting (optional; falls back to the native tokenizer)
+    // The grammar + queries are installed to ~/.novo/lib by
+    // orbit/novo-treesitter/bin/install-lib.sh.  `ts_spans_cache` holds the
+    // ACTIVE buffer's capture spans, recomputed when its text changes; an empty
+    // cache (grammar missing / non-.nv / parse failed) means the renderer uses
+    // syntax_colors instead.
+    let ts_lib = "/home/klajen/.novo/lib"
+    let ts_grammar = ts_lib + "/tree-sitter-novo.so"
+    let ts_queries = file_to_text(ts_lib + "/novo-highlights.scm")
+    var ts_spans_cache: [Int] = []
+    var ts_lasttext = "\x00"             // sentinel ≠ any buffer → first frame parses
+    // Opt-in (config `[options] treesitter = true` or `:set treesitter`); when
+    // off, ts_spans_cache stays empty and the renderer uses the native tokenizer.
+    var ts_enabled = util.index_of_str(file_to_text(cfg_path), "treesitter = true") >= 0
     var diag_li: [Int] = []
     var diag_msgs: [Str] = []
     var lsp_reqid = 1                    // monotonic id for gd/K requests (init used 1)
@@ -4562,7 +4674,10 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
             lsp_phase = 1
     clear_screen()       // one-time clear of whatever was on screen before
     left = hscroll_for(left, ed, opts, cols)
-    paint_frame(ed, lay, awin, cols, rows, win_cy, win_cx, win_top, win_left, win_buf, win_ww, win_hw, cur_buf, bufs_text, bufs_path, curpath, top, left, st, cs, opts, diag_li, diag_msgs, lsp_info, modified)
+    if ts_enabled and ends_with_nv(curpath) and buf_text(ed) != ts_lasttext
+        ts_lasttext = buf_text(ed)
+        ts_spans_cache = ts.ts_spans(ts_grammar, ts_queries, ts_lasttext)
+    paint_frame(ed, lay, awin, cols, rows, win_cy, win_cx, win_top, win_left, win_buf, win_ww, win_hw, cur_buf, bufs_text, bufs_path, curpath, top, left, st, cs, opts, diag_li, diag_msgs, lsp_info, modified, ts_spans_cache)
     var running = true
     while running
         // Short stdin poll keeps the editor responsive while leaving slack to
@@ -4641,6 +4756,12 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                             jback = list.push(jback, jentry(curpath, ed.cy, ed.cx))
                             jfwd = []
                             ed = ex_goto(ed, cmd_buf)
+                        elif is_set(cmd_buf) and is_ts_set(cmd_buf)   // :set treesitter / nots / ts! — driver toggle
+                            ts_enabled = ts_set_value(cmd_buf, ts_enabled)
+                            ts_lasttext = "\x00"          // force a re-parse (or clears on next frame)
+                            if not ts_enabled
+                                ts_spans_cache = []
+                            lsp_info = if ts_enabled then "treesitter on" else "treesitter off"
                         elif is_set(cmd_buf)
                             opts = apply_set(opts, cmd_buf)
                             left = hscroll_for(left, ed, opts, cols)
@@ -5351,8 +5472,14 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
         if changed
             top = scroll_to(top, ed.cy, rows - 1)
             left = hscroll_for(left, ed, opts, cols)
-            modified = buf_text(ed) != disk_text
-            paint_frame(ed, lay, awin, cols, rows, win_cy, win_cx, win_top, win_left, win_buf, win_ww, win_hw, cur_buf, bufs_text, bufs_path, curpath, top, left, st, cs, opts, diag_li, diag_msgs, lsp_info, modified)
+            let curtxt = buf_text(ed)
+            modified = curtxt != disk_text
+            // re-parse the active buffer for tree-sitter highlighting when its
+            // text (or the focused buffer) changed; empty cache → native tokenizer
+            if ts_enabled and ends_with_nv(curpath) and curtxt != ts_lasttext
+                ts_lasttext = curtxt
+                ts_spans_cache = ts.ts_spans(ts_grammar, ts_queries, curtxt)
+            paint_frame(ed, lay, awin, cols, rows, win_cy, win_cx, win_top, win_left, win_buf, win_ww, win_hw, cur_buf, bufs_text, bufs_path, curpath, top, left, st, cs, opts, diag_li, diag_msgs, lsp_info, modified, ts_spans_cache)
             if cmd_mode
                 cup(rows, 1)
                 csi()
@@ -5371,7 +5498,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
             top = scroll_to(top, ed.cy, rows - 1)
             left = hscroll_for(left, ed, opts, cols)
             clear_screen()   // dimensions changed — clear stale content once
-            paint_frame(ed, lay, awin, cols, rows, win_cy, win_cx, win_top, win_left, win_buf, win_ww, win_hw, cur_buf, bufs_text, bufs_path, curpath, top, left, st, cs, opts, diag_li, diag_msgs, lsp_info, modified)
+            paint_frame(ed, lay, awin, cols, rows, win_cy, win_cx, win_top, win_left, win_buf, win_ww, win_hw, cur_buf, bufs_text, bufs_path, curpath, top, left, st, cs, opts, diag_li, diag_msgs, lsp_info, modified, ts_spans_cache)
     if lsp_pid >= 0                       // tear the language server down
         let _ = proc.kill(lsp_pid, 15)
         proc.close(lsp_pid)
