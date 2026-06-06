@@ -3851,6 +3851,75 @@ fn layout_winids(lay: Layout, acc: [Int]) -> [Int]
                 i = i + 1
             a
 
+@intent("""The next window id after `awin` in tree order, wrapping — the target
+for `Ctrl-W w`.  Returns `awin` unchanged when there is only one window.""")
+fn win_cycle_next(lay: Layout, awin: Int) -> Int
+    let ids = layout_winids(lay, [])
+    let nw = list.len(ids)
+    if nw <= 1
+        return awin
+    var pos = 0
+    var k = 0
+    while k < nw
+        if ids[k] == awin
+            pos = k
+        k = k + 1
+    ids[(pos + 1) % nw]
+
+@intent("""The window to move focus to from `awin` in a direction (`Ctrl-W h/j/k/l`):
+dir 0=left 1=down 2=up 3=right.  Scans the computed rects for the nearest window
+that lies in that direction AND overlaps the active window on the perpendicular
+axis, by gap distance.  Returns `awin` unchanged when there is no window that
+way (edge of the layout).""")
+fn window_in_dir(lay: Layout, awin: Int, screen: Rect, dir: Int) -> Int
+    let rects = layout_rects(lay, screen, [])
+    var ax = 0
+    var ay = 0
+    var aw = 0
+    var ah = 0
+    var k = 0
+    while k < list.len(rects)
+        if rects[k] == awin
+            ax = rects[k + 1]
+            ay = rects[k + 2]
+            aw = rects[k + 3]
+            ah = rects[k + 4]
+        k = k + 5
+    var best = awin
+    var bestd = 1000000
+    var j = 0
+    while j < list.len(rects)
+        let wid = rects[j]
+        let wx = rects[j + 1]
+        let wy = rects[j + 2]
+        let ww = rects[j + 3]
+        let wh = rects[j + 4]
+        // overlap on the axis perpendicular to the move
+        let voverlap = wy < ay + ah and wy + wh > ay
+        let hoverlap = wx < ax + aw and wx + ww > ax
+        let indir = if dir == 0
+            wx + ww <= ax and voverlap
+        elif dir == 3
+            wx >= ax + aw and voverlap
+        elif dir == 2
+            wy + wh <= ay and hoverlap
+        else
+            wy >= ay + ah and hoverlap
+        if wid != awin and indir
+            let d = if dir == 0
+                ax - (wx + ww)
+            elif dir == 3
+                wx - (ax + aw)
+            elif dir == 2
+                ay - (wy + wh)
+            else
+                wy - (ay + ah)
+            if d < bestd
+                bestd = d
+                best = wid
+        j = j + 5
+    best
+
 @intent("""Remove window `winid` from the tree, returning a 0-or-1 element list
 (the surviving subtree, or empty if `winid` was the whole tree).  An LRow/LCol
 that loses a child and is left with exactly one collapses to that child (no
@@ -4404,9 +4473,11 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var want_y = 0
     var want_x = 0
     var want_close = ""
-    // Deferred window command (set by `:split` / `Ctrl-W s` / `Ctrl-W w`, run
-    // after the input drain): 0 none · 1 horizontal split · 2 cycle focus.
+    // Deferred window command (set by `:split` / `:vsplit` / `Ctrl-W s/v/c/q`,
+    // run after the input drain): 0 none · 1 hsplit · 3 close · 4 vsplit.
     var pending_wcmd = 0
+    // Deferred focus change to this window id (Ctrl-W w / h / j / k / l); -1 none.
+    var pending_focus = 0 - 1
     var buflist = false                  // `:ls` — show the buffer-list overlay until the next key
     var modified = false                 // active buffer differs from disk → status `[+]`
     var lsp_dirty = false                // buffer changed since the last didChange
@@ -4773,7 +4844,15 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                     elif b == 'v' or b == 'V' or b == 22 // Ctrl-W v / V / Ctrl-V — vertical split
                         pending_wcmd = 4
                     elif b == 'w' or b == 23             // Ctrl-W w / Ctrl-W Ctrl-W — cycle focus
-                        pending_wcmd = 2
+                        pending_focus = win_cycle_next(lay, awin)
+                    elif b == 'h'                        // Ctrl-W h — focus window to the left
+                        pending_focus = window_in_dir(lay, awin, Rect { x: 0, y: 0, w: cols, h: rows }, 0)
+                    elif b == 'j'                        // Ctrl-W j — focus window below
+                        pending_focus = window_in_dir(lay, awin, Rect { x: 0, y: 0, w: cols, h: rows }, 1)
+                    elif b == 'k'                        // Ctrl-W k — focus window above
+                        pending_focus = window_in_dir(lay, awin, Rect { x: 0, y: 0, w: cols, h: rows }, 2)
+                    elif b == 'l'                        // Ctrl-W l — focus window to the right
+                        pending_focus = window_in_dir(lay, awin, Rect { x: 0, y: 0, w: cols, h: rows }, 3)
                     elif b == 'c' or b == 'q' or b == 17 // Ctrl-W c / q / Ctrl-Q — close active window
                         pending_wcmd = 3
                 elif gpend                            // 2nd byte of a `g` (gd intercept)
@@ -5066,26 +5145,6 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
             awin = newid                                   // focus the new window
             lsp_info = (if vertical then "vsplit (" else "split (") + str.from_int(layout_count(lay)) + " windows)"
             changed = true
-        elif pending_wcmd == 2                // Ctrl-W w — cycle focus
-            let ids = layout_winids(lay, [])
-            let nw = list.len(ids)
-            if nw > 1
-                win_cy = util.set_int_at(win_cy, awin, ed.cy)
-                win_cx = util.set_int_at(win_cx, awin, ed.cx)
-                win_top = util.set_int_at(win_top, awin, top)
-                win_left = util.set_int_at(win_left, awin, left)
-                var pos = 0
-                var wk = 0
-                while wk < nw
-                    if ids[wk] == awin
-                        pos = wk
-                    wk = wk + 1
-                let nextid = ids[(pos + 1) % nw]
-                awin = nextid
-                ed = clamp(Editor { lines: ed.lines, cy: win_cy[nextid], cx: win_cx[nextid] })
-                top = win_top[nextid]
-                left = win_left[nextid]
-                changed = true
         elif pending_wcmd == 3                // Ctrl-W c / Ctrl-W q / :close / :q — close active window
             if layout_count(lay) > 1
                 let rem = layout_remove(lay, awin)
@@ -5101,6 +5160,21 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                     lsp_info = "closed (" + str.from_int(layout_count(lay)) + " windows)"
                     changed = true
         pending_wcmd = 0
+        // Deferred focus change (Ctrl-W w / h / j / k / l): save the active
+        // window's live cursor/viewport into win_*, then make the target active
+        // and restore its saved state.  A no-op when the target is the active
+        // window (edge of the layout / single window).
+        if pending_focus >= 0 and pending_focus != awin
+            win_cy = util.set_int_at(win_cy, awin, ed.cy)
+            win_cx = util.set_int_at(win_cx, awin, ed.cx)
+            win_top = util.set_int_at(win_top, awin, top)
+            win_left = util.set_int_at(win_left, awin, left)
+            awin = pending_focus
+            ed = clamp(Editor { lines: ed.lines, cy: win_cy[awin], cx: win_cx[awin] })
+            top = win_top[awin]
+            left = win_left[awin]
+            changed = true
+        pending_focus = 0 - 1
         // Live document sync, TIME-debounced: mark the buffer dirty on any
         // input, and only send `didChange` after typing pauses (~150 ms of idle
         // poll cycles).  This coalesces a burst of insert-mode keystrokes into a
