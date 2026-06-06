@@ -1,0 +1,113 @@
+// util.nv — low-level string / list helpers shared across novim's modules.
+//
+// Pure functions only (no Editor or driver state), so any module can `use util`
+// and call them as `util.<name>`.  Novo's value semantics mean the list setters
+// and removers return a fresh list rather than mutating in place.
+
+@intent("Index of the first occurrence of byte `b` in `s`, or -1 if absent.")
+fn index_of_byte(s: Str, b: Int) -> Int
+    let n = str.len(s)
+    let mut i = 0
+    while i < n
+        if (str.byte_at(s, i) ?? 0) == b
+            return i
+        i = i + 1
+    0 - 1
+
+@intent("First byte offset of byte `b` at or after `from` in `s`, or -1.")
+fn index_of_byte_from(s: Str, b: Int, from: Int) -> Int
+    let n = str.len(s)
+    var i = from
+    while i < n
+        if (str.byte_at(s, i) ?? 0) == b
+            return i
+        i = i + 1
+    0 - 1
+
+@intent("First byte offset of substring `needle` in `s`, or -1 if absent (0 for an empty needle).")
+fn index_of_str(s: Str, needle: Str) -> Int
+    let n = str.len(s)
+    let m = str.len(needle)
+    if m == 0
+        return 0
+    let mut i = 0
+    while i + m <= n
+        var j = 0
+        var ok = true
+        while j < m and ok
+            if (str.byte_at(s, i + j) ?? 0) != (str.byte_at(needle, j) ?? 0)
+                ok = false
+            j = j + 1
+        if ok
+            return i
+        i = i + 1
+    0 - 1
+
+@intent("Return a copy of `xs` with element `idx` replaced by `v`.")
+fn set_str_at(xs: [Str], idx: Int, v: Str) -> [Str]
+    var out: [Str] = []
+    let n = list.len(xs)
+    let mut i = 0
+    while i < n
+        if i == idx
+            out = list.append(out, [v])
+        else
+            out = list.append(out, [xs[i]])
+        i = i + 1
+    out
+
+@intent("Return a copy of `xs` with element `idx` replaced by `v`.")
+fn set_int_at(xs: [Int], idx: Int, v: Int) -> [Int]
+    var out: [Int] = []
+    let n = list.len(xs)
+    let mut i = 0
+    while i < n
+        if i == idx
+            out = list.append(out, [v])
+        else
+            out = list.append(out, [xs[i]])
+        i = i + 1
+    out
+
+@intent("Return a copy of `xs` with element `idx` replaced by `v`.")
+fn set_bool_at(xs: [Bool], idx: Int, v: Bool) -> [Bool]
+    var out: [Bool] = []
+    let n = list.len(xs)
+    let mut i = 0
+    while i < n
+        if i == idx
+            out = list.append(out, [v])
+        else
+            out = list.append(out, [xs[i]])
+        i = i + 1
+    out
+
+@intent("Return a copy of `xs` with element `idx` removed.")
+fn remove_at_str(xs: [Str], idx: Int) -> [Str]
+    var out: [Str] = []
+    var i = 0
+    while i < list.len(xs)
+        if i != idx
+            out = list.push(out, xs[i])
+        i = i + 1
+    out
+
+@intent("Return a copy of `xs` with element `idx` removed.")
+fn remove_at_int(xs: [Int], idx: Int) -> [Int]
+    var out: [Int] = []
+    var i = 0
+    while i < list.len(xs)
+        if i != idx
+            out = list.push(out, xs[i])
+        i = i + 1
+    out
+
+@intent("Return a copy of `xs` with element `idx` removed.")
+fn remove_at_bool(xs: [Bool], idx: Int) -> [Bool]
+    var out: [Bool] = []
+    var i = 0
+    while i < list.len(xs)
+        if i != idx
+            out = list.push(out, xs[i])
+        i = i + 1
+    out

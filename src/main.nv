@@ -10,6 +10,8 @@
 // drive.  `novo_pty_` references also trip the stdlib's conditional-link so
 // libutil is pulled in.
 
+use util
+
 // Editor state.  The cursor is 0-based (line, col); the buffer is a line vector.
 struct Editor
     lines: [Str]
@@ -90,35 +92,6 @@ fn clamp(ed: Editor) -> Editor
 
 fn line_at(ed: Editor, y: Int) -> Str
     if y >= 0 and y < list.len(ed.lines) then ed.lines[y] else ""
-
-// Index of the first occurrence of byte `b` in `s`, or -1.
-fn index_of_byte(s: Str, b: Int) -> Int
-    let n = str.len(s)
-    let mut i = 0
-    while i < n
-        if (str.byte_at(s, i) ?? 0) == b
-            return i
-        i = i + 1
-    0 - 1
-
-// First byte offset of substring `needle` in `s`, or -1 if absent.
-fn index_of_str(s: Str, needle: Str) -> Int
-    let n = str.len(s)
-    let m = str.len(needle)
-    if m == 0
-        return 0
-    let mut i = 0
-    while i + m <= n
-        var j = 0
-        var ok = true
-        while j < m and ok
-            if (str.byte_at(s, i + j) ?? 0) != (str.byte_at(needle, j) ?? 0)
-                ok = false
-            j = j + 1
-        if ok
-            return i
-        i = i + 1
-    0 - 1
 
 // Column of the first non-blank glyph on `line` (0 if all blank/empty).
 fn first_nonblank(line: Str) -> Int
@@ -1954,13 +1927,13 @@ fn ex_substitute(ed: Editor, cmd: Str) -> Editor
     let p = if alllines then 1 else 0
     let delim = str.byte_at(c, p + 1) ?? 0
     let body = str.slice(c, p + 2, str.len(c))                  // after "s<delim>"
-    let d1 = index_of_byte(body, delim)
+    let d1 = util.index_of_byte(body, delim)
     let pat = if d1 < 0 then body else str.slice(body, 0, d1)
     let after1 = if d1 < 0 then "" else str.slice(body, d1 + 1, str.len(body))
-    let d2 = index_of_byte(after1, delim)
+    let d2 = util.index_of_byte(after1, delim)
     let repl = if d2 < 0 then after1 else str.slice(after1, 0, d2)
     let flags = if d2 < 0 then "" else str.slice(after1, d2 + 1, str.len(after1))
-    let global = index_of_byte(flags, 0x67) >= 0                // 'g'
+    let global = util.index_of_byte(flags, 0x67) >= 0                // 'g'
     let atoms = re_compile(pat)
     if alllines
         var ls: [Str] = []
@@ -2022,12 +1995,12 @@ fn is_edit_cmd(cmd: Str) -> Bool
 
 fn edit_cmd_bang(cmd: Str) -> Bool
     let c = str.trim(cmd)
-    index_of_byte(c, 0x21) >= 0          // contains '!'
+    util.index_of_byte(c, 0x21) >= 0          // contains '!'
 
 // The path after `:e`/`:edit` (and optional `!`), trimmed.
 fn edit_cmd_path(cmd: Str) -> Str
     let c = str.trim(cmd)
-    let sp = index_of_byte(c, 0x20)      // first space
+    let sp = util.index_of_byte(c, 0x20)      // first space
     if sp < 0 then "" else str.trim(str.slice(c, sp + 1, str.len(c)))
 
 // Bare `:e`/`:e!`/`:edit`/`:edit!` (no filename) — reload the current file from
@@ -2039,7 +2012,7 @@ fn is_reload(cmd: Str) -> Bool
 // The argument after the first space of an Ex command, trimmed.
 fn cmd_arg(cmd: Str) -> Str
     let c = str.trim(cmd)
-    let sp = index_of_byte(c, 0x20)
+    let sp = util.index_of_byte(c, 0x20)
     if sp < 0 then "" else str.trim(str.slice(c, sp + 1, str.len(c)))
 
 // `:bufdo <subcmd>` — run a substitution across every buffer (v1: `:s`/`:%s`).
@@ -2100,7 +2073,7 @@ fn bgoto_arg(cmd: Str) -> Str
     let c = str.trim(cmd)
     if c == "b#" or c == "buffer#"
         return "#"
-    let sp = index_of_byte(c, 0x20)
+    let sp = util.index_of_byte(c, 0x20)
     if sp < 0 then "" else str.trim(str.slice(c, sp + 1, str.len(c)))
 
 // The 1-based buffer number from `:b <n>`, or -1 if the arg isn't a number.
@@ -2157,7 +2130,7 @@ fn mark_all_saved(texts: [Str], disks: [Str]) -> [Str]
     var d = disks
     var i = 0
     while i < list.len(texts)
-        d = set_str_at(d, i, texts[i])
+        d = util.set_str_at(d, i, texts[i])
         i = i + 1
     d
 
@@ -2165,7 +2138,7 @@ fn mark_all_saved(texts: [Str], disks: [Str]) -> [Str]
 fn buf_find_by_name(paths: [Str], name: Str) -> Int
     var i = 0
     while i < list.len(paths)
-        if index_of_str(basename_of(paths[i]), name) >= 0 or index_of_str(paths[i], name) >= 0
+        if util.index_of_str(basename_of(paths[i]), name) >= 0 or util.index_of_str(paths[i], name) >= 0
             return i
         i = i + 1
     0 - 1
@@ -2247,7 +2220,7 @@ fn ex_global(ed: Editor, cmd: Str) -> Editor
     let p = if bang then 2 else 1
     let delim = str.byte_at(c, p) ?? 0
     let body = str.slice(c, p + 1, str.len(c))
-    let d1 = index_of_byte(body, delim)
+    let d1 = util.index_of_byte(body, delim)
     let pat = if d1 < 0 then body else str.slice(body, 0, d1)
     let cmdpart = if d1 < 0 then "" else str.trim(str.slice(body, d1 + 1, str.len(body)))
     if cmdpart != "d" or str.len(pat) == 0
@@ -2399,7 +2372,7 @@ fn load_keymaps(cfg_path: Str) -> Keymap [io]
                     if (str.byte_at(raw, 0) ?? 0) == 91                     // '[' section
                         in_km = raw == "[keymaps]"
                     elif in_km
-                        let eq = index_of_byte(raw, 61)                     // '='
+                        let eq = util.index_of_byte(raw, 61)                     // '='
                         if eq > 0
                             let lkey = strip_quotes(str.trim(str.slice(raw, 0, eq)))
                             let rseq = strip_quotes(str.trim(strip_inline_comment(str.slice(raw, eq + 1, str.len(raw)))))
@@ -2457,7 +2430,7 @@ fn load_colorscheme(cfg_path: Str) -> Colorscheme [io]
                     if (str.byte_at(raw, 0) ?? 0) == 91
                         in_cs = raw == "[colorscheme]"
                     elif in_cs
-                        let eq = index_of_byte(raw, 61)
+                        let eq = util.index_of_byte(raw, 61)
                         if eq > 0
                             let key = str.trim(str.slice(raw, 0, eq))
                             let cv = parse_color_val(strip_inline_comment(str.slice(raw, eq + 1, str.len(raw))))
@@ -2531,7 +2504,7 @@ fn load_options(cfg_path: Str) -> Options [io]
                     if (str.byte_at(raw, 0) ?? 0) == 91
                         in_opt = raw == "[options]"
                     elif in_opt
-                        let eq = index_of_byte(raw, 61)
+                        let eq = util.index_of_byte(raw, 61)
                         if eq > 0
                             let key = str.trim(str.slice(raw, 0, eq))
                             let valr = strip_inline_comment(str.slice(raw, eq + 1, str.len(raw)))
@@ -2601,7 +2574,7 @@ fn apply_set_token(o: Options, tok: Str) -> Options
     let t = str.trim(tok)
     if str.len(t) == 0
         return o
-    let eq = index_of_byte(t, 0x3D)
+    let eq = util.index_of_byte(t, 0x3D)
     if eq > 0                                       // name=value (tabstop=4)
         let nm = str.trim(str.slice(t, 0, eq))
         let v = parse_color_val(str.slice(t, eq + 1, str.len(t)))
@@ -2787,9 +2760,9 @@ fn re_match_here(atoms: [ReAtom], ai: Int, s: Str, si: Int, caps: [Int]) -> ReRe
             return re_match_here(atoms, ai + 1, s, si, caps)
         return re_fail()
     if a.kind == 5                                   // ( group start — zero-width
-        return re_match_here(atoms, ai + 1, s, si, set_int_at(caps, 2 * a.ch, si))
+        return re_match_here(atoms, ai + 1, s, si, util.set_int_at(caps, 2 * a.ch, si))
     if a.kind == 6                                   // ) group end — zero-width
-        return re_match_here(atoms, ai + 1, s, si, set_int_at(caps, 2 * a.ch + 1, si))
+        return re_match_here(atoms, ai + 1, s, si, util.set_int_at(caps, 2 * a.ch + 1, si))
     if a.kind == 7                                   // split (alternation) — try branch 1, then 2
         let r = re_match_here(atoms, ai + 1, s, si, caps)
         if r.end >= 0
@@ -3209,16 +3182,6 @@ fn snap_of(ed: Editor) -> Snapshot
 // the same flat storage shape `bufs_text` uses — a deliberately simple,
 // uniform representation rather than threading `[[Snapshot]]` through the driver.
 
-// Offset of the first byte `b` at or after `from`, or -1.
-fn index_of_byte_from(s: Str, b: Int, from: Int) -> Int
-    let n = str.len(s)
-    var i = from
-    while i < n
-        if (str.byte_at(s, i) ?? 0) == b
-            return i
-        i = i + 1
-    0 - 1
-
 // Serialize one snapshot as "cy,cx,LEN:TEXT" (TEXT = lines joined by \n; the
 // LEN prefix makes each record self-delimiting whatever TEXT contains).
 fn snap_ser(s: Snapshot) -> Str
@@ -3240,9 +3203,9 @@ fn snaps_de(s: Str) -> [Snapshot]
     let n = str.len(s)
     var p = 0
     while p < n
-        let c1 = index_of_byte_from(s, 0x2C, p)         // ','
-        let c2 = index_of_byte_from(s, 0x2C, c1 + 1)    // ','
-        let c3 = index_of_byte_from(s, 0x3A, c2 + 1)    // ':'
+        let c1 = util.index_of_byte_from(s, 0x2C, p)         // ','
+        let c2 = util.index_of_byte_from(s, 0x2C, c1 + 1)    // ','
+        let c3 = util.index_of_byte_from(s, 0x3A, c2 + 1)    // ':'
         if c1 < 0 or c2 < 0 or c3 < 0
             return out
         let cy = str.to_int(str.slice(s, p, c1)) ?? 0
@@ -3276,7 +3239,7 @@ fn marks_de(s: Str) -> [Int]
     let n = str.len(s)
     var p = 0
     while p <= n
-        let c = index_of_byte_from(s, 0x2C, p)
+        let c = util.index_of_byte_from(s, 0x2C, p)
         let endp = if c < 0 then n else c
         let v = str.to_int(str.slice(s, p, endp)) ?? (0 - 1)
         out = list.append(out, [v])
@@ -3294,7 +3257,7 @@ fn ints_de_csv(s: Str) -> [Int]
     let n = str.len(s)
     var p = 0
     while p <= n
-        let c = index_of_byte_from(s, 0x2C, p)
+        let c = util.index_of_byte_from(s, 0x2C, p)
         let endp = if c < 0 then n else c
         let v = str.to_int(str.slice(s, p, endp)) ?? 0
         out = list.append(out, [v])
@@ -3322,12 +3285,12 @@ fn diag_ser(li: [Int], msgs: [Str]) -> Str
     ints_ser(li) + str.from_char(0) + str.join(str.from_char(1), msgs)
 
 fn diag_de_li(s: Str) -> [Int]
-    let z = index_of_byte(s, 0)
+    let z = util.index_of_byte(s, 0)
     let head = if z < 0 then s else str.slice(s, 0, z)
     ints_de_csv(head)
 
 fn diag_de_msgs(s: Str) -> [Str]
-    let z = index_of_byte(s, 0)
+    let z = util.index_of_byte(s, 0)
     if z < 0
         var e: [Str] = []
         return e
@@ -3355,22 +3318,6 @@ fn reglw_empty() -> [Bool]
         i = i + 1
     x
 
-// Rebuild a register array with slot `idx` replaced (no in-place mutation).
-fn set_str_at(xs: [Str], idx: Int, v: Str) -> [Str]
-    var out: [Str] = []
-    let n = list.len(xs)
-    let mut i = 0
-    while i < n
-        if i == idx
-            out = list.append(out, [v])
-        else
-            out = list.append(out, [xs[i]])
-        i = i + 1
-    out
-
-// (`set_int_at` — the [Int] element setter used by the buffer stores — already
-// exists below, near the marks helpers; no second copy here.)
-
 // Index of `p` in a list of buffer paths, or -1.
 fn buf_index_of(paths: [Str], p: Str) -> Int
     var i = 0
@@ -3384,18 +3331,6 @@ fn buf_index_of(paths: [Str], p: Str) -> Int
 fn file_to_text(path: Str) -> Str [io]
     str.join(str.from_char(10), buf_load(path))
 
-fn set_bool_at(xs: [Bool], idx: Int, v: Bool) -> [Bool]
-    var out: [Bool] = []
-    let n = list.len(xs)
-    let mut i = 0
-    while i < n
-        if i == idx
-            out = list.append(out, [v])
-        else
-            out = list.append(out, [xs[i]])
-        i = i + 1
-    out
-
 // 26 unset marks (a-z), value -1.
 fn marks_empty() -> [Int]
     var x: [Int] = []
@@ -3404,18 +3339,6 @@ fn marks_empty() -> [Int]
         x = list.append(x, [0 - 1])
         i = i + 1
     x
-
-fn set_int_at(xs: [Int], idx: Int, v: Int) -> [Int]
-    var out: [Int] = []
-    let n = list.len(xs)
-    let mut i = 0
-    while i < n
-        if i == idx
-            out = list.append(out, [v])
-        else
-            out = list.append(out, [xs[i]])
-        i = i + 1
-    out
 
 fn edit_new() -> EditState
     EditState { last: "", cur: "", snaptxt: "", active: false, snaped: snap_empty(), undos: snaps_empty(), redos: snaps_empty(), regs: regs_empty(), reglw: reglw_empty(), rreg: 0, awaitreg: false, marky: marks_empty(), markx: marks_empty(), awaitmark: 0, recording: 0, macrobuf: "", awaitmac: 0, lastmacro: 0, lvy: 0 - 1, lvx: 0 - 1, lvey: 0 - 1, lvex: 0 - 1, lvmode: 0, findc: 0, findt: 0, giy: 0 - 1, gix: 0 - 1 }
@@ -3480,8 +3403,8 @@ fn edit_regv(ed: Editor, st: InputState, es: EditState) -> EditStep
 fn edit_numreg_yank(es: EditState, text: Str, lw: Bool) -> EditState
     var r = es.regs
     var w = es.reglw
-    r = set_str_at(r, 26, text)
-    w = set_bool_at(w, 26, lw)
+    r = util.set_str_at(r, 26, text)
+    w = util.set_bool_at(w, 26, lw)
     EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: r, reglw: w, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: es.recording, macrobuf: es.macrobuf, awaitmac: es.awaitmac, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt, giy: es.giy, gix: es.gix }
 
 // A linewise delete → shift the "1-"9 ring (slots 27-35) and store at "1.
@@ -3490,19 +3413,19 @@ fn edit_numreg_del(es: EditState, text: Str) -> EditState
     var w = es.reglw
     var i = 35
     while i >= 28
-        r = set_str_at(r, i, r[i - 1])
-        w = set_bool_at(w, i, w[i - 1])
+        r = util.set_str_at(r, i, r[i - 1])
+        w = util.set_bool_at(w, i, w[i - 1])
         i = i - 1
-    r = set_str_at(r, 27, text)
-    w = set_bool_at(w, 27, true)
+    r = util.set_str_at(r, 27, text)
+    w = util.set_bool_at(w, 27, true)
     EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: r, reglw: w, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: es.recording, macrobuf: es.macrobuf, awaitmac: es.awaitmac, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt, giy: es.giy, gix: es.gix }
 
 // A charwise (sub-line) delete → the small-delete register "- (slot 36).
 fn edit_numreg_small(es: EditState, text: Str) -> EditState
     var r = es.regs
     var w = es.reglw
-    r = set_str_at(r, 36, text)
-    w = set_bool_at(w, 36, false)
+    r = util.set_str_at(r, 36, text)
+    w = util.set_bool_at(w, 36, false)
     EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: r, reglw: w, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: es.recording, macrobuf: es.macrobuf, awaitmac: es.awaitmac, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt, giy: es.giy, gix: es.gix }
 
 // Remember the f/F/t/T that just completed (target `c`, pending `t`) for ; / ,.
@@ -3631,8 +3554,8 @@ fn edit_persist_reg(step: EditStep) -> EditStep
         let sep = if step.st.reg_lw and str.len(old) > 0 then str.from_char(10) else ""
         let newval = if app then old + sep + step.st.reg else step.st.reg
         let newlw = step.st.reg_lw     // append keeps the appended chunk's line-wise flag
-        let regs2 = if wrote then set_str_at(step.es.regs, idx, newval) else step.es.regs
-        let lw2 = if wrote then set_bool_at(step.es.reglw, idx, newlw) else step.es.reglw
+        let regs2 = if wrote then util.set_str_at(step.es.regs, idx, newval) else step.es.regs
+        let lw2 = if wrote then util.set_bool_at(step.es.reglw, idx, newlw) else step.es.reglw
         EditStep { ed: step.ed, st: step.st, es: EditState { last: step.es.last, cur: step.es.cur, snaptxt: step.es.snaptxt, active: step.es.active, snaped: step.es.snaped, undos: step.es.undos, redos: step.es.redos, regs: regs2, reglw: lw2, rreg: 0, awaitreg: step.es.awaitreg, marky: step.es.marky, markx: step.es.markx, awaitmark: step.es.awaitmark, recording: step.es.recording, macrobuf: step.es.macrobuf, awaitmac: step.es.awaitmac, lastmacro: step.es.lastmacro, lvy: step.es.lvy, lvx: step.es.lvx, lvey: step.es.lvey, lvex: step.es.lvex, lvmode: step.es.lvmode, findc: step.es.findc, findt: step.es.findt, giy: step.es.giy, gix: step.es.gix } }
     else
         step
@@ -3648,7 +3571,7 @@ fn edit_mark_op(ed: Editor, st: InputState, es: EditState, b: Int) -> EditStep
     if b >= 0x61 and b <= 0x7A
         let idx = b - 0x61
         if es.awaitmark == 1                                    // set mark at cursor
-            EditStep { ed: ed, st: st, es: EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: set_int_at(es.marky, idx, ed.cy), markx: set_int_at(es.markx, idx, ed.cx), awaitmark: 0, recording: es.recording, macrobuf: es.macrobuf, awaitmac: es.awaitmac, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt, giy: es.giy, gix: es.gix } }
+            EditStep { ed: ed, st: st, es: EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: util.set_int_at(es.marky, idx, ed.cy), markx: util.set_int_at(es.markx, idx, ed.cx), awaitmark: 0, recording: es.recording, macrobuf: es.macrobuf, awaitmac: es.awaitmac, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt, giy: es.giy, gix: es.gix } }
         else                                                    // jump to mark
             let ly = es.marky[idx]
             let nede = if ly < 0 then ed elif es.awaitmark == 2 then clamp(Editor { lines: ed.lines, cy: ly, cx: es.markx[idx] }) else clamp(Editor { lines: ed.lines, cy: ly, cx: first_nonblank(line_at(ed, ly)) })
@@ -3688,7 +3611,7 @@ fn macro_start(es: EditState, b: Int) -> EditState
 
 // Stop recording — store the recorded keystrokes into the register slot.
 fn macro_stop(es: EditState) -> EditState
-    let regs2 = set_str_at(es.regs, es.recording - 1, es.macrobuf)
+    let regs2 = util.set_str_at(es.regs, es.recording - 1, es.macrobuf)
     EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: regs2, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: 0, macrobuf: "", awaitmac: 0, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt, giy: es.giy, gix: es.gix }
 
 // Append a keystroke to the in-progress recording.
@@ -4671,7 +4594,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                     var found = 0 - 1
                                     var si = 0
                                     while si < list.len(snames) and found < 0
-                                        if str.len(q) == 0 or index_of_str(snames[si], q) >= 0
+                                        if str.len(q) == 0 or util.index_of_str(snames[si], q) >= 0
                                             found = si
                                         si = si + 1
                                     if found >= 0 and found * 2 + 1 < list.len(spos)
@@ -4709,7 +4632,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                             lsp_send(lsp_in, lsp_didchange(lsp_uri, lsp_ver, lsp_lasttext))
                                             lsp_info = "renamed " + str.from_int(list.len(nts)) + " sites"
                         elif is_reload(cmd_buf)            // bare :e / :e! — reload from disk
-                            let bang = index_of_byte(cmd_buf, 0x21) >= 0
+                            let bang = util.index_of_byte(cmd_buf, 0x21) >= 0
                             if (not bang) and buf_text(ed) != disk_text
                                 lsp_info = "unsaved changes (:e! to override)"
                             else
@@ -4747,9 +4670,9 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                         let pre = bufs_text[bi]
                                         let nt = sub_text(pre, sub)
                                         if nt != pre
-                                            bufs_undo = set_str_at(bufs_undo, bi, undo_push_text(bufs_undo[bi], pre))
-                                            bufs_redo = set_str_at(bufs_redo, bi, "")
-                                            bufs_text = set_str_at(bufs_text, bi, nt)
+                                            bufs_undo = util.set_str_at(bufs_undo, bi, undo_push_text(bufs_undo[bi], pre))
+                                            bufs_redo = util.set_str_at(bufs_redo, bi, "")
+                                            bufs_text = util.set_str_at(bufs_text, bi, nt)
                                     bi = bi + 1
                                 if lsp_phase == 2
                                     lsp_lasttext = buf_text(ed)
@@ -4778,7 +4701,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                 bufs_lspopen = list.push(bufs_lspopen, false)
                                 if ends_with_nv(tgt) and lsp_phase == 2   // open the doc so its diagnostics go live
                                     lsp_send(lsp_in, lsp_didopen("file://" + tgt, file_to_text(tgt)))
-                                    bufs_lspopen = set_bool_at(bufs_lspopen, list.len(bufs_path) - 1, true)
+                                    bufs_lspopen = util.set_bool_at(bufs_lspopen, list.len(bufs_path) - 1, true)
                                 lsp_info = "added " + basename_of(tgt) + "; " + str.from_int(list.len(bufs_path)) + " buffers"
                         elif argcmd_kind(cmd_buf) > 0    // :args / :next / :prev / :first / :last / :wn / :wN
                             let ak = argcmd_kind(cmd_buf)
@@ -4853,7 +4776,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                 save_buf(curpath, ed.lines)
                                 disk_text = buf_text(ed)
                             if r.quit
-                                if (not r.save) and index_of_byte(cmd_buf, 0x21) < 0 and buffers_modified(bufs_text, bufs_disk, cur_buf, buf_text(ed), disk_text)
+                                if (not r.save) and util.index_of_byte(cmd_buf, 0x21) < 0 and buffers_modified(bufs_text, bufs_disk, cur_buf, buf_text(ed), disk_text)
                                     lsp_info = "unsaved buffers (:q! to override)"
                                 else
                                     running = false
@@ -5077,17 +5000,17 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 idx = list.len(bufs_path) - 1
             if idx != cur_buf
                 // save the buffer we're leaving (incl. its undo/redo history)
-                bufs_text = set_str_at(bufs_text, cur_buf, buf_text(ed))
-                bufs_cy = set_int_at(bufs_cy, cur_buf, ed.cy)
-                bufs_cx = set_int_at(bufs_cx, cur_buf, ed.cx)
-                bufs_top = set_int_at(bufs_top, cur_buf, top)
-                bufs_left = set_int_at(bufs_left, cur_buf, left)
-                bufs_disk = set_str_at(bufs_disk, cur_buf, disk_text)
-                bufs_undo = set_str_at(bufs_undo, cur_buf, snaps_ser(es.undos))
-                bufs_redo = set_str_at(bufs_redo, cur_buf, snaps_ser(es.redos))
-                bufs_marky = set_str_at(bufs_marky, cur_buf, ints_ser(es.marky))
-                bufs_markx = set_str_at(bufs_markx, cur_buf, ints_ser(es.markx))
-                bufs_diag = set_str_at(bufs_diag, cur_buf, diag_ser(diag_li, diag_msgs))
+                bufs_text = util.set_str_at(bufs_text, cur_buf, buf_text(ed))
+                bufs_cy = util.set_int_at(bufs_cy, cur_buf, ed.cy)
+                bufs_cx = util.set_int_at(bufs_cx, cur_buf, ed.cx)
+                bufs_top = util.set_int_at(bufs_top, cur_buf, top)
+                bufs_left = util.set_int_at(bufs_left, cur_buf, left)
+                bufs_disk = util.set_str_at(bufs_disk, cur_buf, disk_text)
+                bufs_undo = util.set_str_at(bufs_undo, cur_buf, snaps_ser(es.undos))
+                bufs_redo = util.set_str_at(bufs_redo, cur_buf, snaps_ser(es.redos))
+                bufs_marky = util.set_str_at(bufs_marky, cur_buf, ints_ser(es.marky))
+                bufs_markx = util.set_str_at(bufs_markx, cur_buf, ints_ser(es.markx))
+                bufs_diag = util.set_str_at(bufs_diag, cur_buf, diag_ser(diag_li, diag_msgs))
                 // documents stay open in novols (multi-doc) — no didClose on switch
                 alt_buf = cur_buf             // the buffer we leave becomes the alternate
                 cur_buf = idx
@@ -5125,7 +5048,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                     elif lsp_phase == 2 and not already   // first visit since server ready — open it
                         lsp_ver = lsp_ver + 1
                         lsp_send(lsp_in, lsp_didopen(lsp_uri, lsp_lasttext))
-                        bufs_lspopen = set_bool_at(bufs_lspopen, idx, true)
+                        bufs_lspopen = util.set_bool_at(bufs_lspopen, idx, true)
             elif want_y >= 0                   // same buffer — just move the cursor
                 ed = clamp(Editor { lines: ed.lines, cy: want_y, cx: want_x })
             want_path = ""
@@ -5133,21 +5056,21 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
         if str.len(want_close) > 0
             let ci = buf_index_of(bufs_path, want_close)
             if ci >= 0 and list.len(bufs_path) > 1
-                bufs_text = remove_at_str(bufs_text, ci)
-                bufs_path = remove_at_str(bufs_path, ci)
-                bufs_cy = remove_at_int(bufs_cy, ci)
-                bufs_cx = remove_at_int(bufs_cx, ci)
-                bufs_top = remove_at_int(bufs_top, ci)
-                bufs_left = remove_at_int(bufs_left, ci)
-                bufs_disk = remove_at_str(bufs_disk, ci)
-                bufs_undo = remove_at_str(bufs_undo, ci)
-                bufs_redo = remove_at_str(bufs_redo, ci)
-                bufs_marky = remove_at_str(bufs_marky, ci)
-                bufs_markx = remove_at_str(bufs_markx, ci)
+                bufs_text = util.remove_at_str(bufs_text, ci)
+                bufs_path = util.remove_at_str(bufs_path, ci)
+                bufs_cy = util.remove_at_int(bufs_cy, ci)
+                bufs_cx = util.remove_at_int(bufs_cx, ci)
+                bufs_top = util.remove_at_int(bufs_top, ci)
+                bufs_left = util.remove_at_int(bufs_left, ci)
+                bufs_disk = util.remove_at_str(bufs_disk, ci)
+                bufs_undo = util.remove_at_str(bufs_undo, ci)
+                bufs_redo = util.remove_at_str(bufs_redo, ci)
+                bufs_marky = util.remove_at_str(bufs_marky, ci)
+                bufs_markx = util.remove_at_str(bufs_markx, ci)
                 if ends_with_nv(want_close) and bufs_lspopen[ci] and lsp_phase == 2
                     lsp_send(lsp_in, lsp_didclose("file://" + want_close))
-                bufs_diag = remove_at_str(bufs_diag, ci)
-                bufs_lspopen = remove_at_bool(bufs_lspopen, ci)
+                bufs_diag = util.remove_at_str(bufs_diag, ci)
+                bufs_lspopen = util.remove_at_bool(bufs_lspopen, ci)
                 if ci < cur_buf
                     cur_buf = cur_buf - 1
                 if ci == alt_buf            // alternate closed — invalidate
@@ -5193,7 +5116,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                         if ends_with_nv(opath)
                             let otext = if oi == cur_buf then buf_text(ed) else bufs_text[oi]
                             lsp_send(lsp_in, lsp_didopen("file://" + opath, otext))
-                            bufs_lspopen = set_bool_at(bufs_lspopen, oi, true)
+                            bufs_lspopen = util.set_bool_at(bufs_lspopen, oi, true)
                         oi = oi + 1
                     lsp_lasttext = buf_text(ed)
                 elif lsp_is_diag(msg)
@@ -5204,7 +5127,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                     if dbi >= 0
                         let dli = lsp_collect_diag_ints(msg)
                         let dmsgs = lsp_collect_diag_msgs(msg)
-                        bufs_diag = set_str_at(bufs_diag, dbi, diag_ser(dli, dmsgs))
+                        bufs_diag = util.set_str_at(bufs_diag, dbi, diag_ser(dli, dmsgs))
                         if dbi == cur_buf
                             diag_li = dli
                             diag_msgs = dmsgs
@@ -5278,7 +5201,7 @@ fn lsp_send(fd: Int, body: Str) [io]
 // Content-Length from a header blob (digits after the colon).
 fn lsp_content_length(hdr: Str) -> Int
     let key = "Content-Length:"
-    let at = index_of_str(hdr, key)
+    let at = util.index_of_str(hdr, key)
     if at < 0
         return 0
     var i = at + str.len(key)
@@ -5919,52 +5842,25 @@ fn drop_last_str(xs: [Str]) -> [Str]
         i = i + 1
     out
 
-fn remove_at_str(xs: [Str], idx: Int) -> [Str]
-    var out: [Str] = []
-    var i = 0
-    while i < list.len(xs)
-        if i != idx
-            out = list.push(out, xs[i])
-        i = i + 1
-    out
-
-fn remove_at_int(xs: [Int], idx: Int) -> [Int]
-    var out: [Int] = []
-    var i = 0
-    while i < list.len(xs)
-        if i != idx
-            out = list.push(out, xs[i])
-        i = i + 1
-    out
-
-fn remove_at_bool(xs: [Bool], idx: Int) -> [Bool]
-    var out: [Bool] = []
-    var i = 0
-    while i < list.len(xs)
-        if i != idx
-            out = list.push(out, xs[i])
-        i = i + 1
-    out
-
 // A jumplist entry packs the origin as "y|x|path" — y/x first so the path
 // (which may contain anything) is simply everything after the second '|'.
 fn jentry(path: Str, y: Int, x: Int) -> Str
     str.from_int(y) + "|" + str.from_int(x) + "|" + path
 
 fn jentry_y(e: Str) -> Int
-    let p = index_of_byte(e, 0x7C)
+    let p = util.index_of_byte(e, 0x7C)
     if p < 0 then 0 else (str.to_int(str.slice(e, 0, p)) ?? 0)
 
 fn jentry_x(e: Str) -> Int
-    let p1 = index_of_byte(e, 0x7C)
+    let p1 = util.index_of_byte(e, 0x7C)
     let after = str.slice(e, p1 + 1, str.len(e))
-    let p2 = index_of_byte(after, 0x7C)
+    let p2 = util.index_of_byte(after, 0x7C)
     if p2 < 0 then 0 else (str.to_int(str.slice(after, 0, p2)) ?? 0)
 
 fn jentry_path(e: Str) -> Str
-    let p1 = index_of_byte(e, 0x7C)
+    let p1 = util.index_of_byte(e, 0x7C)
     let after = str.slice(e, p1 + 1, str.len(e))
-    let p2 = index_of_byte(after, 0x7C)
+    let p2 = util.index_of_byte(after, 0x7C)
     if p2 < 0 then "" else str.slice(after, p2 + 1, str.len(after))
 
 // Strip a "file://" URI down to a filesystem path.
