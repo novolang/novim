@@ -2011,6 +2011,12 @@ fn is_reload(cmd: Str) -> Bool
     let c = str.trim(cmd)
     c == "e" or c == "e!" or c == "edit" or c == "edit!"
 
+// `:split` / `:sp` / `:new` — open a horizontal (stacked) window split.  v1
+// stacked only; `:vsplit` (side-by-side) is a later slice.
+fn is_split(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    c == "split" or c == "sp" or c == "new"
+
 // The argument after the first space of an Ex command, trimmed.
 fn cmd_arg(cmd: Str) -> Str
     let c = str.trim(cmd)
@@ -3752,20 +3758,86 @@ fn window_rect(lay: Layout, winid: Int, screen: Rect) -> Rect
         i = i + 5
     screen
 
-@intent("""Repaint the whole screen for one frame: the text viewport (scrolled
+@intent("""Split the leaf window `winid` into a pair (the old window plus a new
+`newid`), `vertical` → side-by-side LRow (`:vsplit`), else stacked LCol
+(`:split`).  Recurses the tree rebuilding each LRow/LCol so the split lands at
+the right leaf regardless of nesting.  Adjacent same-orientation splits nest
+(no flattening) — fine for v1.""")
+fn layout_split(lay: Layout, winid: Int, newid: Int, vertical: Bool) -> Layout
+    match lay
+        LWin(id) =>
+            if id == winid
+                if vertical
+                    LRow([LWin(id), LWin(newid)])
+                else
+                    LCol([LWin(id), LWin(newid)])
+            else
+                LWin(id)
+        LRow(parts) =>
+            var np: [Layout] = []
+            var i = 0
+            while i < list.len(parts)
+                np = list.push(np, layout_split(parts[i], winid, newid, vertical))
+                i = i + 1
+            LRow(np)
+        LCol(parts) =>
+            var np: [Layout] = []
+            var i = 0
+            while i < list.len(parts)
+                np = list.push(np, layout_split(parts[i], winid, newid, vertical))
+                i = i + 1
+            LCol(np)
+
+@intent("""Number of leaf windows in the layout tree.""")
+fn layout_count(lay: Layout) -> Int
+    match lay
+        LWin(id) => 1
+        LRow(parts) =>
+            var n = 0
+            var i = 0
+            while i < list.len(parts)
+                n = n + layout_count(parts[i])
+                i = i + 1
+            n
+        LCol(parts) =>
+            var n = 0
+            var i = 0
+            while i < list.len(parts)
+                n = n + layout_count(parts[i])
+                i = i + 1
+            n
+
+@intent("""The ordered list of leaf window ids, left-to-right / top-to-bottom as
+they appear in the tree.  Used for `Ctrl-W w` focus cycling (next id after the
+active one, wrapping) and to pick a survivor after a close.""")
+fn layout_winids(lay: Layout, acc: [Int]) -> [Int]
+    match lay
+        LWin(id) => list.push(acc, id)
+        LRow(parts) =>
+            var a = acc
+            var i = 0
+            while i < list.len(parts)
+                a = layout_winids(parts[i], a)
+                i = i + 1
+            a
+        LCol(parts) =>
+            var a = acc
+            var i = 0
+            while i < list.len(parts)
+                a = layout_winids(parts[i], a)
+                i = i + 1
+            a
+
+@intent("""Draw ONE window's frame into its rect: the text viewport (scrolled
 to `top`/`left`, optional line-number gutter, tab expansion, Novo syntax
 highlighting, search-match and visual-selection highlighting, per-line
-diagnostic colouring) plus the status line (path, modified flag, cursor
-position, mode, diagnostic counts, and any transient `info` message).  Hides the
-cursor while painting and restores it at the end.  The sole rendering [io]
-sink — all drawing goes through here.""")
-fn render(ed: Editor, win: Rect, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool) [io]
-    csi()
-    emit("?25l")         // hide cursor while we repaint
-    // Window-local geometry: all cursor positioning is offset by the window
-    // origin (rx, ry) and bounded to the window size (cols, rows).  For the v1
-    // single full-screen window (rx=ry=0, cols=term width, rows=term height)
-    // these reduce to the original absolute coordinates → byte-identical output.
+diagnostic colouring) plus that window's status line.  All positioning is
+offset by the window origin (rx, ry) and bounded to the window size (cols,
+rows); for a single full-screen window (rx=ry=0) these reduce to absolute
+coordinates.  Does NOT touch cursor visibility or place the hardware cursor —
+the orchestrator (`render` / `render_all`) hides the cursor once, draws every
+window, then places it in the active window.""")
+fn draw_window(ed: Editor, win: Rect, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool) [io]
     let rows = win.h
     let cols = win.w
     let rx = win.x
@@ -3898,6 +3970,20 @@ fn render(ed: Editor, win: Rect, path: Str, top: Int, left: Int, mode: Int, avy:
     emit(statusln)
     el()                 // fill the rest of the status bar with the status bg
     sgr("0")
+
+@intent("""Place the hardware cursor at the active window's text cursor,
+offset by the window origin and the (recomputed) gutter width, wrap-aware.
+Split out of draw_window so a multi-window frame draws every window first,
+then homes the cursor in the focused one.""")
+fn place_cursor(ed: Editor, win: Rect, top: Int, left: Int, opts: Options) [io]
+    let rx = win.x
+    let ry = win.y
+    let cols = win.w
+    let nl = list.len(ed.lines)
+    let numbered = opts.number or opts.relativenumber
+    let numw = if num_digits(nl) > 3 then num_digits(nl) else 3
+    let gutter = if numbered then numw + 1 else 0
+    let width = if cols - gutter > 0 then cols - gutter else 1
     let curline = if ed.cy < nl then ed.lines[ed.cy] else ""
     let cviscol = vis_col(curline, ed.cx, opts.tabstop)
     if opts.wrap
@@ -3911,9 +3997,60 @@ fn render(ed: Editor, win: Rect, path: Str, top: Int, left: Int, mode: Int, avy:
         cup(ry + crow + cviscol / width + 1, rx + (cviscol % width) + gutter + 1)
     else
         cup(ry + ed.cy - top + 1, rx + (cviscol - left) + gutter + 1)
+
+@intent("""Single-window frame: hide the cursor, draw the one window, place the
+cursor, restore it.  Byte-identical to the pre-split render — the interactive
+driver calls this whenever there is exactly one window.""")
+fn render(ed: Editor, win: Rect, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool) [io]
+    csi()
+    emit("?25l")         // hide cursor while we repaint
+    draw_window(ed, win, path, top, left, mode, avy, avx, search, cs, opts, diag_li, diag_msgs, info, modified)
+    place_cursor(ed, win, top, left, opts)
     cursor_shape(mode)   // block in normal/visual, bar in insert, underline in replace
     csi()
     emit("?25h")         // show the cursor at its new home
+
+@intent("""Multi-window frame: hide the cursor once, draw every window in the
+layout into its computed rect, then home the cursor in the active window.  All
+windows view the one active buffer (`ed.lines`) — slice 102 supports stacked
+(`:split`) windows only, each spanning the full terminal width so draw_window's
+`el()` clears correctly.  The active window draws from the live ed cursor /
+top / left and the real mode (selection, INSERT, gd/K info); every other window
+draws from its saved win_* cursor/viewport in plain NORMAL mode.""")
+fn render_all(ed: Editor, lay: Layout, awin: Int, screen: Rect, win_cy: [Int], win_cx: [Int], win_top: [Int], win_left: [Int], path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool) [io]
+    csi()
+    emit("?25l")
+    let rects = layout_rects(lay, screen, [])
+    var i = 0
+    while i < list.len(rects)
+        let wid = rects[i]
+        let wr = Rect { x: rects[i + 1], y: rects[i + 2], w: rects[i + 3], h: rects[i + 4] }
+        let isact = wid == awin
+        let wcy = if isact then ed.cy else win_cy[wid]
+        let wcx = if isact then ed.cx else win_cx[wid]
+        let wtop = if isact then top else win_top[wid]
+        let wleft = if isact then left else win_left[wid]
+        let wmode = if isact then mode else 0
+        let wavy = if isact then avy else wcy
+        let wavx = if isact then avx else wcx
+        let winfo = if isact then info else ""
+        let view = Editor { lines: ed.lines, cy: wcy, cx: wcx }
+        draw_window(view, wr, path, wtop, wleft, wmode, wavy, wavx, search, cs, opts, diag_li, diag_msgs, winfo, modified)
+        i = i + 5
+    place_cursor(ed, window_rect(lay, awin, screen), top, left, opts)
+    cursor_shape(mode)
+    csi()
+    emit("?25h")
+
+@intent("""Paint one frame, dispatching on window count: a single window keeps
+the proven byte-identical render path; two or more go through render_all.  (Not
+named `frame` — that is a reserved word in Novo.)""")
+fn paint_frame(ed: Editor, lay: Layout, awin: Int, cols: Int, rows: Int, win_cy: [Int], win_cx: [Int], win_top: [Int], win_left: [Int], path: Str, top: Int, left: Int, st: InputState, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool) [io]
+    let screen = Rect { x: 0, y: 0, w: cols, h: rows }
+    if layout_count(lay) == 1
+        render(ed, window_rect(lay, awin, screen), path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, info, modified)
+    else
+        render_all(ed, lay, awin, screen, win_cy, win_cx, win_top, win_left, path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, info, modified)
 
 fn term_rows() -> Int [io]
     let packed = novo_pty_get_winsize_h()
@@ -4128,6 +4265,19 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var lsp_reqid = 1                    // monotonic id for gd/K requests (init used 1)
     var lsp_info = ""                    // transient status message (gd/K result)
     var gpend = false                    // awaiting the 2nd byte of a `g` command (gd)
+    // ── Window splits (slice 102: stacked `:split` only) ────────────────────
+    // `lay` is the window-layout tree; `awin` is the focused window id (also an
+    // index into the win_* arrays).  Every window views the one active buffer
+    // (ed.lines); only the cursor/viewport differ per window.  The active
+    // window's live state is ed.cy/ed.cx/top/left; win_* holds the OTHER
+    // windows' saved state, synced on every focus change / split.
+    var lay = LWin(0)
+    var awin = 0
+    var win_cy: [Int] = [0]
+    var win_cx: [Int] = [0]
+    var win_top: [Int] = [0]
+    var win_left: [Int] = [0]
+    var wpend = false                    // awaiting the 2nd byte of a Ctrl-W command
     var comp_active = false              // Ctrl-N/P completion cycle in progress
     var comp_cands: [Str] = []           // filtered candidate labels
     var comp_idx = 0                     // current candidate
@@ -4191,6 +4341,9 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var want_y = 0
     var want_x = 0
     var want_close = ""
+    // Deferred window command (set by `:split` / `Ctrl-W s` / `Ctrl-W w`, run
+    // after the input drain): 0 none · 1 horizontal split · 2 cycle focus.
+    var pending_wcmd = 0
     var buflist = false                  // `:ls` — show the buffer-list overlay until the next key
     var modified = false                 // active buffer differs from disk → status `[+]`
     var lsp_dirty = false                // buffer changed since the last didChange
@@ -4208,7 +4361,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
             lsp_phase = 1
     clear_screen()       // one-time clear of whatever was on screen before
     left = hscroll_for(left, ed, opts, cols)
-    render(ed, window_rect(LWin(0), 0, Rect { x: 0, y: 0, w: cols, h: rows }), curpath, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, lsp_info, modified)
+    paint_frame(ed, lay, awin, cols, rows, win_cy, win_cx, win_top, win_left, curpath, top, left, st, cs, opts, diag_li, diag_msgs, lsp_info, modified)
     var running = true
     while running
         // Short stdin poll keeps the editor responsive while leaving slack to
@@ -4502,6 +4655,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                             elif wk == 2 or wk == 3 or wk == 4
                                 running = false
                                 done = true
+                        elif is_split(cmd_buf)            // :split / :sp — stacked window split
+                            pending_wcmd = 1
                         else
                             let r = exec_ex(cmd_buf)
                             if r.save
@@ -4544,6 +4699,12 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                     let zk = scroll_z_kind(b)
                     if zk >= 0
                         top = scroll_new_top(ed.cy, top, rows, zk)
+                elif wpend                            // 2nd byte of a Ctrl-W window command
+                    wpend = false
+                    if b == 's' or b == 'S' or b == 19   // Ctrl-W s / S / Ctrl-S — horizontal split
+                        pending_wcmd = 1
+                    elif b == 'w' or b == 23             // Ctrl-W w / Ctrl-W Ctrl-W — cycle focus
+                        pending_wcmd = 2
                 elif gpend                            // 2nd byte of a `g` (gd intercept)
                     gpend = false
                     if b == 'd' and lsp_phase == 2      // `gd` — go to definition
@@ -4584,6 +4745,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                         if b == 'g' and ed.cy != jy   // gg moved — record the jump
                             jback = list.push(jback, jentry(curpath, jy, jx))
                             jfwd = []
+                elif scroll_idle(st, es) and key_free(km, 23) and b == 23   // Ctrl-W — window command prefix
+                    wpend = true
                 elif lsp_phase == 2 and scroll_idle(st, es) and key_free(km, 'g') and b == 'g'   // 'g' — await d (gd)
                     gpend = true
                 elif lsp_phase == 2 and scroll_idle(st, es) and key_free(km, 'K') and b == 'K'   // K — hover
@@ -4812,6 +4975,46 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 lsp_info = "closed; " + str.from_int(list.len(bufs_path)) + " left"
             want_close = ""
             changed = true
+        // Deferred window command — runs once after the input drain so the
+        // win_* arrays / layout mutate in one place.  All windows share the one
+        // active buffer (slice 102: stacked `:split` only); a window is a view
+        // with its own cursor/viewport.  The active window's live state lives in
+        // ed.cy/ed.cx/top/left; win_* holds every window's saved copy.
+        if pending_wcmd == 1                  // :split / Ctrl-W s — new window below
+            win_cy = util.set_int_at(win_cy, awin, ed.cy)
+            win_cx = util.set_int_at(win_cx, awin, ed.cx)
+            win_top = util.set_int_at(win_top, awin, top)
+            win_left = util.set_int_at(win_left, awin, left)
+            let newid = list.len(win_cy)
+            win_cy = list.push(win_cy, ed.cy)
+            win_cx = list.push(win_cx, ed.cx)
+            win_top = list.push(win_top, top)
+            win_left = list.push(win_left, left)
+            lay = layout_split(lay, awin, newid, false)   // false → stacked
+            awin = newid                                   // focus the new window
+            lsp_info = "split (" + str.from_int(layout_count(lay)) + " windows)"
+            changed = true
+        elif pending_wcmd == 2                // Ctrl-W w — cycle focus
+            let ids = layout_winids(lay, [])
+            let nw = list.len(ids)
+            if nw > 1
+                win_cy = util.set_int_at(win_cy, awin, ed.cy)
+                win_cx = util.set_int_at(win_cx, awin, ed.cx)
+                win_top = util.set_int_at(win_top, awin, top)
+                win_left = util.set_int_at(win_left, awin, left)
+                var pos = 0
+                var wk = 0
+                while wk < nw
+                    if ids[wk] == awin
+                        pos = wk
+                    wk = wk + 1
+                let nextid = ids[(pos + 1) % nw]
+                awin = nextid
+                ed = clamp(Editor { lines: ed.lines, cy: win_cy[nextid], cx: win_cx[nextid] })
+                top = win_top[nextid]
+                left = win_left[nextid]
+                changed = true
+        pending_wcmd = 0
         // Live document sync, TIME-debounced: mark the buffer dirty on any
         // input, and only send `didChange` after typing pauses (~150 ms of idle
         // poll cycles).  This coalesces a burst of insert-mode keystrokes into a
@@ -4868,7 +5071,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
             top = scroll_to(top, ed.cy, rows - 1)
             left = hscroll_for(left, ed, opts, cols)
             modified = buf_text(ed) != disk_text
-            render(ed, window_rect(LWin(0), 0, Rect { x: 0, y: 0, w: cols, h: rows }), curpath, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, lsp_info, modified)
+            paint_frame(ed, lay, awin, cols, rows, win_cy, win_cx, win_top, win_left, curpath, top, left, st, cs, opts, diag_li, diag_msgs, lsp_info, modified)
             if cmd_mode
                 cup(rows, 1)
                 csi()
@@ -4887,7 +5090,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
             top = scroll_to(top, ed.cy, rows - 1)
             left = hscroll_for(left, ed, opts, cols)
             clear_screen()   // dimensions changed — clear stale content once
-            render(ed, window_rect(LWin(0), 0, Rect { x: 0, y: 0, w: cols, h: rows }), curpath, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, lsp_info, modified)
+            paint_frame(ed, lay, awin, cols, rows, win_cy, win_cx, win_top, win_left, curpath, top, left, st, cs, opts, diag_li, diag_msgs, lsp_info, modified)
     if lsp_pid >= 0                       // tear the language server down
         let _ = proc.kill(lsp_pid, 15)
         proc.close(lsp_pid)
