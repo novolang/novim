@@ -2011,11 +2011,15 @@ fn is_reload(cmd: Str) -> Bool
     let c = str.trim(cmd)
     c == "e" or c == "e!" or c == "edit" or c == "edit!"
 
-// `:split` / `:sp` / `:new` — open a horizontal (stacked) window split.  v1
-// stacked only; `:vsplit` (side-by-side) is a later slice.
+// `:split` / `:sp` / `:new` — open a horizontal (stacked) window split.
 fn is_split(cmd: Str) -> Bool
     let c = str.trim(cmd)
     c == "split" or c == "sp" or c == "new"
+
+// `:vsplit` / `:vs` / `:vnew` — open a vertical (side-by-side) window split.
+fn is_vsplit(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    c == "vsplit" or c == "vs" or c == "vsp" or c == "vnew"
 
 // `:close` / `:clo` / `:q` / `:quit` — close the current window.  Only treated
 // as a window-close when more than one window is open; with a single window
@@ -3478,6 +3482,18 @@ fn el() [io]                      // ESC [ K — erase from cursor to end of lin
     csi()
     emit("K")
 
+// End-of-row clear for one window's row.  A window flush against the terminal's
+// right edge can erase to end-of-line (`el`) cheaply; a window with a neighbour
+// to its right (a vsplit's left pane) must NOT — `el` would wipe the neighbour —
+// so it pads with `pad` spaces to its own right edge instead.  `clip` is true
+// exactly when the window's right edge is left of the terminal's.
+fn eol(clip: Bool, pad: Int) [io]
+    if clip
+        if pad > 0
+            emit(nspaces(pad))
+    else
+        el()
+
 // DECSCUSR — set the cursor shape to match the mode: a steady block for
 // Normal/Visual, a steady bar (I-beam) for Insert, a steady underline for
 // Replace.  `ESC [ <n> SP q`; n=2 block, n=6 bar, n=4 underline.
@@ -3879,7 +3895,7 @@ rows); for a single full-screen window (rx=ry=0) these reduce to absolute
 coordinates.  Does NOT touch cursor visibility or place the hardware cursor —
 the orchestrator (`render` / `render_all`) hides the cursor once, draws every
 window, then places it in the active window.""")
-fn draw_window(ed: Editor, win: Rect, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool) [io]
+fn draw_window(ed: Editor, win: Rect, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, clip: Bool) [io]
     let rows = win.h
     let cols = win.w
     let rx = win.x
@@ -3975,7 +3991,9 @@ fn draw_window(ed: Editor, win: Rect, path: Str, top: Int, left: Int, mode: Int,
                         emit(nspaces(numw + 1))   // blank gutter on continuation rows
                 let segleft = if opts.wrap then seg * width else left
                 emit_line_styled(expanded, segleft, width, vlo, vhi, srng, "30;43", syncols)
-                el()
+                // chars emitted by emit_line_styled = clamp(vlen - segleft, 0, width)
+                let shown = if vlen - segleft < 0 then 0 elif vlen - segleft > width then width else vlen - segleft
+                eol(clip, width - shown)
                 r = r + 1
                 seg = seg + 1
             li = li + 1
@@ -3987,7 +4005,7 @@ fn draw_window(ed: Editor, win: Rect, path: Str, top: Int, left: Int, mode: Int,
                 sgr("0")
             else
                 emit("~")
-            el()
+            eol(clip, cols - 1)          // "~" took 1 column; fill the rest
             r = r + 1
             li = li + 1
     cup(ry + rows, rx + 1)
@@ -4010,7 +4028,7 @@ fn draw_window(ed: Editor, win: Rect, path: Str, top: Int, left: Int, mode: Int,
         let mm = if str.len(showmsg) > room - 2 then str.slice(showmsg, 0, room - 2) else showmsg
         statusln = statusln + "  " + mm
     emit(statusln)
-    el()                 // fill the rest of the status bar with the status bg
+    eol(clip, cols - str.len(statusln))   // fill the rest of the status bar with the status bg
     sgr("0")
 
 @intent("""Place the hardware cursor at the active window's text cursor,
@@ -4046,7 +4064,7 @@ driver calls this whenever there is exactly one window.""")
 fn render(ed: Editor, win: Rect, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool) [io]
     csi()
     emit("?25l")         // hide cursor while we repaint
-    draw_window(ed, win, path, top, left, mode, avy, avx, search, cs, opts, diag_li, diag_msgs, info, modified)
+    draw_window(ed, win, path, top, left, mode, avy, avx, search, cs, opts, diag_li, diag_msgs, info, modified, false)
     place_cursor(ed, win, top, left, opts)
     cursor_shape(mode)   // block in normal/visual, bar in insert, underline in replace
     csi()
@@ -4077,7 +4095,10 @@ fn render_all(ed: Editor, lay: Layout, awin: Int, screen: Rect, win_cy: [Int], w
         let wavx = if isact then avx else wcx
         let winfo = if isact then info else ""
         let view = Editor { lines: ed.lines, cy: wcy, cx: wcx }
-        draw_window(view, wr, path, wtop, wleft, wmode, wavy, wavx, search, cs, opts, diag_li, diag_msgs, winfo, modified)
+        // A window whose right edge is left of the screen edge (a vsplit's left
+        // pane) must bounded-fill its rows, not erase-to-EOL into its neighbour.
+        let clip = wr.x + wr.w < screen.w
+        draw_window(view, wr, path, wtop, wleft, wmode, wavy, wavx, search, cs, opts, diag_li, diag_msgs, winfo, modified, clip)
         i = i + 5
     place_cursor(ed, window_rect(lay, awin, screen), top, left, opts)
     cursor_shape(mode)
@@ -4699,6 +4720,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                 done = true
                         elif is_split(cmd_buf)            // :split / :sp — stacked window split
                             pending_wcmd = 1
+                        elif is_vsplit(cmd_buf)           // :vsplit / :vs — side-by-side split
+                            pending_wcmd = 4
                         elif is_winclose(cmd_buf) and layout_count(lay) > 1   // :close / :q with splits → close window
                             pending_wcmd = 3
                         else
@@ -4747,6 +4770,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                     wpend = false
                     if b == 's' or b == 'S' or b == 19   // Ctrl-W s / S / Ctrl-S — horizontal split
                         pending_wcmd = 1
+                    elif b == 'v' or b == 'V' or b == 22 // Ctrl-W v / V / Ctrl-V — vertical split
+                        pending_wcmd = 4
                     elif b == 'w' or b == 23             // Ctrl-W w / Ctrl-W Ctrl-W — cycle focus
                         pending_wcmd = 2
                     elif b == 'c' or b == 'q' or b == 17 // Ctrl-W c / q / Ctrl-Q — close active window
@@ -5026,7 +5051,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
         // active buffer (slice 102: stacked `:split` only); a window is a view
         // with its own cursor/viewport.  The active window's live state lives in
         // ed.cy/ed.cx/top/left; win_* holds every window's saved copy.
-        if pending_wcmd == 1                  // :split / Ctrl-W s — new window below
+        if pending_wcmd == 1 or pending_wcmd == 4   // :split/Ctrl-W s (stacked) · :vsplit/Ctrl-W v (side-by-side)
+            let vertical = pending_wcmd == 4
             win_cy = util.set_int_at(win_cy, awin, ed.cy)
             win_cx = util.set_int_at(win_cx, awin, ed.cx)
             win_top = util.set_int_at(win_top, awin, top)
@@ -5036,9 +5062,9 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
             win_cx = list.push(win_cx, ed.cx)
             win_top = list.push(win_top, top)
             win_left = list.push(win_left, left)
-            lay = layout_split(lay, awin, newid, false)   // false → stacked
+            lay = layout_split(lay, awin, newid, vertical)
             awin = newid                                   // focus the new window
-            lsp_info = "split (" + str.from_int(layout_count(lay)) + " windows)"
+            lsp_info = (if vertical then "vsplit (" else "split (") + str.from_int(layout_count(lay)) + " windows)"
             changed = true
         elif pending_wcmd == 2                // Ctrl-W w — cycle focus
             let ids = layout_winids(lay, [])
