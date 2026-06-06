@@ -3679,6 +3679,79 @@ fn ends_with_nv(p: Str) -> Bool
     let n = str.len(p)
     n >= 3 and str.slice(p, n - 3, n) == ".nv"
 
+@intent("""A screen rectangle (1-based-friendly, but stored 0-based): origin
+(x, y) and size (w, h) in terminal cells.  A window draws into one of these.""")
+struct Rect
+    x: Int
+    y: Int
+    w: Int
+    h: Int
+
+@intent("""The window layout as a recursive tree.  `LWin` is a leaf holding a
+window id (index into the win_* parallel arrays); `LRow` tiles its parts
+side-by-side (a `:vsplit`), `LCol` stacks them top-to-bottom (a `:split`).
+A single full-screen window is just `LWin(0)` — the v1 default.""")
+enum Layout
+    LWin(id: Int)
+    LRow(parts: [Layout])
+    LCol(parts: [Layout])
+
+@intent("""Compute the cell rectangle of every leaf window under `lay`, given
+the screen rect `r`.  Returns a flat [Int] of 5-tuples (winid, x, y, w, h) —
+flat so it sidesteps [[Int]] / struct-list return shapes.  `LRow` divides
+width evenly (last part absorbs the rounding remainder); `LCol` divides
+height.  For `LWin(0)` over the full screen this yields exactly the
+single-window geometry, keeping the v1 render byte-identical.""")
+fn layout_rects(lay: Layout, r: Rect, acc: [Int]) -> [Int]
+    match lay
+        LWin(id) =>
+            var a = acc
+            a = list.push(a, id)
+            a = list.push(a, r.x)
+            a = list.push(a, r.y)
+            a = list.push(a, r.w)
+            a = list.push(a, r.h)
+            a
+        LRow(parts) =>
+            var a = acc
+            let n = list.len(parts)
+            if n == 0
+                return a
+            let each = r.w / n
+            var i = 0
+            while i < n
+                let wx = r.x + i * each
+                let ww = if i == n - 1 then r.x + r.w - wx else each
+                a = layout_rects(parts[i], Rect { x: wx, y: r.y, w: ww, h: r.h }, a)
+                i = i + 1
+            a
+        LCol(parts) =>
+            var a = acc
+            let n = list.len(parts)
+            if n == 0
+                return a
+            let each = r.h / n
+            var i = 0
+            while i < n
+                let wy = r.y + i * each
+                let wh = if i == n - 1 then r.y + r.h - wy else each
+                a = layout_rects(parts[i], Rect { x: r.x, y: wy, w: r.w, h: wh }, a)
+                i = i + 1
+            a
+
+@intent("""The cell rect of window `winid` within `lay` over `screen`, via
+layout_rects.  Falls back to the whole screen if the id isn't present (so a
+stale active-window id can never produce an empty draw rect).""")
+fn window_rect(lay: Layout, winid: Int, screen: Rect) -> Rect
+    let rects = layout_rects(lay, screen, [])
+    var i = 0
+    let n = list.len(rects)
+    while i < n
+        if rects[i] == winid
+            return Rect { x: rects[i + 1], y: rects[i + 2], w: rects[i + 3], h: rects[i + 4] }
+        i = i + 5
+    screen
+
 @intent("""Repaint the whole screen for one frame: the text viewport (scrolled
 to `top`/`left`, optional line-number gutter, tab expansion, Novo syntax
 highlighting, search-match and visual-selection highlighting, per-line
@@ -3686,9 +3759,17 @@ diagnostic colouring) plus the status line (path, modified flag, cursor
 position, mode, diagnostic counts, and any transient `info` message).  Hides the
 cursor while painting and restores it at the end.  The sole rendering [io]
 sink — all drawing goes through here.""")
-fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool) [io]
+fn render(ed: Editor, win: Rect, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool) [io]
     csi()
     emit("?25l")         // hide cursor while we repaint
+    // Window-local geometry: all cursor positioning is offset by the window
+    // origin (rx, ry) and bounded to the window size (cols, rows).  For the v1
+    // single full-screen window (rx=ry=0, cols=term width, rows=term height)
+    // these reduce to the original absolute coordinates → byte-identical output.
+    let rows = win.h
+    let cols = win.w
+    let rx = win.x
+    let ry = win.y
     let body = rows - 1
     let nl = list.len(ed.lines)
     let dohl = opts.hlsearch and str.len(search) > 0     // search highlighting
@@ -3737,7 +3818,7 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode
             let segs = if opts.wrap and vlen > width then (vlen + width - 1) / width else 1
             var seg = 0
             while seg < segs and r < body
-                cup(r + 1, 1)
+                cup(ry + r + 1, rx + 1)
                 if numbered
                     if seg == 0
                         // relativenumber → distance from the cursor line; with
@@ -3785,7 +3866,7 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode
                 seg = seg + 1
             li = li + 1
         else
-            cup(r + 1, 1)
+            cup(ry + r + 1, rx + 1)
             if cs.tilde_fg >= 0
                 sgr("38;5;" + str.from_int(cs.tilde_fg))
                 emit("~")
@@ -3795,7 +3876,7 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode
             el()
             r = r + 1
             li = li + 1
-    cup(rows, 1)
+    cup(ry + rows, rx + 1)
     sgr(status_sgr(cs))
     let modestr = if mode == 1 then "-- INSERT -- " elif mode == 2 then "-- VISUAL -- " elif mode == 3 then "-- VISUAL LINE -- " elif mode == 4 then "-- REPLACE -- " else "-- NORMAL -- "
     // Diagnostics summary (E:n W:m) plus, when the cursor sits on a diagnostic
@@ -3827,9 +3908,9 @@ fn render(ed: Editor, rows: Int, cols: Int, path: Str, top: Int, left: Int, mode
             let cvl = str.len(expand_tabs(ed.lines[ci], opts.tabstop))
             crow = crow + (if cvl > width then (cvl + width - 1) / width else 1)
             ci = ci + 1
-        cup(crow + cviscol / width + 1, (cviscol % width) + gutter + 1)
+        cup(ry + crow + cviscol / width + 1, rx + (cviscol % width) + gutter + 1)
     else
-        cup(ed.cy - top + 1, (cviscol - left) + gutter + 1)
+        cup(ry + ed.cy - top + 1, rx + (cviscol - left) + gutter + 1)
     cursor_shape(mode)   // block in normal/visual, bar in insert, underline in replace
     csi()
     emit("?25h")         // show the cursor at its new home
@@ -4127,7 +4208,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
             lsp_phase = 1
     clear_screen()       // one-time clear of whatever was on screen before
     left = hscroll_for(left, ed, opts, cols)
-    render(ed, rows, cols, curpath, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, lsp_info, modified)
+    render(ed, window_rect(LWin(0), 0, Rect { x: 0, y: 0, w: cols, h: rows }), curpath, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, lsp_info, modified)
     var running = true
     while running
         // Short stdin poll keeps the editor responsive while leaving slack to
@@ -4787,7 +4868,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
             top = scroll_to(top, ed.cy, rows - 1)
             left = hscroll_for(left, ed, opts, cols)
             modified = buf_text(ed) != disk_text
-            render(ed, rows, cols, curpath, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, lsp_info, modified)
+            render(ed, window_rect(LWin(0), 0, Rect { x: 0, y: 0, w: cols, h: rows }), curpath, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, lsp_info, modified)
             if cmd_mode
                 cup(rows, 1)
                 csi()
@@ -4806,7 +4887,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
             top = scroll_to(top, ed.cy, rows - 1)
             left = hscroll_for(left, ed, opts, cols)
             clear_screen()   // dimensions changed — clear stale content once
-            render(ed, rows, cols, curpath, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, lsp_info, modified)
+            render(ed, window_rect(LWin(0), 0, Rect { x: 0, y: 0, w: cols, h: rows }), curpath, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, lsp_info, modified)
     if lsp_pid >= 0                       // tear the language server down
         let _ = proc.kill(lsp_pid, 15)
         proc.close(lsp_pid)
