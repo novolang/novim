@@ -2421,9 +2421,13 @@ struct Colorscheme
     str_fg:    Int      // syntax: string
     cmt_fg:    Int      // syntax: comment
     num_fg:    Int      // syntax: number
+    type_fg:   Int      // syntax: type (tree-sitter)
+    fn_fg:     Int      // syntax: function (tree-sitter)
+    const_fg:  Int      // syntax: constant (tree-sitter)
+    mod_fg:    Int      // syntax: module (tree-sitter)
 
 fn colorscheme_default() -> Colorscheme
-    Colorscheme { status_fg: 0 - 1, status_bg: 0 - 1, tilde_fg: 0 - 1, kw_fg: 0 - 1, str_fg: 0 - 1, cmt_fg: 0 - 1, num_fg: 0 - 1 }
+    Colorscheme { status_fg: 0 - 1, status_bg: 0 - 1, tilde_fg: 0 - 1, kw_fg: 0 - 1, str_fg: 0 - 1, cmt_fg: 0 - 1, num_fg: 0 - 1, type_fg: 0 - 1, fn_fg: 0 - 1, const_fg: 0 - 1, mod_fg: 0 - 1 }
 
 // Resolve a colour index, falling back to `dflt` when unset (-1).
 fn cs_or(v: Int, dflt: Int) -> Int
@@ -2445,6 +2449,10 @@ fn load_colorscheme(cfg_path: Str) -> Colorscheme [io]
             var strf = 0 - 1
             var cmtf = 0 - 1
             var numf = 0 - 1
+            var typef = 0 - 1
+            var fnf = 0 - 1
+            var constf = 0 - 1
+            var modf = 0 - 1
             let lines = str.split_lines(content)
             var in_cs = false
             let mut i = 0
@@ -2473,8 +2481,16 @@ fn load_colorscheme(cfg_path: Str) -> Colorscheme [io]
                                 cmtf = cv
                             elif key == "number"
                                 numf = cv
+                            elif key == "type"
+                                typef = cv
+                            elif key == "function"
+                                fnf = cv
+                            elif key == "constant"
+                                constf = cv
+                            elif key == "module"
+                                modf = cv
                 i = i + 1
-            Colorscheme { status_fg: sfg, status_bg: sbg, tilde_fg: tfg, kw_fg: kwf, str_fg: strf, cmt_fg: cmtf, num_fg: numf }
+            Colorscheme { status_fg: sfg, status_bg: sbg, tilde_fg: tfg, kw_fg: kwf, str_fg: strf, cmt_fg: cmtf, num_fg: numf, type_fg: typef, fn_fg: fnf, const_fg: constf, mod_fg: modf }
 
 // SGR parameter string for the status line: 256-colour fg/bg if set, else
 // reverse-video (`7`).
@@ -3677,19 +3693,19 @@ fn ts_color_for_kind(kind: Int, cs: Colorscheme) -> Int
     if kind == 0
         cs_or(cs.kw_fg, 170)
     elif kind == 1
-        81                        // type — cyan (no dedicated [colorscheme] slot yet)
+        cs_or(cs.type_fg, 81)
     elif kind == 2
         cs_or(cs.str_fg, 150)
     elif kind == 3
         cs_or(cs.cmt_fg, 245)
     elif kind == 4
-        78
+        cs_or(cs.fn_fg, 78)
     elif kind == 5
         cs_or(cs.num_fg, 215)
     elif kind == 6
-        215
+        cs_or(cs.const_fg, 215)
     elif kind == 8
-        80
+        cs_or(cs.mod_fg, 80)
     else
         0 - 1
 
