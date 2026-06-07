@@ -2027,6 +2027,20 @@ fn is_only(cmd: Str) -> Bool
     let c = str.trim(cmd)
     c == "only" or c == "on"
 
+// `:colorscheme <name>` / `:colo <name>` — switch the active colourscheme.
+fn is_colorscheme(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    (str.len(c) >= 12 and str.slice(c, 0, 12) == "colorscheme ") or (str.len(c) >= 5 and str.slice(c, 0, 5) == "colo ")
+
+fn colorscheme_arg(cmd: Str) -> Str
+    let c = str.trim(cmd)
+    if str.len(c) >= 12 and str.slice(c, 0, 12) == "colorscheme "
+        str.trim(str.slice(c, 12, str.len(c)))
+    elif str.len(c) >= 5 and str.slice(c, 0, 5) == "colo "
+        str.trim(str.slice(c, 5, str.len(c)))
+    else
+        ""
+
 // `:close` / `:clo` / `:q` / `:quit` — close the current window.  Only treated
 // as a window-close when more than one window is open; with a single window
 // `:q` falls through to the normal quit-the-editor path.
@@ -2429,6 +2443,22 @@ struct Colorscheme
 fn colorscheme_default() -> Colorscheme
     Colorscheme { status_fg: 0 - 1, status_bg: 0 - 1, tilde_fg: 0 - 1, kw_fg: 0 - 1, str_fg: 0 - 1, cmt_fg: 0 - 1, num_fg: 0 - 1, type_fg: 0 - 1, fn_fg: 0 - 1, const_fg: 0 - 1, mod_fg: 0 - 1 }
 
+// Built-in named colorschemes.  `[colorscheme] name = "gruvbox"` (or
+// `:colorscheme gruvbox`) selects one as the base; individual [colorscheme]
+// keys still override it.  Unknown names fall back to the terminal default.
+fn colorscheme_named(name: Str) -> Colorscheme
+    if name == "gruvbox" or name == "gruvbox-dark"
+        // gruvbox dark — 256-colour approximations of the retro-groove palette:
+        // fg 223, bg1 237, gray 245, red 167, green 142, yellow 214, purple 175,
+        // aqua 108.  keywords red, strings/functions green, types yellow,
+        // numbers/constants purple, modules aqua.
+        Colorscheme { status_fg: 223, status_bg: 237, tilde_fg: 245, kw_fg: 167, str_fg: 142, cmt_fg: 245, num_fg: 175, type_fg: 214, fn_fg: 142, const_fg: 175, mod_fg: 108 }
+    elif name == "gruvbox-light"
+        // gruvbox light — dark fg 237 on a light status bar (bg 223).
+        Colorscheme { status_fg: 237, status_bg: 223, tilde_fg: 245, kw_fg: 124, str_fg: 106, cmt_fg: 245, num_fg: 132, type_fg: 172, fn_fg: 106, const_fg: 132, mod_fg: 66 }
+    else
+        colorscheme_default()
+
 // Resolve a colour index, falling back to `dflt` when unset (-1).
 fn cs_or(v: Int, dflt: Int) -> Int
     if v >= 0 then v else dflt
@@ -2453,6 +2483,7 @@ fn load_colorscheme(cfg_path: Str) -> Colorscheme [io]
             var fnf = 0 - 1
             var constf = 0 - 1
             var modf = 0 - 1
+            var name_str = ""
             let lines = str.split_lines(content)
             var in_cs = false
             let mut i = 0
@@ -2489,8 +2520,26 @@ fn load_colorscheme(cfg_path: Str) -> Colorscheme [io]
                                 constf = cv
                             elif key == "module"
                                 modf = cv
+                            elif key == "name"
+                                let nv = str.trim(strip_inline_comment(str.slice(raw, eq + 1, str.len(raw))))
+                                name_str = if str.len(nv) >= 2 and (str.byte_at(nv, 0) ?? 0) == '"' then str.slice(nv, 1, str.len(nv) - 1) else nv
                 i = i + 1
-            Colorscheme { status_fg: sfg, status_bg: sbg, tilde_fg: tfg, kw_fg: kwf, str_fg: strf, cmt_fg: cmtf, num_fg: numf, type_fg: typef, fn_fg: fnf, const_fg: constf, mod_fg: modf }
+            // Layer explicit keys (>= 0) over the named-preset base (or the
+            // terminal-default base when no `name` is set).
+            let base = colorscheme_named(name_str)
+            Colorscheme {
+                status_fg: if sfg   >= 0 then sfg   else base.status_fg,
+                status_bg: if sbg   >= 0 then sbg   else base.status_bg,
+                tilde_fg:  if tfg   >= 0 then tfg   else base.tilde_fg,
+                kw_fg:     if kwf   >= 0 then kwf   else base.kw_fg,
+                str_fg:    if strf  >= 0 then strf  else base.str_fg,
+                cmt_fg:    if cmtf  >= 0 then cmtf  else base.cmt_fg,
+                num_fg:    if numf  >= 0 then numf  else base.num_fg,
+                type_fg:   if typef >= 0 then typef else base.type_fg,
+                fn_fg:     if fnf   >= 0 then fnf   else base.fn_fg,
+                const_fg:  if constf >= 0 then constf else base.const_fg,
+                mod_fg:    if modf  >= 0 then modf  else base.mod_fg
+            }
 
 // SGR parameter string for the status line: 256-colour fg/bg if set, else
 // reverse-video (`7`).
@@ -4545,7 +4594,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var st = ist_new()
     var es = edit_new()
     let km = load_keymaps(cfg_path)
-    let cs = load_colorscheme(cfg_path)
+    var cs = load_colorscheme(cfg_path)   // var: `:colorscheme <name>` switches it live
     var opts = load_options(cfg_path)
     var rows = term_rows()
     var cols = term_cols()
@@ -5001,6 +5050,9 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                             pending_wcmd = 3
                         elif is_only(cmd_buf)            // :only — keep just the active window
                             pending_wcmd = 5
+                        elif is_colorscheme(cmd_buf)     // :colorscheme <name> — live theme switch
+                            cs = colorscheme_named(colorscheme_arg(cmd_buf))
+                            lsp_info = "colorscheme " + colorscheme_arg(cmd_buf)
                         else
                             let r = exec_ex(cmd_buf)
                             if r.save
