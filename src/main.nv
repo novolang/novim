@@ -3673,6 +3673,29 @@ fn clear_screen() [io]
     csi()
     emit("2J")
 
+// Enter the editor's terminal mode: the alternate screen buffer (so the
+// editor has no scrollback for the mouse wheel to bleed into, and the
+// shell's screen is restored on exit) + SGR mouse reporting (so the scroll
+// wheel is delivered to novim as `ESC[<64;…M` / `ESC[<65;…M` rather than
+// scrolling the terminal).
+fn term_enter() [io]
+    csi()
+    emit("?1049h")        // alternate screen buffer
+    csi()
+    emit("?1000h")        // mouse button tracking (covers the wheel)
+    csi()
+    emit("?1006h")        // SGR extended mouse coordinates
+
+// Restore the terminal: disable mouse reporting and leave the alternate
+// screen (bringing back whatever the shell was showing before novim ran).
+fn term_leave() [io]
+    csi()
+    emit("?1000l")
+    csi()
+    emit("?1006l")
+    csi()
+    emit("?1049l")
+
 // Flicker-free full repaint.  Instead of clearing the screen (which blanks
 // then repaints — visible flicker on every cursor move), we hide the cursor,
 // overwrite every row in place, and erase each row's tail with ESC [ K so no
@@ -4153,10 +4176,12 @@ fn term_cols() -> Int [io]
 fn csi_seq() -> Int [io]
     var param = 0
     var b = novo_pty_stdin_read_byte_h()
-    while b >= '0' and b <= '9'                 // leading decimal parameter
+    if b == '<' or b == '=' or b == '>' or b == '?'   // private-parameter prefix (incl. SGR mouse `<`)
+        b = novo_pty_stdin_read_byte_h()
+    while b >= '0' and b <= '9'                 // leading decimal parameter (mouse: the button)
         param = param * 10 + (b - '0')
         b = novo_pty_stdin_read_byte_h()
-    while b >= ' ' and b <= '?'                 // further params / intermediates
+    while b >= ' ' and b <= '?'                 // further params / intermediates (mouse: ;col;row)
         b = novo_pty_stdin_read_byte_h()
     if b < 0 then b else param * 256 + b
 
@@ -4312,6 +4337,7 @@ rest (a Str, not [Str] — a [Str] param here reproducibly corrupted the
 buffer-switch codegen; see the bug filed in features/orbits/novim).""")
 fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     let _ = novo_pty_set_raw_mode_h()
+    term_enter()                          // alternate screen + mouse wheel capture
     var curpath = path                   // the open file; `:e` switches it
     var ed = Editor { lines: buf_load(path), cy: 0, cx: 0 }
     var disk_text = buf_text(ed)         // last-saved/loaded text, for the :e dirty guard
@@ -4520,6 +4546,25 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                 ed = arrow_move(ed, 'H', ins)
                             elif fin == '~' and (prm == 4 or prm == '\b')   // End
                                 ed = arrow_move(ed, 'F', ins)
+                            elif (fin == 'M' or fin == 'm') and (prm == 64 or prm == 65)   // mouse wheel
+                                // Scroll the viewport ~3 lines per tick and keep the
+                                // cursor on screen — so the wheel does real buffer
+                                // scrolling instead of the terminal's scrollback.
+                                let body = rows - 1
+                                let nl = list.len(ed.lines)
+                                var t = 0
+                                while t < 3
+                                    if prm == 65                 // wheel down — view down
+                                        top = if top + 1 < nl then top + 1 else top
+                                    else                         // wheel up — view up
+                                        top = if top - 1 > 0 then top - 1 else 0
+                                    t = t + 1
+                                var ncy = ed.cy
+                                if ncy < top
+                                    ncy = top
+                                if ncy > top + body - 1
+                                    ncy = top + body - 1
+                                ed = clamp(Editor { lines: ed.lines, cy: ncy, cx: ed.cx })
                             elif fin != '~'                    // arrows / Home(H) / End(F)
                                 ed = arrow_move(ed, fin, ins)
                         esc_skip = true
@@ -5297,9 +5342,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     novo_pty_restore_mode_h()
     csi()
     emit("0 q")          // restore the terminal's default cursor shape
-    csi()
-    emit("2J")
-    cup(1, 1)
+    term_leave()         // disable mouse + leave the alternate screen (restores the shell's screen)
 
 // ── Entry ───────────────────────────────────────────────────────
 
