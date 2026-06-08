@@ -16,6 +16,7 @@ use nvregex
 use ts
 use window
 use colorscheme
+use disp
 
 // Editor state.  The cursor is 0-based (line, col); the buffer is a line vector.
 struct Editor
@@ -2460,40 +2461,8 @@ fn load_options(cfg_path: Str) -> Options [io]
                 i = i + 1
             Options { number: number, relativenumber: relativenumber, hlsearch: hlsearch, wrap: wrap, syntax: syntax, tabstop: tabstop }
 
-// Right-align `n` in a `width`-char field (space-padded).
-fn pad_num(n: Int, width: Int) -> Str
-    var s = str.from_int(n)
-    while str.len(s) < width
-        s = " " + s
-    s
-
-// Left-justify a number in `width` columns (pad spaces on the right).  Used
-// for the active line number in hybrid number+relativenumber mode, where
-// neovim pins the cursor line's absolute number flush-left — most-significant
-// digit fixed at the gutter's left edge, extending rightward.
-fn pad_num_l(n: Int, width: Int) -> Str
-    var s = str.from_int(n)
-    while str.len(s) < width
-        s = s + " "
-    s
-
-// Decimal digit count of a non-negative Int (min 1).
-fn num_digits(n: Int) -> Int
-    var v = if n < 0 then 0 - n else n
-    var d = 1
-    while v >= 10
-        v = v / 10
-        d = d + 1
-    d
-
-// A run of `n` spaces.
-fn nspaces(n: Int) -> Str
-    var s = ""
-    var i = 0
-    while i < n
-        s = s + " "
-        i = i + 1
-    s
+// Number formatting (pad_num / pad_num_l / num_digits) and `nspaces` moved to
+// disp.nv (pure display helpers).
 
 // ── `:set` (runtime options) ────────────────────────────────────────────
 // `:set number`, `:set nonumber`, `:set rnu!`, `:set tabstop=4`, and several
@@ -3426,7 +3395,7 @@ fn el() [io]                      // ESC [ K — erase from cursor to end of lin
 fn eol(clip: Bool, pad: Int) [io]
     if clip
         if pad > 0
-            emit(nspaces(pad))
+            emit(disp.nspaces(pad))
     else
         el()
 
@@ -3442,64 +3411,8 @@ fn cursor_shape(mode: Int) [io]
     else
         emit("2 q")          // normal / visual → block
 
-// Expand tab bytes ('\t') to spaces up to the next `ts`-column stop, so a
-// buffer line renders with consistent indentation regardless of the
-// terminal's own tab stops.  Byte-oriented, matching the rest of the editor
-// (cx is a byte index).  ts <= 0 leaves the line untouched.
-// A UTF-8 continuation byte (10xxxxxx) — part of a multi-byte character, so it
-// occupies no display column of its own.
-fn is_utf8_cont(b: Int) -> Bool
-    bits.band(b, 0xC0) == 0x80
-
-fn expand_tabs(s: Str, ts: Int) -> Str
-    if ts <= 0
-        return s
-    var out = ""
-    var col = 0
-    let n = str.len(s)
-    let mut i = 0
-    while i < n
-        let b = str.byte_at(s, i) ?? 0
-        if b == '\t'
-            let nextstop = ((col / ts) + 1) * ts
-            while col < nextstop
-                out = out + " "
-                col = col + 1
-        else
-            out = out + str.from_char(b)
-            if not is_utf8_cont(b)               // count one column per character
-                col = col + 1
-        i = i + 1
-    out
-
-// Visual column of byte index `cx` within `s` once tabs are expanded — used
-// to place the hardware cursor over the rendered (tab-expanded) text.
-fn vis_col(s: Str, cx: Int, ts: Int) -> Int
-    var col = 0
-    let mut i = 0
-    let stop = if cx > str.len(s) then str.len(s) else cx
-    while i < stop
-        let b = str.byte_at(s, i) ?? 0
-        if b == '\t' and ts > 0
-            col = ((col / ts) + 1) * ts
-        elif not is_utf8_cont(b)               // UTF-8 continuation bytes add no column
-            col = col + 1
-        i = i + 1
-    col
-
-// Horizontal counterpart of `scroll_to`: shift the visual-column viewport
-// offset `left` so the cursor's visual column stays within a `width`-wide
-// text area.  No side margin (cursor sits at the very edge before scrolling).
-fn hscroll_to(left: Int, viscol: Int, width: Int) -> Int
-    let w = if width < 1 then 1 else width
-    var l = left
-    if viscol < l
-        l = viscol
-    if viscol >= l + w
-        l = viscol - w + 1
-    if l < 0
-        l = 0
-    l
+// Tab/column geometry (is_utf8_cont / expand_tabs / vis_col / hscroll_to) moved
+// to disp.nv (pure display helpers).
 
 // Clear the whole screen (ESC [ 2J).  Only used once at startup and on a
 // resize — NOT per frame: a per-frame clear blanks the screen between the
@@ -3575,134 +3488,15 @@ fn search_vis_ranges(atoms: [nvregex.ReAtom], raw: Str, ts: Int) -> [Int]
     var k = 0
     let m = list.len(br)
     while k + 1 < m
-        out = list.append(out, [vis_col(raw, br[k], ts)])
-        out = list.append(out, [vis_col(raw, br[k + 1], ts)])
+        out = list.append(out, [disp.vis_col(raw, br[k], ts)])
+        out = list.append(out, [disp.vis_col(raw, br[k + 1], ts)])
         k = k + 2
     out
 
-// Like emit_line_hl but also paints search matches (`sr` = flat visual ranges)
-// with `scol`.  Selection (reverse) wins over a search match on the same column.
-// ── Novo syntax highlighting (.nv files) ────────────────────────────────────
-fn nv_ident_start(b: Int) -> Bool
-    (b >= 'a' and b <= 'z') or (b >= 'A' and b <= 'Z') or b == '_'
-
-fn nv_ident_char(b: Int) -> Bool
-    nv_ident_start(b) or (b >= '0' and b <= '9')
-
-fn nv_keyword(w: Str) -> Bool
-    w == "fn" or w == "let" or w == "var" or w == "mut" or w == "if" or w == "elif" or w == "else" or w == "while" or w == "for" or w == "in" or w == "return" or w == "struct" or w == "enum" or w == "trait" or w == "impl" or w == "match" or w == "and" or w == "or" or w == "not" or w == "true" or w == "false" or w == "async" or w == "await" or w == "import" or w == "type" or w == "break" or w == "continue" or w == "then" or w == "pub" or w == "as" or w == "None" or w == "Some"
-
-// Byte offset of line `n` in the newline-joined buffer (sum of preceding line
-// lengths + 1 per join) — maps tree-sitter byte spans onto a rendered line.
-fn byte_offset_of_line(lines: [Str], n: Int) -> Int
-    var off = 0
-    var i = 0
-    while i < n and i < list.len(lines)
-        off = off + str.len(lines[i]) + 1
-        i = i + 1
-    off
-
-// 256-colour fg for a tree-sitter capture kind (see ts.ts_capture_kind).  The
-// keyword/string/comment/number kinds honour the [colorscheme] (so themes drive
-// them, like the native tokenizer); type/function/constant/module use sensible
-// defaults.  -1 = no colour (variables stay default fg).
-fn ts_color_for_kind(kind: Int, cs: colorscheme.Colorscheme) -> Int
-    if kind == 0
-        util.cs_or(cs.kw_fg, 170)
-    elif kind == 1
-        util.cs_or(cs.type_fg, 81)
-    elif kind == 2
-        util.cs_or(cs.str_fg, 150)
-    elif kind == 3
-        util.cs_or(cs.cmt_fg, 245)
-    elif kind == 4
-        util.cs_or(cs.fn_fg, 78)
-    elif kind == 5
-        util.cs_or(cs.num_fg, 215)
-    elif kind == 6
-        util.cs_or(cs.const_fg, 215)
-    elif kind == 8
-        util.cs_or(cs.mod_fg, 80)
-    else
-        0 - 1
-
-// Per-(expanded-)column 256-colour fg for one line, from tree-sitter capture
-// `spans` (flat start/end/kind triples over the whole buffer).  `line_start` is
-// the line's byte offset; tabs expand to `tabstop` columns so the colours line
-// up with emit_line_styled's expanded view.  Later spans override earlier on
-// overlap.  Returns [] semantics-compatible with syntax_colors (0 = default).
-fn ts_line_syncols(spans: [Int], line_start: Int, raw: Str, tabstop: Int, cs: colorscheme.Colorscheme) -> [Int]
-    let rlen = str.len(raw)
-    let line_end = line_start + rlen
-    // line-local spans (filtered once): start, end (line-relative), colour
-    var ls: [Int] = []
-    var k = 0
-    while k < list.len(spans)
-        if spans[k + 1] > line_start and spans[k] < line_end
-            ls = list.append(ls, [spans[k] - line_start, spans[k + 1] - line_start, ts_color_for_kind(spans[k + 2], cs)])
-        k = k + 3
-    var cols: [Int] = []
-    var b = 0
-    var vc = 0
-    while b < rlen
-        var color = 0
-        var m = 0
-        while m < list.len(ls)
-            if b >= ls[m] and b < ls[m + 1] and ls[m + 2] >= 0
-                color = ls[m + 2]
-            m = m + 3
-        let ch = str.byte_at(raw, b) ?? 0
-        if ch == '\t'
-            let w = tabstop - (vc % tabstop)
-            var t = 0
-            while t < w
-                cols = list.append(cols, [color])
-                t = t + 1
-            vc = vc + w
-        else
-            cols = list.append(cols, [color])
-            vc = vc + 1
-        b = b + 1
-    cols
-
-// Per-column 256-colour fg index for a (tab-expanded) Novo line.  0 = default.
-// `kw`/`strc`/`cmt`/`num` are the keyword/string/comment/number colours.
-fn syntax_colors(s: Str, kw: Int, strc: Int, cmt: Int, num: Int) -> [Int]
-    var col: [Int] = []
-    let n = str.len(s)
-    var i = 0
-    while i < n
-        let b = str.byte_at(s, i) ?? 0
-        if b == '/' and i + 1 < n and (str.byte_at(s, i + 1) ?? 0) == '/'   // // comment
-            while i < n
-                col = list.append(col, [cmt])
-                i = i + 1
-        elif b == '"'                                                       // " string
-            col = list.append(col, [strc])
-            i = i + 1
-            while i < n and (str.byte_at(s, i) ?? 0) != '"'
-                col = list.append(col, [strc])
-                i = i + 1
-            if i < n
-                col = list.append(col, [strc])
-                i = i + 1
-        elif nv_ident_start(b)                                              // identifier / keyword
-            let start = i
-            while i < n and nv_ident_char(str.byte_at(s, i) ?? 0)
-                i = i + 1
-            let c = if nv_keyword(str.slice(s, start, i)) then kw else 0
-            var j = start
-            while j < i
-                col = list.append(col, [c])
-                j = j + 1
-        elif b >= '0' and b <= '9'                                        // number
-            while i < n and ((str.byte_at(s, i) ?? 0) >= '0' and (str.byte_at(s, i) ?? 0) <= '9' or (str.byte_at(s, i) ?? 0) == '.' or (str.byte_at(s, i) ?? 0) == '_')
-                col = list.append(col, [num])
-                i = i + 1
-        else
-            col = list.append(col, [0])
-            i = i + 1
-    col
+// The Novo tokenizer + per-column syntax colours (nv_ident_start/char/keyword,
+// syntax_colors), the tree-sitter capture→colour mapping (ts_color_for_kind,
+// ts_line_syncols), and byte_offset_of_line all moved to disp.nv (pure display
+// helpers).
 
 // Paint a line: syntax colours (`syncols`, per-column fg index) as the base,
 // search matches (`sr`/`scol`) over them, the Visual selection (reverse) on top.
@@ -3767,7 +3561,7 @@ fn draw_window(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mod
     // Gutter width tracks the largest line number (min 3 digits) so the text
     // column stays put when the cursor crosses a digit boundary on a 1000+
     // line file — numbers are right-aligned (least-significant digit fixed).
-    let numw = if num_digits(nl) > 3 then num_digits(nl) else 3
+    let numw = if disp.num_digits(nl) > 3 then disp.num_digits(nl) else 3
     let gutter = if numbered then numw + 1 else 0
     let width = if cols - gutter > 0 then cols - gutter else 1   // text area width
     // Normalised visual selection bounds (start <= end), used for highlighting.
@@ -3782,11 +3576,11 @@ fn draw_window(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mod
     var r = 0
     var li = top
     let dots = list.len(ts_spans) > 0            // tree-sitter spans available for this buffer
-    var line_byte = byte_offset_of_line(ed.lines, top)   // byte offset of the first visible line
+    var line_byte = disp.byte_offset_of_line(ed.lines, top)   // byte offset of the first visible line
     while r < body
         if li < nl
             let raw = ed.lines[li]
-            let expanded = expand_tabs(raw, opts.tabstop)
+            let expanded = disp.expand_tabs(raw, opts.tabstop)
             let vlen = str.len(expanded)
             var vlo = 0
             var vhi = 0
@@ -3797,10 +3591,10 @@ fn draw_window(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mod
                 else
                     let blo = if li == ssy then ssx else 0
                     let bhi = if li == sey then sex + 1 else str.len(raw)
-                    vlo = vis_col(raw, blo, opts.tabstop)
-                    vhi = vis_col(raw, bhi, opts.tabstop)
+                    vlo = disp.vis_col(raw, blo, opts.tabstop)
+                    vhi = disp.vis_col(raw, bhi, opts.tabstop)
             let srng = if dohl then search_vis_ranges(satoms, raw, opts.tabstop) else []
-            let syncols = if dots then ts_line_syncols(ts_spans, line_byte, raw, opts.tabstop, cs) elif dosyn then syntax_colors(expanded, synkw, synstr, syncmt, synnum) else []
+            let syncols = if dots then disp.ts_line_syncols(ts_spans, line_byte, raw, opts.tabstop, cs) elif dosyn then disp.syntax_colors(expanded, synkw, synstr, syncmt, synnum) else []
             let segs = if opts.wrap and vlen > width then (vlen + width - 1) / width else 1
             var seg = 0
             while seg < segs and r < body
@@ -3823,9 +3617,9 @@ fn draw_window(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mod
                         // its absolute number flush-LEFT (neovim style); every
                         // other line stays right-aligned.
                         let numtxt = if iscur and opts.relativenumber and opts.number
-                            pad_num_l(gnum, numw)
+                            disp.pad_num_l(gnum, numw)
                         else
-                            pad_num(gnum, numw)
+                            disp.pad_num(gnum, numw)
                         if dsev == 1
                             sgr(if iscur then "1;38;5;9" else "38;5;9")
                             emit(numtxt)
@@ -3844,7 +3638,7 @@ fn draw_window(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mod
                         else
                             emit(numtxt + " ")
                     else
-                        emit(nspaces(numw + 1))   // blank gutter on continuation rows
+                        emit(disp.nspaces(numw + 1))   // blank gutter on continuation rows
                 let segleft = if opts.wrap then seg * width else left
                 emit_line_styled(expanded, segleft, width, vlo, vhi, srng, "30;43", syncols)
                 // chars emitted by emit_line_styled = clamp(vlen - segleft, 0, width)
@@ -3900,17 +3694,17 @@ fn place_cursor(ed: Editor, win: window.Rect, top: Int, left: Int, opts: Options
     let cols = win.w
     let nl = list.len(ed.lines)
     let numbered = opts.number or opts.relativenumber
-    let numw = if num_digits(nl) > 3 then num_digits(nl) else 3
+    let numw = if disp.num_digits(nl) > 3 then disp.num_digits(nl) else 3
     let gutter = if numbered then numw + 1 else 0
     let width = if cols - gutter > 0 then cols - gutter else 1
     let curline = if ed.cy < nl then ed.lines[ed.cy] else ""
-    let cviscol = vis_col(curline, ed.cx, opts.tabstop)
+    let cviscol = disp.vis_col(curline, ed.cx, opts.tabstop)
     if opts.wrap
         // screen row = rows used by lines [top, cy) + the cursor's own segment
         var crow = 0
         var ci = top
         while ci < ed.cy
-            let cvl = str.len(expand_tabs(ed.lines[ci], opts.tabstop))
+            let cvl = str.len(disp.expand_tabs(ed.lines[ci], opts.tabstop))
             crow = crow + (if cvl > width then (cvl + width - 1) / width else 1)
             ci = ci + 1
         cup(ry + crow + cviscol / width + 1, rx + (cviscol % width) + gutter + 1)
@@ -4100,9 +3894,9 @@ fn hscroll_for(left: Int, ed: Editor, opts: Options, cols: Int) -> Int
     if opts.wrap                                  // wrapped lines never scroll horizontally
         return 0
     let nl = list.len(ed.lines)
-    let numw = if num_digits(nl) > 3 then num_digits(nl) else 3
+    let numw = if disp.num_digits(nl) > 3 then disp.num_digits(nl) else 3
     let gutter = if opts.number or opts.relativenumber then numw + 1 else 0
-    hscroll_to(left, vis_col(line_at(ed, ed.cy), ed.cx, opts.tabstop), cols - gutter)
+    disp.hscroll_to(left, disp.vis_col(line_at(ed, ed.cy), ed.cx, opts.tabstop), cols - gutter)
 
 // Adjust the viewport top so the cursor line is visible in `body` rows.
 fn scroll_to(top: Int, cy: Int, body: Int) -> Int
@@ -4445,7 +4239,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                             let nl = list.len(ed.lines)
                                             let ncy = if top + r0 < nl then top + r0 else (if nl > 0 then nl - 1 else 0)
                                             let numbered = opts.number or opts.relativenumber
-                                            let numw = if num_digits(nl) > 3 then num_digits(nl) else 3
+                                            let numw = if disp.num_digits(nl) > 3 then disp.num_digits(nl) else 3
                                             let gutter = if numbered then numw + 1 else 0
                                             let vcol = (px - wr.x) - gutter + left
                                             let ncx = vis_to_byte(line_at(ed, ncy), if vcol > 0 then vcol else 0, opts.tabstop)
@@ -5332,7 +5126,7 @@ fn starts_with(s: Str, prefix: Str) -> Bool
 // Column where the identifier ending at `col` begins (the completion prefix).
 fn ident_start_before(line: Str, col: Int) -> Int
     var s = col
-    while s > 0 and nv_ident_char(str.byte_at(line, s - 1) ?? 0)
+    while s > 0 and disp.nv_ident_char(str.byte_at(line, s - 1) ?? 0)
         s = s - 1
     s
 
