@@ -1,0 +1,246 @@
+// excmd.nv — Ex command-line parsing for novim.
+//
+// Pure classification + argument extraction over the text typed after `:`
+// (`Str -> Bool / Str / Int` and the small `ExResult` signal struct).  No editor
+// state, no `[io]`: these decide WHAT an Ex command is and pull its arguments;
+// the driver in main.nv (and the Editor-typed appliers ex_substitute / ex_goto /
+// ex_global that stay there) act on the result.  Depends only on `util`.
+
+use util
+
+// Result of running a bare Ex command (`:w` / `:q` / `:wq` …): the quit / save
+// signals the driver acts on.  The driver owns the file path and the loop, so
+// the `[io]` save stays out of this pure parse.
+struct ExResult
+    quit: Bool
+    save: Bool
+
+@intent("""Parse the text after `:` into quit/save signals: `w` save, `q`/`q!`
+quit, `wq`/`x` save+quit.  Returns an ExResult the driver acts on; commands it
+doesn't recognise are ignored here (richer Ex commands are dispatched before
+this fallback).""")
+fn exec_ex(cmd: Str) -> ExResult
+    let c = str.trim(cmd)
+    if c == "w"
+        ExResult { quit: false, save: true }
+    elif c == "q" or c == "q!"
+        ExResult { quit: true, save: false }
+    elif c == "wq" or c == "x" or c == "wq!"
+        ExResult { quit: true, save: true }
+    else
+        ExResult { quit: false, save: false }
+
+// ── :s substitute ────────────────────────────────────────────
+
+// The current-line form of a substitute command (drop a leading `%`), for `&`.
+fn subst_current_line(cmd: Str) -> Str
+    let c = str.trim(cmd)
+    if str.len(c) > 0 and (str.byte_at(c, 0) ?? 0) == '%'
+        str.slice(c, 1, str.len(c))
+    else
+        c
+
+// Is `cmd` a substitute command (`s<delim>…` / `%s<delim>…`)?
+fn is_substitute(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    let n = str.len(c)
+    let p = if n > 0 and (str.byte_at(c, 0) ?? 0) == '%' then 1 else 0   // optional %
+    if p < n and (str.byte_at(c, p) ?? 0) == 's' and p + 1 < n           // 's' + delimiter
+        util.char_class_of(str.byte_at(c, p + 1) ?? 0) == 2               // punctuation delim
+    else
+        false
+
+// ── :N goto-line ─────────────────────────────────────────────
+
+// `:N` (a line number) or `:$` (last line) — a goto-line command.
+fn is_goto(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    let n = str.len(c)
+    if n == 0
+        return false
+    if c == "$"
+        return true
+    var i = 0
+    while i < n
+        let b = str.byte_at(c, i) ?? 0
+        if b < '0' or b > '9'
+            return false
+        i = i + 1
+    true
+
+// `:fmt` / `:format` — reformat the buffer via the language server.
+fn is_fmt(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    c == "fmt" or c == "format"
+
+// `:sym <name>` — jump to a document symbol whose name contains <name>.
+fn is_sym(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    c == "sym" or (str.len(c) > 4 and str.slice(c, 0, 4) == "sym ")
+
+// The query fragment after `:sym` (trimmed; "" jumps to the first symbol).
+fn sym_query(cmd: Str) -> Str
+    let c = str.trim(cmd)
+    if str.len(c) <= 4 then "" else str.trim(str.slice(c, 4, str.len(c)))
+
+// `:e <file>` / `:edit <file>` (with optional `!` to discard unsaved changes).
+fn is_edit_cmd(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    let h2 = if str.len(c) >= 2 then str.slice(c, 0, 2) else ""
+    let h3 = if str.len(c) >= 3 then str.slice(c, 0, 3) else ""
+    let h5 = if str.len(c) >= 5 then str.slice(c, 0, 5) else ""
+    let h6 = if str.len(c) >= 6 then str.slice(c, 0, 6) else ""
+    h2 == "e " or h3 == "e! " or h5 == "edit " or h6 == "edit! "
+
+fn edit_cmd_bang(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    util.index_of_byte(c, '!') >= 0          // contains '!'
+
+// The path after `:e`/`:edit` (and optional `!`), trimmed.
+fn edit_cmd_path(cmd: Str) -> Str
+    let c = str.trim(cmd)
+    let sp = util.index_of_byte(c, ' ')      // first space
+    if sp < 0 then "" else str.trim(str.slice(c, sp + 1, str.len(c)))
+
+// Bare `:e`/`:e!`/`:edit`/`:edit!` (no filename) — reload the current file from
+// disk (`!` discards unsaved changes).
+fn is_reload(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    c == "e" or c == "e!" or c == "edit" or c == "edit!"
+
+// `:split` / `:sp` / `:new` — open a horizontal (stacked) window split.
+fn is_split(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    c == "split" or c == "sp" or c == "new"
+
+// `:vsplit` / `:vs` / `:vnew` — open a vertical (side-by-side) window split.
+fn is_vsplit(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    c == "vsplit" or c == "vs" or c == "vsp" or c == "vnew"
+
+// `:only` / `:on` — close every window except the active one.
+fn is_only(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    c == "only" or c == "on"
+
+// `:colorscheme <name>` / `:colo <name>` — switch the active colourscheme.
+fn is_colorscheme(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    (str.len(c) >= 12 and str.slice(c, 0, 12) == "colorscheme ") or (str.len(c) >= 5 and str.slice(c, 0, 5) == "colo ")
+
+fn colorscheme_arg(cmd: Str) -> Str
+    let c = str.trim(cmd)
+    if str.len(c) >= 12 and str.slice(c, 0, 12) == "colorscheme "
+        str.trim(str.slice(c, 12, str.len(c)))
+    elif str.len(c) >= 5 and str.slice(c, 0, 5) == "colo "
+        str.trim(str.slice(c, 5, str.len(c)))
+    else
+        ""
+
+// `:close` / `:clo` / `:q` / `:quit` — close the current window.  Only treated
+// as a window-close when more than one window is open; with a single window
+// `:q` falls through to the normal quit-the-editor path.
+fn is_winclose(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    c == "close" or c == "clo" or c == "q" or c == "quit"
+
+// The argument after the first space of an Ex command, trimmed.
+fn cmd_arg(cmd: Str) -> Str
+    let c = str.trim(cmd)
+    let sp = util.index_of_byte(c, ' ')
+    if sp < 0 then "" else str.trim(str.slice(c, sp + 1, str.len(c)))
+
+// `:bufdo <subcmd>` — run a substitution across every buffer (applies the
+// given `:s` / `:%s` to each in turn).
+fn is_bufdo(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    str.len(c) > 6 and str.slice(c, 0, 6) == "bufdo "
+
+// `:badd <file>` — add a buffer without switching to it.
+fn is_badd(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    str.len(c) > 5 and str.slice(c, 0, 5) == "badd "
+
+// Argument-list navigation (the CLI file list).  0 = not an arglist command,
+// 1 = :args (show), 2 = :next, 3 = :prev, 4 = :first, 5 = :last,
+// 6 = :wnext (write+next), 7 = :wprev (write+prev).
+fn argcmd_kind(cmd: Str) -> Int
+    let c = str.trim(cmd)
+    if c == "args" or c == "ar" then 1 elif c == "next" or c == "n" or c == "n!" or c == "next!" then 2 elif c == "prev" or c == "previous" or c == "N" or c == "Next" or c == "prev!" then 3 elif c == "first" or c == "rewind" or c == "fir" then 4 elif c == "last" or c == "la" then 5 elif c == "wn" or c == "wnext" then 6 elif c == "wN" or c == "wp" or c == "wprev" then 7 else 0
+
+// Render the argument list with the current entry bracketed: `a [b] c`.
+fn arglist_str(args: [Str], cur: Int) -> Str
+    var s = ""
+    var i = 0
+    while i < list.len(args)
+        if i > 0
+            s = s + " "
+        let nm = util.basename_of(args[i])
+        s = if i == cur then s + "[" + nm + "]" else s + nm
+        i = i + 1
+    s
+
+// Buffer-list commands: `:ls`/`:buffers`, `:bn`/`:bnext`, `:bp`/`:bprev`.
+fn is_bufcmd(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    c == "ls" or c == "buffers" or c == "bn" or c == "bnext" or c == "bp" or c == "bprev" or c == "bprevious" or c == "bd" or c == "bdelete" or c == "bf" or c == "bfirst" or c == "bl" or c == "blast"
+
+// `:wa`/`:wqa`/`:xa`/`:qa` family — commands that act on *all* buffers at once.
+// 0 = not one, 1 = write all (`:wa`/`:wall`), 2 = write all + quit
+// (`:wqa`/`:wqall`/`:xa`/`:xall`), 3 = quit all guarded (`:qa`/`:qall`),
+// 4 = quit all forced (`:qa!`/`:qall!`).
+fn writeall_kind(cmd: Str) -> Int
+    let c = str.trim(cmd)
+    if c == "wa" or c == "wall" then 1 elif c == "wqa" or c == "wqall" or c == "xa" or c == "xall" then 2 elif c == "qa" or c == "qall" then 3 elif c == "qa!" or c == "qall!" then 4 else 0
+
+// 0 = :ls, 1 = :bn (next), 2 = :bp (prev), 3 = :bd (close), 4 = :bfirst, 5 = :blast.
+fn bufcmd_kind(cmd: Str) -> Int
+    let c = str.trim(cmd)
+    if c == "bn" or c == "bnext" then 1 elif c == "bp" or c == "bprev" or c == "bprevious" then 2 elif c == "bd" or c == "bdelete" then 3 elif c == "bf" or c == "bfirst" then 4 elif c == "bl" or c == "blast" then 5 else 0
+
+// `:b <n>` / `:buffer <n>` — switch to buffer number <n> (1-based); the
+// space-free `:b#` / `:buffer#` (alternate buffer) form is accepted too.
+fn is_bgoto(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    (str.len(c) > 2 and str.slice(c, 0, 2) == "b ") or (str.len(c) > 7 and str.slice(c, 0, 7) == "buffer ") or c == "b#" or c == "buffer#"
+
+// The argument string after `:b`/`:buffer`, trimmed (`:b#` → "#").
+fn bgoto_arg(cmd: Str) -> Str
+    let c = str.trim(cmd)
+    if c == "b#" or c == "buffer#"
+        return "#"
+    let sp = util.index_of_byte(c, ' ')
+    if sp < 0 then "" else str.trim(str.slice(c, sp + 1, str.len(c)))
+
+// The 1-based buffer number from `:b <n>`, or -1 if the arg isn't a number.
+fn bgoto_target(cmd: Str) -> Int
+    str.to_int(bgoto_arg(cmd)) ?? (0 - 1)
+
+// Index of the first buffer whose basename or path contains `name`, or -1.
+fn buf_find_by_name(paths: [Str], name: Str) -> Int
+    var i = 0
+    while i < list.len(paths)
+        if util.index_of_str(util.basename_of(paths[i]), name) >= 0 or util.index_of_str(paths[i], name) >= 0
+            return i
+        i = i + 1
+    0 - 1
+
+// `:rename <newname>` — rename the symbol under the cursor across the file.
+fn is_rename(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    c == "rename" or (str.len(c) > 7 and str.slice(c, 0, 7) == "rename ")
+
+fn rename_query(cmd: Str) -> Str
+    let c = str.trim(cmd)
+    if str.len(c) <= 7 then "" else str.trim(str.slice(c, 7, str.len(c)))
+
+// `:g/pat/d` (delete matching) / `:v/pat/d` / `:g!/pat/d` (delete non-matching).
+fn is_global(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    let n = str.len(c)
+    let c0 = if n > 0 then str.byte_at(c, 0) ?? 0 else 0
+    if n >= 2 and (c0 == 'g' or c0 == 'v')                    // g or v
+        let p = if c0 == 'g' and (str.byte_at(c, 1) ?? 0) == '!' then 2 else 1   // g!
+        if p < n then util.char_class_of(str.byte_at(c, p) ?? 0) == 2 else false
+    else
+        false

@@ -148,3 +148,25 @@ fn parse_color_val(s: Str) -> Int
 // Resolve a colour index, falling back to `dflt` when unset (-1).
 fn cs_or(v: Int, dflt: Int) -> Int
     if v >= 0 then v else dflt
+
+// Byte class for word motions and command-delimiter detection: 0 = whitespace
+// (space / tab), 1 = word byte (alphanumeric or `_`), 2 = punctuation.  Shared
+// by main.nv's word motions and excmd.nv's `:s` / `:g` delimiter checks.
+fn char_class_of(c: Int) -> Int
+    if c == ' ' or c == '\t'
+        0
+    elif (c >= 48 and c <= 57) or (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or c == 95
+        1
+    else
+        2
+
+// The basename (last `/`-separated component) of a path.
+fn basename_of(p: Str) -> Str
+    var last = 0
+    var i = 0
+    let n = str.len(p)
+    while i < n
+        if (str.byte_at(p, i) ?? 0) == '/'
+            last = i + 1
+        i = i + 1
+    str.slice(p, last, n)

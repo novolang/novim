@@ -17,6 +17,7 @@ use ts
 use window
 use colorscheme
 use disp
+use excmd
 
 // Editor state.  The cursor is 0-based (line, col); the buffer is a line vector.
 struct Editor
@@ -145,20 +146,14 @@ fn repeat_hjkl(ed: Editor, b: Int, times: Int) -> Editor
 // (alnum + `_`) OR a maximal run of other punctuation; whitespace
 // separates.  class 0 = whitespace, 1 = word, 2 = punctuation.
 
-fn char_class_of(c: Int) -> Int
-    if c == ' ' or c == '\t'
-        0
-    elif (c >= 48 and c <= 57) or (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or c == 95
-        1
-    else
-        2
+// char_class_of moved to util.nv (shared by word motions + Ex-command parsing).
 
 // Class of the glyph at (y,x); out-of-range / past end-of-line reads as
 // whitespace (the inter-line / trailing gap).
 fn class_at(ed: Editor, y: Int, x: Int) -> Int
     let line = line_at(ed, y)
     if x >= 0 and x < str.len(line)
-        char_class_of(str.byte_at(line, x) ?? ' ')
+        util.char_class_of(str.byte_at(line, x) ?? ' ')
     else
         0
 
@@ -1123,7 +1118,7 @@ fn tobj_lw(lo: Int, hi: Int) -> TObj
 // Char class for word objects; `big` (WORD) folds punctuation into the word
 // class so a WORD is any whitespace-delimited run.
 fn wcls(c: Int, big: Bool) -> Int
-    let k = char_class_of(c)
+    let k = util.char_class_of(c)
     if big and k == 2 then 1 else k
 
 // iw / aw (and iW / aW when `big`) — the word/WORD (or whitespace run) under the
@@ -1857,71 +1852,15 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
         return Step { ed: clamp_insert(Editor { lines: snls, cy: ed.cy, cx: ed.cx }), st: ist_reg_cw(st, sremoved, true) }
     Step { ed: ed, st: ist_done(st) }     // unknown — reset
 
-// ── Ex command line (`:w :q :wq`) ───────────────────────────────
-
-// Result of running an Ex command: the (possibly unchanged) editor plus
-// quit / save signals the driver acts on (the driver owns the file path
-// and the loop, so the [io] save stays out of the pure feed path).
-struct ExResult
-    quit: Bool
-    save: Bool
-
-@intent("""Parse the text after `:` into quit/save signals: `w` save, `q`/`q!`
-quit, `wq`/`x` save+quit.  Returns an ExResult the driver acts on; commands it
-doesn't recognise are ignored here (richer Ex commands are dispatched before
-this fallback).""")
-fn exec_ex(cmd: Str) -> ExResult
-    let c = str.trim(cmd)
-    if c == "w"
-        ExResult { quit: false, save: true }
-    elif c == "q" or c == "q!"
-        ExResult { quit: true, save: false }
-    elif c == "wq" or c == "x" or c == "wq!"
-        ExResult { quit: true, save: true }
-    else
-        ExResult { quit: false, save: false }
+// ── Ex command line ─────────────────────────────────────────────
+// Ex-command parsing — ExResult / exec_ex, the `is_*` / `*_arg` / `*_kind`
+// classifiers, and the `:s` / `:g` predicates — lives in excmd.nv.  The
+// Editor-typed appliers (ex_substitute / ex_goto / ex_global) stay here.
 
 // ── :s substitute ────────────────────────────────────────────
-// Plain-substring substitute (novim has no regex yet): `:s/pat/repl/[g]` on
-// the current line, `:%s/pat/repl/[g]` on every line.  `g` replaces every
-// occurrence on a line; without it, just the first.
-
-// Is `cmd` a substitute command (`s<delim>…` / `%s<delim>…`)?
-// The current-line form of a substitute command (drop a leading `%`), for `&`.
-fn subst_current_line(cmd: Str) -> Str
-    let c = str.trim(cmd)
-    if str.len(c) > 0 and (str.byte_at(c, 0) ?? 0) == '%'
-        str.slice(c, 1, str.len(c))
-    else
-        c
-
-fn is_substitute(cmd: Str) -> Bool
-    let c = str.trim(cmd)
-    let n = str.len(c)
-    let p = if n > 0 and (str.byte_at(c, 0) ?? 0) == '%' then 1 else 0   // optional %
-    if p < n and (str.byte_at(c, p) ?? 0) == 's' and p + 1 < n           // 's' + delimiter
-        char_class_of(str.byte_at(c, p + 1) ?? 0) == 2                     // punctuation delim
-    else
-        false
-
-// Replace `pat` with `repl` in `line` (first occurrence, or all if global).
-fn replace_in_line(line: Str, pat: Str, repl: Str, global: Bool) -> Str
-    if str.len(pat) == 0
-        return line
-    var out = ""
-    var i = 0
-    let n = str.len(line)
-    let pl = str.len(pat)
-    var did = false
-    while i < n
-        if (global or not did) and i + pl <= n and str.slice(line, i, i + pl) == pat
-            out = out + repl
-            i = i + pl
-            did = true
-        else
-            out = out + str.from_char(str.byte_at(line, i) ?? 0)
-            i = i + 1
-    out
+// `:s/pat/repl/[g]` on the current line, `:%s/pat/repl/[g]` on every line; the
+// pattern is a vim-magic-subset regex (nvregex).  `g` replaces every occurrence
+// on a line, else just the first.
 
 @intent("""Apply a `:s` / `:%s` substitution and return the new editor.  Honours
 the leading `%` (whole buffer vs current line), any delimiter, and the `g`
@@ -1959,169 +1898,6 @@ fn ex_substitute(ed: Editor, cmd: Str) -> Editor
 // ── :N goto-line ─────────────────────────────────────────────
 // `:N` (a line number) or `:$` (last line) moves the cursor to that line's
 // first non-blank.  Driver-level, like :s / :g.
-
-fn is_goto(cmd: Str) -> Bool
-    let c = str.trim(cmd)
-    let n = str.len(c)
-    if n == 0
-        return false
-    if c == "$"
-        return true
-    var i = 0
-    while i < n
-        let b = str.byte_at(c, i) ?? 0
-        if b < '0' or b > '9'
-            return false
-        i = i + 1
-    true
-
-// `:fmt` / `:format` — reformat the buffer via the language server.
-fn is_fmt(cmd: Str) -> Bool
-    let c = str.trim(cmd)
-    c == "fmt" or c == "format"
-
-// `:sym <name>` — jump to a document symbol whose name contains <name>.
-fn is_sym(cmd: Str) -> Bool
-    let c = str.trim(cmd)
-    c == "sym" or (str.len(c) > 4 and str.slice(c, 0, 4) == "sym ")
-
-// The query fragment after `:sym` (trimmed; "" jumps to the first symbol).
-fn sym_query(cmd: Str) -> Str
-    let c = str.trim(cmd)
-    if str.len(c) <= 4 then "" else str.trim(str.slice(c, 4, str.len(c)))
-
-// `:e <file>` / `:edit <file>` (with optional `!` to discard unsaved changes).
-fn is_edit_cmd(cmd: Str) -> Bool
-    let c = str.trim(cmd)
-    let h2 = if str.len(c) >= 2 then str.slice(c, 0, 2) else ""
-    let h3 = if str.len(c) >= 3 then str.slice(c, 0, 3) else ""
-    let h5 = if str.len(c) >= 5 then str.slice(c, 0, 5) else ""
-    let h6 = if str.len(c) >= 6 then str.slice(c, 0, 6) else ""
-    h2 == "e " or h3 == "e! " or h5 == "edit " or h6 == "edit! "
-
-fn edit_cmd_bang(cmd: Str) -> Bool
-    let c = str.trim(cmd)
-    util.index_of_byte(c, '!') >= 0          // contains '!'
-
-// The path after `:e`/`:edit` (and optional `!`), trimmed.
-fn edit_cmd_path(cmd: Str) -> Str
-    let c = str.trim(cmd)
-    let sp = util.index_of_byte(c, ' ')      // first space
-    if sp < 0 then "" else str.trim(str.slice(c, sp + 1, str.len(c)))
-
-// Bare `:e`/`:e!`/`:edit`/`:edit!` (no filename) — reload the current file from
-// disk (`!` discards unsaved changes).
-fn is_reload(cmd: Str) -> Bool
-    let c = str.trim(cmd)
-    c == "e" or c == "e!" or c == "edit" or c == "edit!"
-
-// `:split` / `:sp` / `:new` — open a horizontal (stacked) window split.
-fn is_split(cmd: Str) -> Bool
-    let c = str.trim(cmd)
-    c == "split" or c == "sp" or c == "new"
-
-// `:vsplit` / `:vs` / `:vnew` — open a vertical (side-by-side) window split.
-fn is_vsplit(cmd: Str) -> Bool
-    let c = str.trim(cmd)
-    c == "vsplit" or c == "vs" or c == "vsp" or c == "vnew"
-
-// `:only` / `:on` — close every window except the active one.
-fn is_only(cmd: Str) -> Bool
-    let c = str.trim(cmd)
-    c == "only" or c == "on"
-
-// `:colorscheme <name>` / `:colo <name>` — switch the active colourscheme.
-fn is_colorscheme(cmd: Str) -> Bool
-    let c = str.trim(cmd)
-    (str.len(c) >= 12 and str.slice(c, 0, 12) == "colorscheme ") or (str.len(c) >= 5 and str.slice(c, 0, 5) == "colo ")
-
-fn colorscheme_arg(cmd: Str) -> Str
-    let c = str.trim(cmd)
-    if str.len(c) >= 12 and str.slice(c, 0, 12) == "colorscheme "
-        str.trim(str.slice(c, 12, str.len(c)))
-    elif str.len(c) >= 5 and str.slice(c, 0, 5) == "colo "
-        str.trim(str.slice(c, 5, str.len(c)))
-    else
-        ""
-
-// `:close` / `:clo` / `:q` / `:quit` — close the current window.  Only treated
-// as a window-close when more than one window is open; with a single window
-// `:q` falls through to the normal quit-the-editor path.
-fn is_winclose(cmd: Str) -> Bool
-    let c = str.trim(cmd)
-    c == "close" or c == "clo" or c == "q" or c == "quit"
-
-// The argument after the first space of an Ex command, trimmed.
-fn cmd_arg(cmd: Str) -> Str
-    let c = str.trim(cmd)
-    let sp = util.index_of_byte(c, ' ')
-    if sp < 0 then "" else str.trim(str.slice(c, sp + 1, str.len(c)))
-
-// `:bufdo <subcmd>` — run a substitution across every buffer (applies the
-// given `:s` / `:%s` to each in turn).
-fn is_bufdo(cmd: Str) -> Bool
-    let c = str.trim(cmd)
-    str.len(c) > 6 and str.slice(c, 0, 6) == "bufdo "
-
-// `:badd <file>` — add a buffer without switching to it.
-fn is_badd(cmd: Str) -> Bool
-    let c = str.trim(cmd)
-    str.len(c) > 5 and str.slice(c, 0, 5) == "badd "
-
-// Argument-list navigation (the CLI file list).  0 = not an arglist command,
-// 1 = :args (show), 2 = :next, 3 = :prev, 4 = :first, 5 = :last,
-// 6 = :wnext (write+next), 7 = :wprev (write+prev).
-fn argcmd_kind(cmd: Str) -> Int
-    let c = str.trim(cmd)
-    if c == "args" or c == "ar" then 1 elif c == "next" or c == "n" or c == "n!" or c == "next!" then 2 elif c == "prev" or c == "previous" or c == "N" or c == "Next" or c == "prev!" then 3 elif c == "first" or c == "rewind" or c == "fir" then 4 elif c == "last" or c == "la" then 5 elif c == "wn" or c == "wnext" then 6 elif c == "wN" or c == "wp" or c == "wprev" then 7 else 0
-
-// Render the argument list with the current entry bracketed: `a [b] c`.
-fn arglist_str(args: [Str], cur: Int) -> Str
-    var s = ""
-    var i = 0
-    while i < list.len(args)
-        if i > 0
-            s = s + " "
-        let nm = basename_of(args[i])
-        s = if i == cur then s + "[" + nm + "]" else s + nm
-        i = i + 1
-    s
-
-// Buffer-list commands: `:ls`/`:buffers`, `:bn`/`:bnext`, `:bp`/`:bprev`.
-fn is_bufcmd(cmd: Str) -> Bool
-    let c = str.trim(cmd)
-    c == "ls" or c == "buffers" or c == "bn" or c == "bnext" or c == "bp" or c == "bprev" or c == "bprevious" or c == "bd" or c == "bdelete" or c == "bf" or c == "bfirst" or c == "bl" or c == "blast"
-
-// `:wa`/`:wqa`/`:xa`/`:qa` family — commands that act on *all* buffers at once.
-// 0 = not one, 1 = write all (`:wa`/`:wall`), 2 = write all + quit
-// (`:wqa`/`:wqall`/`:xa`/`:xall`), 3 = quit all guarded (`:qa`/`:qall`),
-// 4 = quit all forced (`:qa!`/`:qall!`).
-fn writeall_kind(cmd: Str) -> Int
-    let c = str.trim(cmd)
-    if c == "wa" or c == "wall" then 1 elif c == "wqa" or c == "wqall" or c == "xa" or c == "xall" then 2 elif c == "qa" or c == "qall" then 3 elif c == "qa!" or c == "qall!" then 4 else 0
-
-// 0 = :ls, 1 = :bn (next), 2 = :bp (prev), 3 = :bd (close), 4 = :bfirst, 5 = :blast.
-fn bufcmd_kind(cmd: Str) -> Int
-    let c = str.trim(cmd)
-    if c == "bn" or c == "bnext" then 1 elif c == "bp" or c == "bprev" or c == "bprevious" then 2 elif c == "bd" or c == "bdelete" then 3 elif c == "bf" or c == "bfirst" then 4 elif c == "bl" or c == "blast" then 5 else 0
-
-// `:b <n>` / `:buffer <n>` — switch to buffer number <n> (1-based); the
-// space-free `:b#` / `:buffer#` (alternate buffer) form is accepted too.
-fn is_bgoto(cmd: Str) -> Bool
-    let c = str.trim(cmd)
-    (str.len(c) > 2 and str.slice(c, 0, 2) == "b ") or (str.len(c) > 7 and str.slice(c, 0, 7) == "buffer ") or c == "b#" or c == "buffer#"
-
-// The argument string after `:b`/`:buffer`, trimmed (`:b#` → "#").
-fn bgoto_arg(cmd: Str) -> Str
-    let c = str.trim(cmd)
-    if c == "b#" or c == "buffer#"
-        return "#"
-    let sp = util.index_of_byte(c, ' ')
-    if sp < 0 then "" else str.trim(str.slice(c, sp + 1, str.len(c)))
-
-// The 1-based buffer number from `:b <n>`, or -1 if the arg isn't a number.
-fn bgoto_target(cmd: Str) -> Int
-    str.to_int(bgoto_arg(cmd)) ?? (0 - 1)
 
 // True if any buffer has unsaved changes (active vs disk, or a stored buffer
 // vs its saved text).  Used by the `:q` guard.
@@ -2177,26 +1953,6 @@ fn mark_all_saved(texts: [Str], disks: [Str]) -> [Str]
         i = i + 1
     d
 
-// Index of the first buffer whose basename or path contains `name`, or -1.
-fn buf_find_by_name(paths: [Str], name: Str) -> Int
-    var i = 0
-    while i < list.len(paths)
-        if util.index_of_str(basename_of(paths[i]), name) >= 0 or util.index_of_str(paths[i], name) >= 0
-            return i
-        i = i + 1
-    0 - 1
-
-// The basename (last path component) of `p`.
-fn basename_of(p: Str) -> Str
-    var last = 0
-    var i = 0
-    let n = str.len(p)
-    while i < n
-        if (str.byte_at(p, i) ?? 0) == '/'        // '/'
-            last = i + 1
-        i = i + 1
-    str.slice(p, last, n)
-
 // A one-line buffer list for `:ls`, marking the current with [..].
 // Render the `:ls` buffer-list overlay over the top rows; the current buffer is
 // marked with `>`.  Dismissed by the next keypress (the normal render repaints).
@@ -2208,21 +1964,12 @@ fn draw_buflist(paths: [Str], cur: Int, rows: Int) [io]
         csi()
         emit("K")
         let mark = if bi == cur then "> " else "  "
-        emit(mark + str.from_int(bi + 1) + "  " + basename_of(paths[bi]))
+        emit(mark + str.from_int(bi + 1) + "  " + util.basename_of(paths[bi]))
         bi = bi + 1
     cup(bi + 1, 1)
     csi()
     emit("K")
     emit("-- :b <n> to switch · any key to dismiss --")
-
-// `:rename <newname>` — rename the symbol under the cursor across the file.
-fn is_rename(cmd: Str) -> Bool
-    let c = str.trim(cmd)
-    c == "rename" or (str.len(c) > 7 and str.slice(c, 0, 7) == "rename ")
-
-fn rename_query(cmd: Str) -> Str
-    let c = str.trim(cmd)
-    if str.len(c) <= 7 then "" else str.trim(str.slice(c, 7, str.len(c)))
 
 fn ex_goto(ed: Editor, cmd: Str) -> Editor
     let c = str.trim(cmd)
@@ -2241,16 +1988,6 @@ fn ex_goto(ed: Editor, cmd: Str) -> Editor
     if target > nl - 1
         target = nl - 1
     clamp(Editor { lines: ed.lines, cy: target, cx: first_nonblank(line_at(ed, target)) })
-
-fn is_global(cmd: Str) -> Bool
-    let c = str.trim(cmd)
-    let n = str.len(c)
-    let c0 = if n > 0 then str.byte_at(c, 0) ?? 0 else 0
-    if n >= 2 and (c0 == 'g' or c0 == 'v')                    // g or v
-        let p = if c0 == 'g' and (str.byte_at(c, 1) ?? 0) == '!' then 2 else 1   // g!
-        if p < n then char_class_of(str.byte_at(c, p) ?? 0) == 2 else false
-    else
-        false
 
 @intent("""Apply a `:g/pat/d` family command: delete every line matching `pat`
 (`:g!`/`:v` invert to delete non-matching lines).  The pattern is the same
@@ -2372,7 +2109,6 @@ fn keymap_lookup(km: Keymap, b: Int) -> Str
             return km.rhs[i]
         i = i + 1
     ""
-
 
 // Load `[keymaps]` from a config file: lines `lhs = "rhs"` (rhs may use
 // `\e` etc.).  Comments (`#`) and blank lines are skipped; section headers
@@ -3286,17 +3022,17 @@ fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
         let b = str.byte_at(decoded, i) ?? 0
         if cmd_mode
             if b == '\r' or b == '\n'            // Enter — run the command
-                if is_substitute(cmd_buf)
+                if excmd.is_substitute(cmd_buf)
                     es = edit_push_undo(es, ed)
                     ed = ex_substitute(ed, cmd_buf)
                     last_subst = cmd_buf
-                elif is_global(cmd_buf)
+                elif excmd.is_global(cmd_buf)
                     es = edit_push_undo(es, ed)
                     ed = ex_global(ed, cmd_buf)
-                elif is_goto(cmd_buf)
+                elif excmd.is_goto(cmd_buf)
                     ed = ex_goto(ed, cmd_buf)
                 else
-                    let r = exec_ex(cmd_buf)
+                    let r = excmd.exec_ex(cmd_buf)
                     if r.save
                         save_buf(path, ed.lines)
                     if r.quit
@@ -3343,7 +3079,7 @@ fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
             ed = clamp(Editor { lines: ed.lines, cy: ty, cx: first_nonblank(line_at(ed, ty)) })
         elif scroll_idle(st, es) and key_free(km, b) and b == '&' and str.len(last_subst) > 0   // & — repeat last :s on this line
             es = edit_push_undo(es, ed)
-            ed = ex_substitute(ed, subst_current_line(last_subst))
+            ed = ex_substitute(ed, excmd.subst_current_line(last_subst))
         else
             let estep = feed_edit(ed, st, km, es, b)
             ed = estep.ed
@@ -4289,14 +4025,14 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                     running = false
                 elif cmd_mode
                     if b == '\r' or b == '\n'            // Enter — run command
-                        if is_substitute(cmd_buf)
+                        if excmd.is_substitute(cmd_buf)
                             es = edit_push_undo(es, ed)
                             ed = ex_substitute(ed, cmd_buf)
                             last_subst = cmd_buf
-                        elif is_global(cmd_buf)
+                        elif excmd.is_global(cmd_buf)
                             es = edit_push_undo(es, ed)
                             ed = ex_global(ed, cmd_buf)
-                        elif is_goto(cmd_buf)
+                        elif excmd.is_goto(cmd_buf)
                             jback = list.push(jback, jentry(curpath, ed.cy, ed.cx))
                             jfwd = []
                             ed = ex_goto(ed, cmd_buf)
@@ -4309,7 +4045,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                         elif is_set(cmd_buf)
                             opts = apply_set(opts, cmd_buf)
                             left = hscroll_for(left, ed, opts, cols)
-                        elif is_fmt(cmd_buf)
+                        elif excmd.is_fmt(cmd_buf)
                             if lsp_phase == 2
                                 lsp_reqid = lsp_reqid + 1
                                 lsp.lsp_send(lsp_in, lsp.lsp_formatting_req(lsp_reqid, lsp_uri, opts.tabstop))
@@ -4331,9 +4067,9 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                         lsp_info = "formatted"
                             else
                                 lsp_info = "format: LSP not ready"
-                        elif is_sym(cmd_buf)
+                        elif excmd.is_sym(cmd_buf)
                             if lsp_phase == 2
-                                let q = sym_query(cmd_buf)
+                                let q = excmd.sym_query(cmd_buf)
                                 lsp_reqid = lsp_reqid + 1
                                 lsp.lsp_send(lsp_in, lsp.lsp_documentsymbol_req(lsp_reqid, lsp_uri))
                                 let sresp = lsp.lsp_pump(lsp_out, lsp_reqid, 40)
@@ -4357,11 +4093,11 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                         lsp_info = "sym: no match"
                             else
                                 lsp_info = "sym: LSP not ready"
-                        elif is_rename(cmd_buf)
+                        elif excmd.is_rename(cmd_buf)
                             if lsp_phase != 2
                                 lsp_info = "rename: LSP not ready"
                             else
-                                let nn = rename_query(cmd_buf)
+                                let nn = excmd.rename_query(cmd_buf)
                                 if str.len(nn) == 0
                                     lsp_info = "rename: usage :rename <newname>"
                                 else
@@ -4382,7 +4118,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                             lsp_ver = lsp_ver + 1
                                             lsp.lsp_send(lsp_in, lsp.lsp_didchange(lsp_uri, lsp_ver, lsp_lasttext))
                                             lsp_info = "renamed " + str.from_int(list.len(nts)) + " sites"
-                        elif is_reload(cmd_buf)            // bare :e / :e! — reload from disk
+                        elif excmd.is_reload(cmd_buf)            // bare :e / :e! — reload from disk
                             let bang = util.index_of_byte(cmd_buf, '!') >= 0
                             if (not bang) and buf_text(ed) != disk_text
                                 lsp_info = "unsaved changes (:e! to override)"
@@ -4396,9 +4132,9 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                     lsp_lasttext = buf_text(ed)
                                     lsp_ver = lsp_ver + 1
                                     lsp.lsp_send(lsp_in, lsp.lsp_didchange(lsp_uri, lsp_ver, lsp_lasttext))
-                                lsp_info = "reloaded " + basename_of(curpath)
-                        elif is_edit_cmd(cmd_buf)
-                            let tgt = edit_cmd_path(cmd_buf)
+                                lsp_info = "reloaded " + util.basename_of(curpath)
+                        elif excmd.is_edit_cmd(cmd_buf)
+                            let tgt = excmd.edit_cmd_path(cmd_buf)
                             if str.len(tgt) == 0
                                 lsp_info = "edit: usage :e <file>"
                             else                          // open/switch the buffer (edits are preserved in memory)
@@ -4408,9 +4144,9 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                 want_y = 0 - 1            // restore the buffer's saved cursor
                                 want_x = 0
                                 lsp_info = str.from_char('"') + tgt + str.from_char('"')
-                        elif is_bufdo(cmd_buf)            // :bufdo <subcmd> — substitute across all buffers
-                            let sub = cmd_arg(cmd_buf)
-                            if not is_substitute(sub)
+                        elif excmd.is_bufdo(cmd_buf)            // :bufdo <subcmd> — substitute across all buffers
+                            let sub = excmd.cmd_arg(cmd_buf)
+                            if not excmd.is_substitute(sub)
                                 lsp_info = "bufdo: only :s/:%s supported"
                             else
                                 es = edit_push_undo(es, ed)   // active buffer
@@ -4430,12 +4166,12 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                     lsp_ver = lsp_ver + 1
                                     lsp.lsp_send(lsp_in, lsp.lsp_didchange(lsp_uri, lsp_ver, lsp_lasttext))
                                 lsp_info = "bufdo: " + str.from_int(list.len(bufs_text)) + " buffers"
-                        elif is_badd(cmd_buf)            // :badd <file> — add buffer without switching
-                            let tgt = cmd_arg(cmd_buf)
+                        elif excmd.is_badd(cmd_buf)            // :badd <file> — add buffer without switching
+                            let tgt = excmd.cmd_arg(cmd_buf)
                             if str.len(tgt) == 0
                                 lsp_info = "badd: usage :badd <file>"
                             elif buf_index_of(bufs_path, tgt) >= 0
-                                lsp_info = "already open: " + basename_of(tgt)
+                                lsp_info = "already open: " + util.basename_of(tgt)
                             else
                                 bufs_text = list.push(bufs_text, file_to_text(tgt))
                                 bufs_path = list.push(bufs_path, tgt)
@@ -4453,12 +4189,12 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                 if lsp.lsp_lang_of(tgt) == lsp_lang and lsp_lang != "" and lsp_phase == 2   // open the doc so its diagnostics go live
                                     lsp.lsp_send(lsp_in, lsp.lsp_didopen("file://" + tgt, lsp_lang, file_to_text(tgt)))
                                     bufs_lspopen = util.set_bool_at(bufs_lspopen, list.len(bufs_path) - 1, true)
-                                lsp_info = "added " + basename_of(tgt) + "; " + str.from_int(list.len(bufs_path)) + " buffers"
-                        elif argcmd_kind(cmd_buf) > 0    // :args / :next / :prev / :first / :last / :wn / :wN
-                            let ak = argcmd_kind(cmd_buf)
+                                lsp_info = "added " + util.basename_of(tgt) + "; " + str.from_int(list.len(bufs_path)) + " buffers"
+                        elif excmd.argcmd_kind(cmd_buf) > 0    // :args / :next / :prev / :first / :last / :wn / :wN
+                            let ak = excmd.argcmd_kind(cmd_buf)
                             let na = list.len(arglist)
                             if ak == 1                    // :args — show the list
-                                lsp_info = arglist_str(arglist, arg_idx)
+                                lsp_info = excmd.arglist_str(arglist, arg_idx)
                             else
                                 let tgt = if ak == 2 or ak == 6 then arg_idx + 1 elif ak == 3 or ak == 7 then arg_idx - 1 elif ak == 4 then 0 else na - 1
                                 if tgt < 0 or tgt >= na
@@ -4473,9 +4209,9 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                     want_path = arglist[tgt]
                                     want_y = 0 - 1
                                     want_x = 0
-                        elif is_bufcmd(cmd_buf)
+                        elif excmd.is_bufcmd(cmd_buf)
                             let nb = list.len(bufs_path)
-                            let bk = bufcmd_kind(cmd_buf)
+                            let bk = excmd.bufcmd_kind(cmd_buf)
                             if bk == 0                    // :ls — show the buffer list overlay
                                 buflist = true
                             elif bk == 3                  // :bd — close current
@@ -4494,12 +4230,12 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                 want_path = bufs_path[tgt2]
                                 want_y = 0 - 1
                                 want_x = 0
-                        elif is_bgoto(cmd_buf)             // :b <n> / :b <name> / :b#
-                            let barg = bgoto_arg(cmd_buf)
-                            let bn2 = bgoto_target(cmd_buf)
+                        elif excmd.is_bgoto(cmd_buf)             // :b <n> / :b <name> / :b#
+                            let barg = excmd.bgoto_arg(cmd_buf)
+                            let bn2 = excmd.bgoto_target(cmd_buf)
                             // `#` = alternate buffer; a number switches by index;
                             // otherwise match a filename
-                            let bidx = if barg == "#" then alt_buf elif bn2 >= 1 and bn2 <= list.len(bufs_path) then bn2 - 1 else buf_find_by_name(bufs_path, barg)
+                            let bidx = if barg == "#" then alt_buf elif bn2 >= 1 and bn2 <= list.len(bufs_path) then bn2 - 1 else excmd.buf_find_by_name(bufs_path, barg)
                             if bidx >= 0
                                 jback = list.push(jback, jentry(curpath, ed.cy, ed.cx))
                                 jfwd = []
@@ -4508,8 +4244,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                 want_x = 0
                             else
                                 lsp_info = "no buffer matching " + barg
-                        elif writeall_kind(cmd_buf) > 0   // :wa / :wqa / :xa / :qa
-                            let wk = writeall_kind(cmd_buf)
+                        elif excmd.writeall_kind(cmd_buf) > 0   // :wa / :wqa / :xa / :qa
+                            let wk = excmd.writeall_kind(cmd_buf)
                             if wk == 1 or wk == 2
                                 let n = write_all_bufs(bufs_path, bufs_text, bufs_disk, cur_buf, ed, disk_text)
                                 disk_text = buf_text(ed)
@@ -4521,19 +4257,19 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                             elif wk == 2 or wk == 3 or wk == 4
                                 running = false
                                 done = true
-                        elif is_split(cmd_buf)            // :split / :sp — stacked window split
+                        elif excmd.is_split(cmd_buf)            // :split / :sp — stacked window split
                             pending_wcmd = 1
-                        elif is_vsplit(cmd_buf)           // :vsplit / :vs — side-by-side split
+                        elif excmd.is_vsplit(cmd_buf)           // :vsplit / :vs — side-by-side split
                             pending_wcmd = 4
-                        elif is_winclose(cmd_buf) and window.layout_count(lay) > 1   // :close / :q with splits → close window
+                        elif excmd.is_winclose(cmd_buf) and window.layout_count(lay) > 1   // :close / :q with splits → close window
                             pending_wcmd = 3
-                        elif is_only(cmd_buf)            // :only — keep just the active window
+                        elif excmd.is_only(cmd_buf)            // :only — keep just the active window
                             pending_wcmd = 5
-                        elif is_colorscheme(cmd_buf)     // :colorscheme <name> — live theme switch
-                            cs = colorscheme.colorscheme_named(colorscheme_arg(cmd_buf))
-                            lsp_info = "colorscheme " + colorscheme_arg(cmd_buf)
+                        elif excmd.is_colorscheme(cmd_buf)     // :colorscheme <name> — live theme switch
+                            cs = colorscheme.colorscheme_named(excmd.colorscheme_arg(cmd_buf))
+                            lsp_info = "colorscheme " + excmd.colorscheme_arg(cmd_buf)
                         else
-                            let r = exec_ex(cmd_buf)
+                            let r = excmd.exec_ex(cmd_buf)
                             if r.save
                                 save_buf(curpath, ed.lines)
                                 disk_text = buf_text(ed)
@@ -4672,7 +4408,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                     ed = clamp(Editor { lines: ed.lines, cy: ty, cx: first_nonblank(line_at(ed, ty)) })
                 elif scroll_idle(st, es) and key_free(km, b) and b == '&' and str.len(last_subst) > 0   // & — repeat last :s
                     es = edit_push_undo(es, ed)
-                    ed = ex_substitute(ed, subst_current_line(last_subst))
+                    ed = ex_substitute(ed, excmd.subst_current_line(last_subst))
                 elif scroll_idle(st, es) and key_free(km, b) and (b == '\x05' or b == '\x19')   // Ctrl-E / Ctrl-Y — scroll one line
                     let body = rows - 1
                     let nl = list.len(ed.lines)
