@@ -26,7 +26,7 @@ fn rect(x: Int, y: Int, w: Int, h: Int) -> Rect
 @intent("""The window layout as a recursive tree.  `LWin` is a leaf holding a
 window id (index into the win_* parallel arrays); `LRow` tiles its parts
 side-by-side (a `:vsplit`), `LCol` stacks them top-to-bottom (a `:split`).
-A single full-screen window is just `LWin(0)` — the v1 default.""")
+A single full-screen window is just `LWin(0)` — the default before any split.""")
 enum Layout
     LWin(id: Int)
     LRow(parts: [Layout])
@@ -131,7 +131,7 @@ fn window_rect(lay: Layout, winid: Int, screen: Rect, ww: [Int], hw: [Int]) -> R
 `newid`), `vertical` → side-by-side LRow (`:vsplit`), else stacked LCol
 (`:split`).  Recurses the tree rebuilding each LRow/LCol so the split lands at
 the right leaf regardless of nesting.  Adjacent same-orientation splits nest
-(no flattening) — fine for v1.""")
+rather than flatten into one row/column.""")
 fn layout_split(lay: Layout, winid: Int, newid: Int, vertical: Bool) -> Layout
     match lay
         LWin(id) =>

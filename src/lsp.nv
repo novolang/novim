@@ -99,7 +99,7 @@ fn lsp_q(s: Str) -> Str
 
 // ── Multi-language server resolution ─────────────────────────────────────────
 // novim drives ONE language server per session, chosen from the active file's
-// extension.  `.nv` maps to the built-in novols (byte-identical to v1); other
+// extension.  `.nv` maps to the built-in novols (with the bytes it sends unchanged); other
 // extensions map to common community servers, each overridable by a flat
 // `[lsp]` config section keyed by language id, e.g.
 //
@@ -235,7 +235,7 @@ fn lsp_spawn_cmd(cmd: Str) -> Int [io]
 //
 // `root_uri` is the workspace root as a `file://` URI, or "" for none (sent as
 // `rootUri:null` — what novols expects, and what every `.nv` session sends, so
-// the novols frame stays byte-identical to v1).  Community servers
+// the novols frame stays byte-for-byte unchanged).  Community servers
 // (rust-analyzer / gopls / …) need a real rootUri to load their project model.
 fn lsp_init_req(uri: Str, root_uri: Str) -> Str
     let root = if str.len(root_uri) == 0 then "null" else lsp_q(root_uri)
@@ -245,7 +245,7 @@ fn lsp_initialized() -> Str
     "{" + lsp_q("jsonrpc") + ":" + lsp_q("2.0") + "," + lsp_q("method") + ":" + lsp_q("initialized") + "," + lsp_q("params") + ":{}}"
 
 // `language` is the LSP languageId ("novo", "rust", "python", …); `.nv`
-// sessions pass "novo", keeping the novols didOpen byte-identical to v1.
+// sessions pass "novo", keeping the novols didOpen byte-for-byte unchanged.
 fn lsp_didopen(uri: Str, language: Str, text: Str) -> Str
     "{" + lsp_q("jsonrpc") + ":" + lsp_q("2.0") + "," + lsp_q("method") + ":" + lsp_q("textDocument/didOpen") + "," + lsp_q("params") + ":{" + lsp_q("textDocument") + ":{" + lsp_q("uri") + ":" + lsp_q(uri) + "," + lsp_q("languageId") + ":" + lsp_q(language) + "," + lsp_q("version") + ":1," + lsp_q("text") + ":" + lsp_q(json_escape(text)) + "}}}"
 
@@ -511,7 +511,7 @@ fn lsp_formatting_req(id: Int, uri: Str, tabsize: Int) -> Str
 
 // novols returns a single whole-document TextEdit; its `newText` is the fully
 // formatted buffer.  (Multi-edit/range formatting isn't produced by novols, so
-// v1 just takes the first edit's newText.)
+// this just takes the first edit's newText.)
 fn lsp_fmt_newtext_doc(doc: JsonValueH) -> Str
     match json.get_list(doc, "result")
         None => ""

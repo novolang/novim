@@ -2057,7 +2057,8 @@ fn cmd_arg(cmd: Str) -> Str
     let sp = util.index_of_byte(c, ' ')
     if sp < 0 then "" else str.trim(str.slice(c, sp + 1, str.len(c)))
 
-// `:bufdo <subcmd>` — run a substitution across every buffer (v1: `:s`/`:%s`).
+// `:bufdo <subcmd>` — run a substitution across every buffer (applies the
+// given `:s` / `:%s` to each in turn).
 fn is_bufdo(cmd: Str) -> Bool
     let c = str.trim(cmd)
     str.len(c) > 6 and str.slice(c, 0, 6) == "bufdo "
@@ -2403,9 +2404,10 @@ fn load_keymaps(cfg_path: Str) -> Keymap [io]
             Keymap { lhs: lhs, rhs: rhs }
 
 // ── Options ──────────────────────────────────────────
-// `[options]` toggles editor settings.  v1: `number` (a line-number
-// gutter) and `tabstop` (loaded; tab expansion in render is a follow-on).
-
+@intent("""Editor settings, loaded from the `[options]` config section and
+toggled live by `:set`.  `number`/`relativenumber` drive the line-number gutter,
+`hlsearch` the search highlighting, `wrap` soft line wrapping, `syntax` the Novo
+highlighter, and `tabstop` the tab-expansion width.""")
 struct Options
     number:         Bool
     relativenumber: Bool
@@ -2549,7 +2551,7 @@ fn apply_set(o: Options, cmd: Str) -> Options
 // ── Search (/pattern, n / N) ─────────────────────────
 
 // First occurrence of `needle` in `hay` at or after column `from`; -1 if
-// none.  Plain substring (no regex in v1).
+// none.  A literal substring match (search navigation is not a regex).
 fn find_in_line(hay: Str, needle: Str, from: Int) -> Int
     let hl = str.len(hay)
     let nl = str.len(needle)
@@ -3170,7 +3172,7 @@ fn feed_edit_core(ed: Editor, st: InputState, km: Keymap, es: EditState, b: Int)
 // ── Macros: q<reg> … q record, @<reg> / @@ replay ─────────────
 // Recorded keystrokes are stored in the named-register slot (vim shares them),
 // so q stop writes `macrobuf` into regs[reg].  Replay re-feeds the bytes
-// through feed_edit.  Limitation (v1): `:` / `/` lines inside a macro aren't
+// through feed_edit.  Limitation: `:` / `/` lines inside a macro aren't
 // replayed (those are handled by the drivers, not feed).
 
 // Set the await-macro state (1 = after q, 2 = after @).
@@ -3736,8 +3738,8 @@ the same buffer draw the live `ed.lines`; a pane on a different buffer draws
 that buffer's stored text (bufs_text), with its own path in the status line.
 The active window draws from the live ed cursor / top / left and the real mode
 (selection, INSERT, gd/K info); every other pane draws from its saved win_*
-cursor/viewport in plain NORMAL mode.  Diagnostics + modified flag only follow
-the live active buffer for now.""")
+cursor/viewport in plain NORMAL mode.  Diagnostics + the modified flag follow
+the live active buffer only.""")
 fn render_all(ed: Editor, lay: window.Layout, awin: Int, screen: window.Rect, win_cy: [Int], win_cx: [Int], win_top: [Int], win_left: [Int], win_buf: [Int], win_ww: [Int], win_hw: [Int], cur_buf: Int, bufs_text: [Str], bufs_path: [Str], path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: colorscheme.Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, ts_spans: [Int]) [io]
     csi()
     emit("?25l")
@@ -4040,7 +4042,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     // Multi-language: one server per session, chosen from the active file's
     // type.  `lsp_lang` is the running server's LSP languageId ("novo", "rust",
     // …; "" = no server); a buffer gets LSP only when its language matches.
-    // `.nv` resolves to novols/"novo" with a null root — byte-identical to v1.
+    // `.nv` resolves to novols/"novo" with a null root — byte-for-byte unchanged from the novols-only path.
     let lsp_cfg = file_to_text(cfg_path)
     var lsp_lang = ""
     // ── Tree-sitter highlighting (optional; falls back to the native tokenizer)
@@ -4062,12 +4064,12 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var lsp_reqid = 1                    // monotonic id for gd/K requests (init used 1)
     var lsp_info = ""                    // transient status message (gd/K result)
     var gpend = false                    // awaiting the 2nd byte of a `g` command (gd)
-    // ── Window splits (slice 102: stacked `:split` only) ────────────────────
-    // `lay` is the window-layout tree; `awin` is the focused window id (also an
-    // index into the win_* arrays).  Every window views the one active buffer
-    // (ed.lines); only the cursor/viewport differ per window.  The active
-    // window's live state is ed.cy/ed.cx/top/left; win_* holds the OTHER
-    // windows' saved state, synced on every focus change / split.
+    // ── Window splits ───────────────────────────────────────────────────────
+    // `lay` is the window-layout tree (`:split` / `:vsplit`, nested); `awin` is
+    // the focused window id (also an index into the win_* arrays).  Each window
+    // shows a buffer (win_buf) with its own cursor/viewport; the active window's
+    // live state is ed.cy/ed.cx/top/left, while win_* holds the OTHER windows'
+    // saved state, synced on every focus change / split.
     var lay = window.LWin(0)
     var awin = 0
     var win_cy: [Int] = [0]
