@@ -2323,7 +2323,11 @@ fn load_keymaps(cfg_path: Str) -> Keymap [io]
                         if eq > 0
                             let lkey = util.strip_quotes(str.trim(str.slice(raw, 0, eq)))
                             let rseq = util.strip_quotes(str.trim(util.strip_inline_comment(str.slice(raw, eq + 1, str.len(raw)))))
-                            if str.len(lkey) >= 1
+                            // Skip `[keymaps]` directives that aren't remaps (e.g.
+                            // `import_nvim = true`) — else they'd become bogus LHS
+                            // (`import_nvim` made `i` a multi-key prefix, stalling
+                            // Insert-mode entry until the next key).
+                            if str.len(lkey) >= 1 and lkey != "import_nvim"
                                 lhs = list.append(lhs, [decode_escapes(lkey)])
                                 rhs = list.append(rhs, [decode_escapes(rseq)])
                 i = i + 1
