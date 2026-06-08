@@ -111,3 +111,40 @@ fn remove_at_bool(xs: [Bool], idx: Int) -> [Bool]
             out = list.push(out, xs[i])
         i = i + 1
     out
+
+// ── Config / colour value helpers (shared by the colorscheme, options, and
+// keymap loaders) ──────────────────────────────────────────────────────────
+
+// Strip a surrounding pair of double quotes from a TOML scalar.
+fn strip_quotes(s: Str) -> Str
+    let n = str.len(s)
+    if n >= 2 and (str.byte_at(s, 0) ?? 0) == '"' and (str.byte_at(s, n - 1) ?? 0) == '"'
+        str.slice(s, 1, n - 1)
+    else
+        s
+
+// Drop an inline `#` comment from a TOML value (a `#` outside double quotes
+// starts a comment), so `number = true   # note` parses as `true`.
+fn strip_inline_comment(s: Str) -> Str
+    var i = 0
+    let n = str.len(s)
+    var inq = false
+    while i < n
+        let b = str.byte_at(s, i) ?? 0
+        if b == '"'
+            inq = not inq
+        elif b == 35 and (not inq)
+            return str.slice(s, 0, i)
+        i = i + 1
+    s
+
+// Parse a 256-colour SGR index from a TOML value; -1 (= terminal default) when
+// it isn't an integer.
+fn parse_color_val(s: Str) -> Int
+    match str.to_int(str.trim(strip_quotes(str.trim(s))))
+        None => 0 - 1
+        Some(v) => v
+
+// Resolve a colour index, falling back to `dflt` when unset (-1).
+fn cs_or(v: Int, dflt: Int) -> Int
+    if v >= 0 then v else dflt

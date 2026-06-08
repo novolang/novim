@@ -1,0 +1,139 @@
+// colorscheme.nv — novim's editor colour scheme: the Colorscheme record, the
+// built-in named themes, the `[colorscheme]` loader, and the status-line SGR.
+//
+// `[colorscheme]` sets 256-colour SGR indices for chrome + syntax token
+// classes; -1 = terminal/built-in default.  A `name = "<theme>"` selects a
+// built-in base that individual keys layer over.  Colorscheme is built only
+// inside this module (the loaders), so callers reference the type opaquely
+// (`colorscheme.Colorscheme`) and read its fields.
+
+use util
+
+struct Colorscheme
+    status_fg: Int
+    status_bg: Int
+    tilde_fg:  Int
+    kw_fg:     Int      // syntax: keyword (-1 = built-in default)
+    str_fg:    Int      // syntax: string
+    cmt_fg:    Int      // syntax: comment
+    num_fg:    Int      // syntax: number
+    type_fg:   Int      // syntax: type (tree-sitter)
+    fn_fg:     Int      // syntax: function (tree-sitter)
+    const_fg:  Int      // syntax: constant (tree-sitter)
+    mod_fg:    Int      // syntax: module (tree-sitter)
+
+fn colorscheme_default() -> Colorscheme
+    Colorscheme { status_fg: 0 - 1, status_bg: 0 - 1, tilde_fg: 0 - 1, kw_fg: 0 - 1, str_fg: 0 - 1, cmt_fg: 0 - 1, num_fg: 0 - 1, type_fg: 0 - 1, fn_fg: 0 - 1, const_fg: 0 - 1, mod_fg: 0 - 1 }
+
+// Built-in named colorschemes.  `[colorscheme] name = "gruvbox"` (or
+// `:colorscheme gruvbox`) selects one as the base; individual [colorscheme]
+// keys still override it.  Unknown names fall back to the terminal default.
+fn colorscheme_named(name: Str) -> Colorscheme
+    if name == "gruvbox" or name == "gruvbox-dark"
+        // gruvbox dark — 256-colour approximations of the retro-groove palette:
+        // fg 223, bg1 237, gray 245, red 167, green 142, yellow 214, purple 175,
+        // aqua 108.  keywords red, strings/functions green, types yellow,
+        // numbers/constants purple, modules aqua.
+        Colorscheme { status_fg: 223, status_bg: 237, tilde_fg: 245, kw_fg: 167, str_fg: 142, cmt_fg: 245, num_fg: 175, type_fg: 214, fn_fg: 142, const_fg: 175, mod_fg: 108 }
+    elif name == "gruvbox-light"
+        // gruvbox light — dark fg 237 on a light status bar (bg 223).
+        Colorscheme { status_fg: 237, status_bg: 223, tilde_fg: 245, kw_fg: 124, str_fg: 106, cmt_fg: 245, num_fg: 132, type_fg: 172, fn_fg: 106, const_fg: 132, mod_fg: 66 }
+    elif name == "solarized_dark" or name == "solarized-dark" or name == "solarized"
+        // Solarized dark — ported from novoterm's `solarized_dark` theme, using
+        // the canonical Solarized 256-colour approximations and the Solarized
+        // syntax mapping: base01 240, green 64, cyan 37, yellow 136, blue 33,
+        // magenta 125, orange 166, base2 254.
+        Colorscheme { status_fg: 254, status_bg: 240, tilde_fg: 240, kw_fg: 64, str_fg: 37, cmt_fg: 240, num_fg: 37, type_fg: 136, fn_fg: 33, const_fg: 125, mod_fg: 166 }
+    elif name == "solarized_light" or name == "solarized-light"
+        // Solarized light — same hues, dark fg on a light (base2 254) status bar.
+        Colorscheme { status_fg: 241, status_bg: 254, tilde_fg: 245, kw_fg: 64, str_fg: 37, cmt_fg: 245, num_fg: 37, type_fg: 136, fn_fg: 33, const_fg: 125, mod_fg: 166 }
+    else
+        colorscheme_default()
+
+fn load_colorscheme(cfg_path: Str) -> Colorscheme [io]
+    match fs.read(cfg_path)
+        None => colorscheme_default()
+        Some(content) =>
+            var sfg = 0 - 1
+            var sbg = 0 - 1
+            var tfg = 0 - 1
+            var kwf = 0 - 1
+            var strf = 0 - 1
+            var cmtf = 0 - 1
+            var numf = 0 - 1
+            var typef = 0 - 1
+            var fnf = 0 - 1
+            var constf = 0 - 1
+            var modf = 0 - 1
+            var name_str = ""
+            let lines = str.split_lines(content)
+            var in_cs = false
+            let mut i = 0
+            let n = list.len(lines)
+            while i < n
+                let raw = str.trim(lines[i])
+                if str.len(raw) > 0 and (str.byte_at(raw, 0) ?? 0) != 35
+                    if (str.byte_at(raw, 0) ?? 0) == 91
+                        in_cs = raw == "[colorscheme]"
+                    elif in_cs
+                        let eq = util.index_of_byte(raw, 61)
+                        if eq > 0
+                            let key = str.trim(str.slice(raw, 0, eq))
+                            let cv = util.parse_color_val(util.strip_inline_comment(str.slice(raw, eq + 1, str.len(raw))))
+                            if key == "status_fg"
+                                sfg = cv
+                            elif key == "status_bg"
+                                sbg = cv
+                            elif key == "tilde_fg"
+                                tfg = cv
+                            elif key == "keyword"
+                                kwf = cv
+                            elif key == "string"
+                                strf = cv
+                            elif key == "comment"
+                                cmtf = cv
+                            elif key == "number"
+                                numf = cv
+                            elif key == "type"
+                                typef = cv
+                            elif key == "function"
+                                fnf = cv
+                            elif key == "constant"
+                                constf = cv
+                            elif key == "module"
+                                modf = cv
+                            elif key == "name"
+                                let nv = str.trim(util.strip_inline_comment(str.slice(raw, eq + 1, str.len(raw))))
+                                name_str = if str.len(nv) >= 2 and (str.byte_at(nv, 0) ?? 0) == '"' then str.slice(nv, 1, str.len(nv) - 1) else nv
+                i = i + 1
+            // Layer explicit keys (>= 0) over the named-preset base (or the
+            // terminal-default base when no `name` is set).
+            let base = colorscheme_named(name_str)
+            Colorscheme {
+                status_fg: if sfg   >= 0 then sfg   else base.status_fg,
+                status_bg: if sbg   >= 0 then sbg   else base.status_bg,
+                tilde_fg:  if tfg   >= 0 then tfg   else base.tilde_fg,
+                kw_fg:     if kwf   >= 0 then kwf   else base.kw_fg,
+                str_fg:    if strf  >= 0 then strf  else base.str_fg,
+                cmt_fg:    if cmtf  >= 0 then cmtf  else base.cmt_fg,
+                num_fg:    if numf  >= 0 then numf  else base.num_fg,
+                type_fg:   if typef >= 0 then typef else base.type_fg,
+                fn_fg:     if fnf   >= 0 then fnf   else base.fn_fg,
+                const_fg:  if constf >= 0 then constf else base.const_fg,
+                mod_fg:    if modf  >= 0 then modf  else base.mod_fg
+            }
+
+// SGR parameter string for the status line: 256-colour fg/bg if set, else
+// reverse-video (`7`).
+fn status_sgr(cs: Colorscheme) -> Str
+    var codes = ""
+    if cs.status_fg >= 0
+        codes = codes + "38;5;" + str.from_int(cs.status_fg)
+    if cs.status_bg >= 0
+        if str.len(codes) > 0
+            codes = codes + ";"
+        codes = codes + "48;5;" + str.from_int(cs.status_bg)
+    if str.len(codes) == 0
+        "7"
+    else
+        codes

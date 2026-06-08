@@ -15,6 +15,7 @@ use lsp
 use nvregex
 use ts
 use window
+use colorscheme
 
 // Editor state.  The cursor is 0-based (line, col); the buffer is a line vector.
 struct Editor
@@ -2370,28 +2371,6 @@ fn keymap_lookup(km: Keymap, b: Int) -> Str
         i = i + 1
     ""
 
-// Strip a single pair of surrounding double-quotes from `s`.
-fn strip_quotes(s: Str) -> Str
-    let n = str.len(s)
-    if n >= 2 and (str.byte_at(s, 0) ?? 0) == '"' and (str.byte_at(s, n - 1) ?? 0) == '"'
-        str.slice(s, 1, n - 1)
-    else
-        s
-
-// Drop an inline `#` comment from a TOML value (a `#` outside double quotes
-// starts a comment), so `number = true   # note` parses as `true`.
-fn strip_inline_comment(s: Str) -> Str
-    var i = 0
-    let n = str.len(s)
-    var inq = false
-    while i < n
-        let b = str.byte_at(s, i) ?? 0
-        if b == '"'
-            inq = not inq
-        elif b == 35 and (not inq)
-            return str.slice(s, 0, i)
-        i = i + 1
-    s
 
 // Load `[keymaps]` from a config file: lines `lhs = "rhs"` (rhs may use
 // `\e` etc.).  Comments (`#`) and blank lines are skipped; section headers
@@ -2414,157 +2393,13 @@ fn load_keymaps(cfg_path: Str) -> Keymap [io]
                     elif in_km
                         let eq = util.index_of_byte(raw, 61)                     // '='
                         if eq > 0
-                            let lkey = strip_quotes(str.trim(str.slice(raw, 0, eq)))
-                            let rseq = strip_quotes(str.trim(strip_inline_comment(str.slice(raw, eq + 1, str.len(raw)))))
+                            let lkey = util.strip_quotes(str.trim(str.slice(raw, 0, eq)))
+                            let rseq = util.strip_quotes(str.trim(util.strip_inline_comment(str.slice(raw, eq + 1, str.len(raw)))))
                             if str.len(lkey) >= 1
                                 lhs = list.append(lhs, [str.byte_at(lkey, 0) ?? 0])
                                 rhs = list.append(rhs, [decode_escapes(rseq)])
                 i = i + 1
             Keymap { lhs: lhs, rhs: rhs }
-
-// ── Colorscheme ───────────────────────────────────────
-// `[colorscheme]` sets 256-colour SGR indices for chrome elements; -1 =
-// use the default.  v1 colours the status line (fg/bg) and the `~`
-// end-of-buffer markers; syntax-token classes inherit this once
-// highlighting lands (v2).
-
-struct Colorscheme
-    status_fg: Int
-    status_bg: Int
-    tilde_fg:  Int
-    kw_fg:     Int      // syntax: keyword (-1 = built-in default)
-    str_fg:    Int      // syntax: string
-    cmt_fg:    Int      // syntax: comment
-    num_fg:    Int      // syntax: number
-    type_fg:   Int      // syntax: type (tree-sitter)
-    fn_fg:     Int      // syntax: function (tree-sitter)
-    const_fg:  Int      // syntax: constant (tree-sitter)
-    mod_fg:    Int      // syntax: module (tree-sitter)
-
-fn colorscheme_default() -> Colorscheme
-    Colorscheme { status_fg: 0 - 1, status_bg: 0 - 1, tilde_fg: 0 - 1, kw_fg: 0 - 1, str_fg: 0 - 1, cmt_fg: 0 - 1, num_fg: 0 - 1, type_fg: 0 - 1, fn_fg: 0 - 1, const_fg: 0 - 1, mod_fg: 0 - 1 }
-
-// Built-in named colorschemes.  `[colorscheme] name = "gruvbox"` (or
-// `:colorscheme gruvbox`) selects one as the base; individual [colorscheme]
-// keys still override it.  Unknown names fall back to the terminal default.
-fn colorscheme_named(name: Str) -> Colorscheme
-    if name == "gruvbox" or name == "gruvbox-dark"
-        // gruvbox dark — 256-colour approximations of the retro-groove palette:
-        // fg 223, bg1 237, gray 245, red 167, green 142, yellow 214, purple 175,
-        // aqua 108.  keywords red, strings/functions green, types yellow,
-        // numbers/constants purple, modules aqua.
-        Colorscheme { status_fg: 223, status_bg: 237, tilde_fg: 245, kw_fg: 167, str_fg: 142, cmt_fg: 245, num_fg: 175, type_fg: 214, fn_fg: 142, const_fg: 175, mod_fg: 108 }
-    elif name == "gruvbox-light"
-        // gruvbox light — dark fg 237 on a light status bar (bg 223).
-        Colorscheme { status_fg: 237, status_bg: 223, tilde_fg: 245, kw_fg: 124, str_fg: 106, cmt_fg: 245, num_fg: 132, type_fg: 172, fn_fg: 106, const_fg: 132, mod_fg: 66 }
-    elif name == "solarized_dark" or name == "solarized-dark" or name == "solarized"
-        // Solarized dark — ported from novoterm's `solarized_dark` theme, using
-        // the canonical Solarized 256-colour approximations and the Solarized
-        // syntax mapping: base01 240, green 64, cyan 37, yellow 136, blue 33,
-        // magenta 125, orange 166, base2 254.
-        Colorscheme { status_fg: 254, status_bg: 240, tilde_fg: 240, kw_fg: 64, str_fg: 37, cmt_fg: 240, num_fg: 37, type_fg: 136, fn_fg: 33, const_fg: 125, mod_fg: 166 }
-    elif name == "solarized_light" or name == "solarized-light"
-        // Solarized light — same hues, dark fg on a light (base2 254) status bar.
-        Colorscheme { status_fg: 241, status_bg: 254, tilde_fg: 245, kw_fg: 64, str_fg: 37, cmt_fg: 245, num_fg: 37, type_fg: 136, fn_fg: 33, const_fg: 125, mod_fg: 166 }
-    else
-        colorscheme_default()
-
-// Resolve a colour index, falling back to `dflt` when unset (-1).
-fn cs_or(v: Int, dflt: Int) -> Int
-    if v >= 0 then v else dflt
-
-fn parse_color_val(s: Str) -> Int
-    match str.to_int(str.trim(strip_quotes(str.trim(s))))
-        None => 0 - 1
-        Some(v) => v
-
-fn load_colorscheme(cfg_path: Str) -> Colorscheme [io]
-    match fs.read(cfg_path)
-        None => colorscheme_default()
-        Some(content) =>
-            var sfg = 0 - 1
-            var sbg = 0 - 1
-            var tfg = 0 - 1
-            var kwf = 0 - 1
-            var strf = 0 - 1
-            var cmtf = 0 - 1
-            var numf = 0 - 1
-            var typef = 0 - 1
-            var fnf = 0 - 1
-            var constf = 0 - 1
-            var modf = 0 - 1
-            var name_str = ""
-            let lines = str.split_lines(content)
-            var in_cs = false
-            let mut i = 0
-            let n = list.len(lines)
-            while i < n
-                let raw = str.trim(lines[i])
-                if str.len(raw) > 0 and (str.byte_at(raw, 0) ?? 0) != 35
-                    if (str.byte_at(raw, 0) ?? 0) == 91
-                        in_cs = raw == "[colorscheme]"
-                    elif in_cs
-                        let eq = util.index_of_byte(raw, 61)
-                        if eq > 0
-                            let key = str.trim(str.slice(raw, 0, eq))
-                            let cv = parse_color_val(strip_inline_comment(str.slice(raw, eq + 1, str.len(raw))))
-                            if key == "status_fg"
-                                sfg = cv
-                            elif key == "status_bg"
-                                sbg = cv
-                            elif key == "tilde_fg"
-                                tfg = cv
-                            elif key == "keyword"
-                                kwf = cv
-                            elif key == "string"
-                                strf = cv
-                            elif key == "comment"
-                                cmtf = cv
-                            elif key == "number"
-                                numf = cv
-                            elif key == "type"
-                                typef = cv
-                            elif key == "function"
-                                fnf = cv
-                            elif key == "constant"
-                                constf = cv
-                            elif key == "module"
-                                modf = cv
-                            elif key == "name"
-                                let nv = str.trim(strip_inline_comment(str.slice(raw, eq + 1, str.len(raw))))
-                                name_str = if str.len(nv) >= 2 and (str.byte_at(nv, 0) ?? 0) == '"' then str.slice(nv, 1, str.len(nv) - 1) else nv
-                i = i + 1
-            // Layer explicit keys (>= 0) over the named-preset base (or the
-            // terminal-default base when no `name` is set).
-            let base = colorscheme_named(name_str)
-            Colorscheme {
-                status_fg: if sfg   >= 0 then sfg   else base.status_fg,
-                status_bg: if sbg   >= 0 then sbg   else base.status_bg,
-                tilde_fg:  if tfg   >= 0 then tfg   else base.tilde_fg,
-                kw_fg:     if kwf   >= 0 then kwf   else base.kw_fg,
-                str_fg:    if strf  >= 0 then strf  else base.str_fg,
-                cmt_fg:    if cmtf  >= 0 then cmtf  else base.cmt_fg,
-                num_fg:    if numf  >= 0 then numf  else base.num_fg,
-                type_fg:   if typef >= 0 then typef else base.type_fg,
-                fn_fg:     if fnf   >= 0 then fnf   else base.fn_fg,
-                const_fg:  if constf >= 0 then constf else base.const_fg,
-                mod_fg:    if modf  >= 0 then modf  else base.mod_fg
-            }
-
-// SGR parameter string for the status line: 256-colour fg/bg if set, else
-// reverse-video (`7`).
-fn status_sgr(cs: Colorscheme) -> Str
-    var codes = ""
-    if cs.status_fg >= 0
-        codes = codes + "38;5;" + str.from_int(cs.status_fg)
-    if cs.status_bg >= 0
-        if str.len(codes) > 0
-            codes = codes + ";"
-        codes = codes + "48;5;" + str.from_int(cs.status_bg)
-    if str.len(codes) == 0
-        "7"
-    else
-        codes
 
 // ── Options ──────────────────────────────────────────
 // `[options]` toggles editor settings.  v1: `number` (a line-number
@@ -2582,7 +2417,7 @@ fn options_default() -> Options
     Options { number: false, relativenumber: false, hlsearch: true, wrap: false, syntax: true, tabstop: 8 }
 
 fn parse_bool_val(s: Str) -> Bool
-    str.trim(strip_quotes(str.trim(s))) == "true"
+    str.trim(util.strip_quotes(str.trim(s))) == "true"
 
 fn load_options(cfg_path: Str) -> Options [io]
     match fs.read(cfg_path)
@@ -2607,7 +2442,7 @@ fn load_options(cfg_path: Str) -> Options [io]
                         let eq = util.index_of_byte(raw, 61)
                         if eq > 0
                             let key = str.trim(str.slice(raw, 0, eq))
-                            let valr = strip_inline_comment(str.slice(raw, eq + 1, str.len(raw)))
+                            let valr = util.strip_inline_comment(str.slice(raw, eq + 1, str.len(raw)))
                             if key == "number" or key == "nu"
                                 number = parse_bool_val(valr)
                             elif key == "relativenumber" or key == "rnu"
@@ -2619,7 +2454,7 @@ fn load_options(cfg_path: Str) -> Options [io]
                             elif key == "syntax" or key == "syn"
                                 syntax = parse_bool_val(valr)
                             elif key == "tabstop" or key == "ts"
-                                let tv = parse_color_val(valr)
+                                let tv = util.parse_color_val(valr)
                                 if tv > 0
                                     tabstop = tv
                 i = i + 1
@@ -2697,7 +2532,7 @@ fn apply_set_token(o: Options, tok: Str) -> Options
     let eq = util.index_of_byte(t, '=')
     if eq > 0                                       // name=value (tabstop=4)
         let nm = str.trim(str.slice(t, 0, eq))
-        let v = parse_color_val(str.slice(t, eq + 1, str.len(t)))
+        let v = util.parse_color_val(str.slice(t, eq + 1, str.len(t)))
         if (nm == "tabstop" or nm == "ts") and v > 0
             return Options { number: o.number, relativenumber: o.relativenumber, hlsearch: o.hlsearch, wrap: o.wrap, syntax: o.syntax, tabstop: v }
         return o
@@ -3771,23 +3606,23 @@ fn byte_offset_of_line(lines: [Str], n: Int) -> Int
 // keyword/string/comment/number kinds honour the [colorscheme] (so themes drive
 // them, like the native tokenizer); type/function/constant/module use sensible
 // defaults.  -1 = no colour (variables stay default fg).
-fn ts_color_for_kind(kind: Int, cs: Colorscheme) -> Int
+fn ts_color_for_kind(kind: Int, cs: colorscheme.Colorscheme) -> Int
     if kind == 0
-        cs_or(cs.kw_fg, 170)
+        util.cs_or(cs.kw_fg, 170)
     elif kind == 1
-        cs_or(cs.type_fg, 81)
+        util.cs_or(cs.type_fg, 81)
     elif kind == 2
-        cs_or(cs.str_fg, 150)
+        util.cs_or(cs.str_fg, 150)
     elif kind == 3
-        cs_or(cs.cmt_fg, 245)
+        util.cs_or(cs.cmt_fg, 245)
     elif kind == 4
-        cs_or(cs.fn_fg, 78)
+        util.cs_or(cs.fn_fg, 78)
     elif kind == 5
-        cs_or(cs.num_fg, 215)
+        util.cs_or(cs.num_fg, 215)
     elif kind == 6
-        cs_or(cs.const_fg, 215)
+        util.cs_or(cs.const_fg, 215)
     elif kind == 8
-        cs_or(cs.mod_fg, 80)
+        util.cs_or(cs.mod_fg, 80)
     else
         0 - 1
 
@@ -3796,7 +3631,7 @@ fn ts_color_for_kind(kind: Int, cs: Colorscheme) -> Int
 // the line's byte offset; tabs expand to `tabstop` columns so the colours line
 // up with emit_line_styled's expanded view.  Later spans override earlier on
 // overlap.  Returns [] semantics-compatible with syntax_colors (0 = default).
-fn ts_line_syncols(spans: [Int], line_start: Int, raw: Str, tabstop: Int, cs: Colorscheme) -> [Int]
+fn ts_line_syncols(spans: [Int], line_start: Int, raw: Str, tabstop: Int, cs: colorscheme.Colorscheme) -> [Int]
     let rlen = str.len(raw)
     let line_end = line_start + rlen
     // line-local spans (filtered once): start, end (line-relative), colour
@@ -3914,7 +3749,7 @@ rows); for a single full-screen window (rx=ry=0) these reduce to absolute
 coordinates.  Does NOT touch cursor visibility or place the hardware cursor —
 the orchestrator (`render` / `render_all`) hides the cursor once, draws every
 window, then places it in the active window.""")
-fn draw_window(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, clip: Bool, active: Bool, ts_spans: [Int]) [io]
+fn draw_window(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: colorscheme.Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, clip: Bool, active: Bool, ts_spans: [Int]) [io]
     let rows = win.h
     let cols = win.w
     let rx = win.x
@@ -3924,10 +3759,10 @@ fn draw_window(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mod
     let dohl = opts.hlsearch and str.len(search) > 0     // search highlighting
     let satoms = if dohl then nvregex.re_compile(search) else []
     let dosyn = opts.syntax and ends_with_nv(path)        // Novo syntax highlighting
-    let synkw = cs_or(cs.kw_fg, 170)
-    let synstr = cs_or(cs.str_fg, 150)
-    let syncmt = cs_or(cs.cmt_fg, 245)
-    let synnum = cs_or(cs.num_fg, 215)
+    let synkw = util.cs_or(cs.kw_fg, 170)
+    let synstr = util.cs_or(cs.str_fg, 150)
+    let syncmt = util.cs_or(cs.cmt_fg, 245)
+    let synnum = util.cs_or(cs.num_fg, 215)
     let numbered = opts.number or opts.relativenumber
     // Gutter width tracks the largest line number (min 3 digits) so the text
     // column stays put when the cursor crosses a digit boundary on a 1000+
@@ -4033,7 +3868,7 @@ fn draw_window(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mod
     cup(ry + rows, rx + 1)
     // The focused window keeps the full status styling (reverse / colourscheme
     // colours); inactive panes draw a plain status bar so the focus is obvious.
-    sgr(if active then status_sgr(cs) else "0")
+    sgr(if active then colorscheme.status_sgr(cs) else "0")
     let modestr = if mode == 1 then "-- INSERT -- " elif mode == 2 then "-- VISUAL -- " elif mode == 3 then "-- VISUAL LINE -- " elif mode == 4 then "-- REPLACE -- " else "-- NORMAL -- "
     // Diagnostics summary (E:n W:m) plus, when the cursor sits on a diagnostic
     // line, that diagnostic's message — the low-effort surface before any popup.
@@ -4085,7 +3920,7 @@ fn place_cursor(ed: Editor, win: window.Rect, top: Int, left: Int, opts: Options
 @intent("""Single-window frame: hide the cursor, draw the one window, place the
 cursor, restore it.  Byte-identical to the pre-split render — the interactive
 driver calls this whenever there is exactly one window.""")
-fn render(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, ts_spans: [Int]) [io]
+fn render(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: colorscheme.Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, ts_spans: [Int]) [io]
     csi()
     emit("?25l")         // hide cursor while we repaint
     draw_window(ed, win, path, top, left, mode, avy, avx, search, cs, opts, diag_li, diag_msgs, info, modified, false, true, ts_spans)
@@ -4109,7 +3944,7 @@ The active window draws from the live ed cursor / top / left and the real mode
 (selection, INSERT, gd/K info); every other pane draws from its saved win_*
 cursor/viewport in plain NORMAL mode.  Diagnostics + modified flag only follow
 the live active buffer for now.""")
-fn render_all(ed: Editor, lay: window.Layout, awin: Int, screen: window.Rect, win_cy: [Int], win_cx: [Int], win_top: [Int], win_left: [Int], win_buf: [Int], win_ww: [Int], win_hw: [Int], cur_buf: Int, bufs_text: [Str], bufs_path: [Str], path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, ts_spans: [Int]) [io]
+fn render_all(ed: Editor, lay: window.Layout, awin: Int, screen: window.Rect, win_cy: [Int], win_cx: [Int], win_top: [Int], win_left: [Int], win_buf: [Int], win_ww: [Int], win_hw: [Int], cur_buf: Int, bufs_text: [Str], bufs_path: [Str], path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: colorscheme.Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, ts_spans: [Int]) [io]
     csi()
     emit("?25l")
     let rects = window.layout_rects(lay, screen, win_ww, win_hw, [])
@@ -4148,7 +3983,7 @@ fn render_all(ed: Editor, lay: window.Layout, awin: Int, screen: window.Rect, wi
 @intent("""Paint one frame, dispatching on window count: a single window keeps
 the proven byte-identical render path; two or more go through render_all.  (Not
 named `frame` — that is a reserved word in Novo.)""")
-fn paint_frame(ed: Editor, lay: window.Layout, awin: Int, cols: Int, rows: Int, win_cy: [Int], win_cx: [Int], win_top: [Int], win_left: [Int], win_buf: [Int], win_ww: [Int], win_hw: [Int], cur_buf: Int, bufs_text: [Str], bufs_path: [Str], path: Str, top: Int, left: Int, st: InputState, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, ts_spans: [Int]) [io]
+fn paint_frame(ed: Editor, lay: window.Layout, awin: Int, cols: Int, rows: Int, win_cy: [Int], win_cx: [Int], win_top: [Int], win_left: [Int], win_buf: [Int], win_ww: [Int], win_hw: [Int], cur_buf: Int, bufs_text: [Str], bufs_path: [Str], path: Str, top: Int, left: Int, st: InputState, cs: colorscheme.Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, ts_spans: [Int]) [io]
     let screen = window.rect(0, 0, cols, rows)
     if window.layout_count(lay) == 1
         render(ed, window.window_rect(lay, awin, screen, win_ww, win_hw), path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, info, modified, ts_spans)
@@ -4386,7 +4221,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var st = ist_new()
     var es = edit_new()
     let km = load_keymaps(cfg_path)
-    var cs = load_colorscheme(cfg_path)   // var: `:colorscheme <name>` switches it live
+    var cs = colorscheme.load_colorscheme(cfg_path)   // var: `:colorscheme <name>` switches it live
     var opts = load_options(cfg_path)
     var rows = term_rows()
     var cols = term_cols()
@@ -4892,7 +4727,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                         elif is_only(cmd_buf)            // :only — keep just the active window
                             pending_wcmd = 5
                         elif is_colorscheme(cmd_buf)     // :colorscheme <name> — live theme switch
-                            cs = colorscheme_named(colorscheme_arg(cmd_buf))
+                            cs = colorscheme.colorscheme_named(colorscheme_arg(cmd_buf))
                             lsp_info = "colorscheme " + colorscheme_arg(cmd_buf)
                         else
                             let r = exec_ex(cmd_buf)
