@@ -1501,6 +1501,52 @@ fn visual_set_textobj(ed: Editor, st: InputState, obj: Int, around: Bool) -> Ste
 motions extend the selection from its fixed anchor, operators (d/x/y/c/>/</~/u/U/J/p)
 act on the selection and return to Normal, and text-object keys reshape the
 selection.""")
+// Delete the column rectangle of a blockwise selection: from every row in
+// [ylo,yhi] cut out byte columns [xlo, xhi] (inclusive), clamped to each line's
+// length so a short (ragged) row loses only what it has.  Cursor lands at the
+// top-left corner; leaves Visual.
+fn vblock_delete(ed: Editor, st: InputState) -> Step
+    let ylo = if st.avy < ed.cy then st.avy else ed.cy
+    let yhi = if st.avy < ed.cy then ed.cy else st.avy
+    let xlo = if st.avx < ed.cx then st.avx else ed.cx
+    let xhi = if st.avx < ed.cx then ed.cx else st.avx
+    var lines = ed.lines
+    var y = ylo
+    while y <= yhi
+        let line = if y < list.len(lines) then lines[y] else ""
+        let n = str.len(line)
+        if xlo < n
+            let bcol = if xhi + 1 < n then xhi + 1 else n
+            lines = set_line(lines, y, str.slice(line, 0, xlo) + str.slice(line, bcol, n))
+        y = y + 1
+    Step { ed: clamp(Editor { lines: lines, cy: ylo, cx: xlo }), st: ist_done(st) }
+
+// Fill every cell of a blockwise selection with `ch` (the `r<char>` form): on
+// each row, overwrite byte columns [xlo, xhi] that the line actually has (vim
+// never pads past end-of-line).  Esc cancels.  Leaves Visual.
+fn vblock_fill(ed: Editor, st: InputState, ch: Int) -> Step
+    if ch == '\e'
+        return Step { ed: ed, st: ist_done(st) }
+    let ylo = if st.avy < ed.cy then st.avy else ed.cy
+    let yhi = if st.avy < ed.cy then ed.cy else st.avy
+    let xlo = if st.avx < ed.cx then st.avx else ed.cx
+    let xhi = if st.avx < ed.cx then ed.cx else st.avx
+    var lines = ed.lines
+    var y = ylo
+    while y <= yhi
+        let line = if y < list.len(lines) then lines[y] else ""
+        let n = str.len(line)
+        if xlo < n
+            let bcol = if xhi + 1 < n then xhi + 1 else n
+            var rep = ""
+            var k = xlo
+            while k < bcol
+                rep = rep + str.from_char(ch)
+                k = k + 1
+            lines = set_line(lines, y, str.slice(line, 0, xlo) + rep + str.slice(line, bcol, n))
+        y = y + 1
+    Step { ed: clamp(Editor { lines: lines, cy: ylo, cx: xlo }), st: ist_done(st) }
+
 fn feed_visual(ed: Editor, st: InputState, b: Int) -> Step
     let cntp = if st.count > 0 then st.count else 1
     // Pending multi-key motions (extend the selection, stay visual).
@@ -1521,6 +1567,8 @@ fn feed_visual(ed: Editor, st: InputState, b: Int) -> Step
         return visual_set_textobj(ed, st, b, false)
     if st.pending == 49                          // a<obj> — around text object
         return visual_set_textobj(ed, st, b, true)
+    if st.pending == 60                          // blockwise r<char> — fill every cell
+        return vblock_fill(ed, st, b)
     if b == '\e'                                   // Esc — leave visual
         return Step { ed: ed, st: ist_done(st) }
     if b == 'v'                                 // v
@@ -1537,6 +1585,17 @@ fn feed_visual(ed: Editor, st: InputState, b: Int) -> Step
         return Step { ed: ed, st: InputState { count: st.count * 10 + (b - '0'), pending: 0, mode: st.mode, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
     if b == '0' and st.count > 0
         return Step { ed: ed, st: InputState { count: st.count * 10, pending: 0, mode: st.mode, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
+    // Blockwise visual (mode 5) operators: delete/fill act on the column
+    // rectangle, not a charwise run.  Block insert/append/change (I/A/c) and
+    // yank/paste are a follow-on slice; ignore (stay selected) for now.  Motions
+    // and the Esc/v/V/o/count handlers above fall through to the shared code.
+    if st.mode == 5
+        if b == 'd' or b == 'x'                 // delete the block
+            return vblock_delete(ed, st)
+        if b == 'r'                             // r<char> — fill every cell
+            return Step { ed: ed, st: ist_visual_pending(st, 60) }
+        if b == 'c' or b == 's' or b == 'y' or b == 'I' or b == 'A' or b == '>' or b == '<' or b == '~' or b == 'u' or b == 'U' or b == 'J' or b == 'p' or b == 'i' or b == 'a'
+            return Step { ed: ed, st: ist_visual_keep(st, 5) }
     if b == 'd' or b == 'x'                     // d / x — delete selection
         return visual_apply(ed, st, 'd')
     if b == 'y'                                  // y — yank selection
@@ -1624,8 +1683,8 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
     // Insert mode owns every byte until Esc.
     if st.mode == 1
         return feed_insert(ed, st, b)
-    // Visual mode: charwise (2) / linewise (3).
-    if st.mode == 2 or st.mode == 3
+    // Visual mode: charwise (2) / linewise (3) / blockwise (5).
+    if st.mode == 2 or st.mode == 3 or st.mode == 5
         return feed_visual(ed, st, b)
     // Replace mode: overtype.
     if st.mode == 4
@@ -1816,6 +1875,8 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
     if b == 'V'                       // 'V' — linewise visual
         let ne = clamp(Editor { lines: ed.lines, cy: ed.cy + cnt - 1, cx: ed.cx })
         return Step { ed: ne, st: InputState { count: 0, pending: 0, mode: 3, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: ed.cy, avx: ed.cx } }
+    if b == '\x16'                    // Ctrl-V — blockwise visual (column selection)
+        return Step { ed: ed, st: InputState { count: 0, pending: 0, mode: 5, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: ed.cy, avx: ed.cx } }
     // Char-level edits.
     if b == '~'                       // '~' — toggle case (count chars), advance
         return Step { ed: op_toggle_case(ed, cnt), st: ist_done(st) }
@@ -2471,8 +2532,8 @@ fn buf_text(ed: Editor) -> Str
 fn is_edit_start(b: Int) -> Bool
     if b >= '0' and b <= '9'                               // count digit (may precede an edit)
         return true
-    // i a I A · o O · x X D · J ~ r · s S c C · p P · d > < · R · ^A ^X · g · v V
-    let edits = ['i', 'a', 'I', 'A', 'o', 'O', 'x', 'X', 'D', 'J', '~', 'r', 's', 'S', 'c', 'C', 'p', 'P', 'd', '>', '<', 'R', '\x01', '\x18', 'g', 'v', 'V']
+    // i a I A · o O · x X D · J ~ r · s S c C · p P · d > < · R · ^A ^X · g · v V ^V
+    let edits = ['i', 'a', 'I', 'A', 'o', 'O', 'x', 'X', 'D', 'J', '~', 'r', 's', 'S', 'c', 'C', 'p', 'P', 'd', '>', '<', 'R', '\x01', '\x18', 'g', 'v', 'V', '\x16']
     var found = false
     let mut i = 0
     let n = list.len(edits)
@@ -3380,7 +3441,12 @@ fn draw_window(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mod
     let ssx = if a_first then avx else ed.cx
     let sey = if a_first then ed.cy else avy
     let sex = if a_first then ed.cx else avx
-    let vis = mode == 2 or mode == 3
+    let vis = mode == 2 or mode == 3 or mode == 5
+    // Blockwise (mode 5) selects a column rectangle: the same byte-column band on
+    // every selected row, so the highlight bounds come from min/max of the two
+    // corners' columns rather than the per-line charwise start/end.
+    let bxlo = if avx < ed.cx then avx else ed.cx
+    let bxhi = if avx < ed.cx then ed.cx else avx
     // `r` = screen row, `li` = buffer line.  With `wrap` a long line occupies
     // several screen rows, so the two are tracked separately.
     var r = 0
@@ -3398,6 +3464,9 @@ fn draw_window(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mod
                 if mode == 3
                     vlo = 0
                     vhi = vlen
+                elif mode == 5
+                    vlo = disp.vis_col(raw, bxlo, opts.tabstop)
+                    vhi = disp.vis_col(raw, bxhi + 1, opts.tabstop)
                 else
                     let blo = if li == ssy then ssx else 0
                     let bhi = if li == sey then sex + 1 else str.len(raw)
@@ -3473,7 +3542,7 @@ fn draw_window(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mod
     // The focused window keeps the full status styling (reverse / colourscheme
     // colours); inactive panes draw a plain status bar so the focus is obvious.
     sgr(if active then colorscheme.status_sgr(cs) else "0")
-    let modestr = if mode == 1 then "-- INSERT -- " elif mode == 2 then "-- VISUAL -- " elif mode == 3 then "-- VISUAL LINE -- " elif mode == 4 then "-- REPLACE -- " else "-- NORMAL -- "
+    let modestr = if mode == 1 then "-- INSERT -- " elif mode == 2 then "-- VISUAL -- " elif mode == 3 then "-- VISUAL LINE -- " elif mode == 4 then "-- REPLACE -- " elif mode == 5 then "-- VISUAL BLOCK -- " else "-- NORMAL -- "
     // Diagnostics summary (E:n W:m) plus, when the cursor sits on a diagnostic
     // line, that diagnostic's message — the low-effort surface before any popup.
     let ndiag = list.len(diag_li) / 2
