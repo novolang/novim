@@ -2091,25 +2091,52 @@ fn decode_escapes(s: Str) -> Str
             i = i + 1
     out
 
-// A user keymap: single Normal-mode key `lhs[i]` is replaced by the
-// (already-decoded) key sequence `rhs[i]`.  Single-key LHS only; multi-key
-// LHS like `jk` is not supported.
+// A user keymap: the Normal-mode key sequence `lhs[i]` (a byte string — one
+// byte for a single-key remap, several for a multi-key one like `<leader>w`,
+// `vv`, `;p`) is replaced by the already-decoded `rhs[i]`.  Single-byte LHS are
+// applied inside `feed` (feed_mapped); multi-byte LHS are matched by the
+// driver's prefix-buffer (run_interactive), since they need to span keystrokes.
 struct Keymap
-    lhs: [Int]
+    lhs: [Str]
     rhs: [Str]
 
 fn keymap_empty() -> Keymap
     Keymap { lhs: [], rhs: [] }
 
-// The remapped sequence for byte `b`, or "" if `b` isn't remapped.
+// The remapped sequence for a single byte `b` (only SINGLE-byte LHS), or "" —
+// used by feed_mapped + key_free; multi-byte maps are the driver's job.
 fn keymap_lookup(km: Keymap, b: Int) -> Str
     let n = list.len(km.lhs)
     let mut i = 0
     while i < n
-        if km.lhs[i] == b
+        if str.len(km.lhs[i]) == 1 and (str.byte_at(km.lhs[i], 0) ?? 0) == b
             return km.rhs[i]
         i = i + 1
     ""
+
+// Index of the LHS that exactly equals `s`, or -1.  The driver matcher owns ALL
+// maps in interactive mode (single- and multi-byte) so a remapped RHS that needs
+// driver-level handling — `:vsplit<CR>`, `<C-d>zz`, `<C-w>h` — is re-fed through
+// the full dispatch, not just `feed` (where `:`/scroll/Ctrl-W don't live).
+fn keymap_seq_idx(km: Keymap, s: Str) -> Int
+    var i = 0
+    while i < list.len(km.lhs)
+        if km.lhs[i] == s
+            return i
+        i = i + 1
+    0 - 1
+
+// True if `s` is a strict prefix of some LHS (more keys could still complete a
+// mapping) — the signal to keep buffering instead of acting.
+fn keymap_is_prefix(km: Keymap, s: Str) -> Bool
+    let sn = str.len(s)
+    var i = 0
+    while i < list.len(km.lhs)
+        let l = km.lhs[i]
+        if str.len(l) > sn and str.slice(l, 0, sn) == s
+            return true
+        i = i + 1
+    false
 
 // Load `[keymaps]` from a config file: lines `lhs = "rhs"` (rhs may use
 // `\e` etc.).  Comments (`#`) and blank lines are skipped; section headers
@@ -2118,7 +2145,7 @@ fn load_keymaps(cfg_path: Str) -> Keymap [io]
     match fs.read(cfg_path)
         None => keymap_empty()
         Some(content) =>
-            var lhs: [Int] = []
+            var lhs: [Str] = []
             var rhs: [Str] = []
             let lines = str.split_lines(content)
             var in_km = false
@@ -2135,10 +2162,49 @@ fn load_keymaps(cfg_path: Str) -> Keymap [io]
                             let lkey = util.strip_quotes(str.trim(str.slice(raw, 0, eq)))
                             let rseq = util.strip_quotes(str.trim(util.strip_inline_comment(str.slice(raw, eq + 1, str.len(raw)))))
                             if str.len(lkey) >= 1
-                                lhs = list.append(lhs, [str.byte_at(lkey, 0) ?? 0])
+                                lhs = list.append(lhs, [decode_escapes(lkey)])
                                 rhs = list.append(rhs, [decode_escapes(rseq)])
                 i = i + 1
             Keymap { lhs: lhs, rhs: rhs }
+
+// True when the config opts into Neovim keymap import (`[keymaps] import_nvim =
+// true`).  Reuses the same flat section reader as the other loaders.
+fn keymaps_import_nvim(cfg_path: Str) -> Bool [io]
+    match fs.read(cfg_path)
+        None => false
+        Some(content) =>
+            let lines = str.split_lines(content)
+            var in_km = false
+            var on = false
+            var i = 0
+            let n = list.len(lines)
+            while i < n
+                let raw = str.trim(lines[i])
+                if str.len(raw) > 0 and (str.byte_at(raw, 0) ?? 0) != 35
+                    if (str.byte_at(raw, 0) ?? 0) == 91
+                        in_km = raw == "[keymaps]"
+                    elif in_km
+                        let eq = util.index_of_byte(raw, 61)
+                        if eq > 0 and str.trim(str.slice(raw, 0, eq)) == "import_nvim"
+                            on = parse_bool_val(util.strip_inline_comment(str.slice(raw, eq + 1, str.len(raw))))
+                i = i + 1
+            on
+
+// Assemble a Keymap from the nvim config dir: find the leader (default `\`), then
+// scrape every Normal-mode map, appended onto `base` (the TOML-loaded keymaps).
+fn import_nvim_keymaps(dir: Str, base: Keymap) -> Keymap [io]
+    let text = collect_lua(dir, 0)
+    let ml = nvmap.find_mapleader(text)
+    let leader = if str.len(ml) > 0 then ml else str.from_char('\\')
+    let pairs = nvmap.scrape_n_maps(text, leader)
+    var lhs = base.lhs
+    var rhs = base.rhs
+    var i = 0
+    while i + 1 < list.len(pairs)
+        lhs = list.push(lhs, pairs[i])
+        rhs = list.push(rhs, pairs[i + 1])
+        i = i + 2
+    Keymap { lhs: lhs, rhs: rhs }
 
 // ── Options ──────────────────────────────────────────
 @intent("""Editor settings, loaded from the `[options]` config section and
@@ -3753,7 +3819,12 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var disk_text = buf_text(ed)         // last-saved/loaded text, for the :e dirty guard
     var st = ist_new()
     var es = edit_new()
-    let km = load_keymaps(cfg_path)
+    // Keymaps: the TOML `[keymaps]`, plus (when `[keymaps] import_nvim = true`)
+    // the Normal-mode maps scraped from the user's Neovim config.
+    let km = if keymaps_import_nvim(cfg_path) then import_nvim_keymaps(default_nvim_dir(), load_keymaps(cfg_path)) else load_keymaps(cfg_path)
+    let km_active = list.len(km.lhs) > 0          // any maps → run the prefix matcher
+    var map_pending = ""                          // buffered multi-key LHS prefix
+    var map_replay = ""                           // RHS / flushed bytes to re-feed through the driver
     var cs = colorscheme.load_colorscheme(cfg_path)   // var: `:colorscheme <name>` switches it live
     var opts = load_options(cfg_path)
     var rows = term_rows()
@@ -3922,7 +3993,12 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
             var done = false
             while not done
                 var b = 0
-                if esc_pushback != 0 - 99             // a key stashed after a lone ESC
+                var from_replay = false
+                if str.len(map_replay) > 0            // remapped RHS / flushed bytes, re-fed raw
+                    b = str.byte_at(map_replay, 0) ?? 0
+                    map_replay = str.slice(map_replay, 1, str.len(map_replay))
+                    from_replay = true
+                elif esc_pushback != 0 - 99           // a key stashed after a lone ESC
                     b = esc_pushback
                     esc_pushback = 0 - 99
                 else
@@ -3932,8 +4008,10 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 // commands.  Arrow / Home / End move the cursor; everything else
                 // (focus events, device-attribute / cursor-position replies) is
                 // ignored.  A lone ESC, or ESC + another key, is delivered as ESC.
+                // Replayed bytes are literal — a remapped `<Esc>` is one ESC byte,
+                // not the start of a CSI to read more (its rest is in map_replay).
                 var esc_skip = false
-                if b == '\e'
+                if b == '\e' and not from_replay
                     let nx = novo_pty_stdin_read_byte_h()
                     if nx == '[' or nx == 'O'
                         // Peek one byte after a CSI `[` to detect an SGR mouse
@@ -4017,7 +4095,30 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                             esc_skip = true
                     elif nx >= 0
                         esc_pushback = nx
-                if esc_skip
+                // Multi-key keymap matcher: a fresh Normal-mode key (not a replay,
+                // not an escape sequence) extends the pending LHS prefix.  Exact
+                // match → queue the RHS for replay; still-a-prefix → buffer and
+                // wait for the next key; dead end → flush the buffered keys + this
+                // one literally.  Single-byte maps are handled in feed (feed_mapped),
+                // so this only fires for multi-byte LHS (`<leader>w`, `vv`, `;p`).
+                var map_eat = false
+                if km_active and not from_replay and not esc_skip and b >= 0 and st.mode == 0 and not cmd_mode and not search_mode and not zpend and not wpend and not gpend and not comp_active and esc_pushback == 0 - 99
+                    let cand = map_pending + str.from_char(b)
+                    let ei = keymap_seq_idx(km, cand)
+                    if ei >= 0
+                        map_replay = km.rhs[ei]
+                        map_pending = ""
+                        map_eat = true
+                    elif keymap_is_prefix(km, cand)
+                        map_pending = cand
+                        map_eat = true
+                    elif str.len(map_pending) > 0     // buffered prefix hit a dead end → flush it + b
+                        map_replay = cand
+                        map_pending = ""
+                        map_eat = true
+                if map_eat
+                    done = done                      // consumed by the matcher; loop for replay / next key
+                elif esc_skip
                     done = done                      // sequence consumed — no editor action
                 elif b == -2
                     done = true
