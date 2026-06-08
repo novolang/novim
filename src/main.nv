@@ -2041,6 +2041,11 @@ fn save_buf(path: Str, lines: [Str]) [io]
 fn save_buf_text(path: Str, text: Str) [io]
     save_buf(path, str.split_lines(text))
 
+// vim-style write confirmation for the status line: `"path" NL, NB written`.
+fn wrote_msg(path: Str, lines: [Str]) -> Str
+    let txt = buf_to_str(lines)
+    str.from_char('"') + path + str.from_char('"') + " " + str.from_int(list.len(lines)) + "L, " + str.from_int(str.len(txt)) + "B written"
+
 // ── Key-sequence decoding + keymaps ───────────────────
 
 // Decode `\e`=Esc `\n`/`\r`=Enter `\t`=Tab `\b`=Backspace `\\`=backslash
@@ -4375,6 +4380,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                             if r.save
                                 save_buf(curpath, ed.lines)
                                 disk_text = buf_text(ed)
+                                lsp_info = wrote_msg(curpath, ed.lines)
                             if r.quit
                                 if (not r.save) and util.index_of_byte(cmd_buf, '!') < 0 and buffers_modified(bufs_text, bufs_disk, cur_buf, buf_text(ed), disk_text)
                                     lsp_info = "unsaved buffers (:q! to override)"
