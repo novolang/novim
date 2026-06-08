@@ -59,6 +59,11 @@ fn ist_done(st: InputState) -> InputState
 fn ist_insert(st: InputState) -> InputState
     InputState { count: 0, pending: 0, mode: 1, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx }
 
+// Replace the unnamed register (used by the driver to seed it from the OS
+// clipboard before a paste); everything else about `st` is preserved.
+fn ist_set_reg(st: InputState, reg: Str, lw: Bool) -> InputState
+    InputState { count: st.count, pending: st.pending, mode: st.mode, reg: reg, reg_lw: lw, search: st.search, avy: st.avy, avx: st.avx }
+
 // Record the last search pattern (after `/pattern<Enter>`).
 fn ist_set_search(st: InputState, pat: Str) -> InputState
     InputState { count: 0, pending: 0, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: pat, avy: st.avy, avx: st.avx }
@@ -3990,6 +3995,9 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     // Opt-in (config `[options] treesitter = true` or `:set treesitter`); when
     // off, ts_spans_cache stays empty and the renderer uses the native tokenizer.
     var ts_enabled = util.index_of_str(file_to_text(cfg_path), "treesitter = true") >= 0
+    // `[options] clipboard = "unnamedplus"` (or "unnamed") → sync the unnamed
+    // register with the OS clipboard, like Neovim's unnamedplus.
+    let clip_on = util.index_of_str(file_to_text(cfg_path), "clipboard = \"unnamed") >= 0
     var diag_li: [Int] = []
     var diag_msgs: [Str] = []
     var lsp_reqid = 1                    // monotonic id for gd/K requests (init used 1)
@@ -4738,6 +4746,14 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                     let jy = ed.cy                    // record G/gg/n/N/{/}/%/*/# jumps
                     let jx = ed.cx
                     let wasjump = is_jump_key(st, b)
+                    // Clipboard sync (unnamedplus): seed the unnamed register from
+                    // the OS clipboard before a plain paste (`p`/`P`, no named
+                    // register selected), so it reflects what another app yanked.
+                    if clip_on and (b == 'p' or b == 'P') and es.rreg == 0 and not es.awaitreg
+                        let cb = clip_paste()
+                        if str.len(cb) > 0
+                            st = ist_set_reg(st, cb, clip_ends_nl(cb))
+                    let pre_reg = st.reg
                     // Block-insert start: capture the column band + row range from
                     // the still-live blockwise selection before feed enters Insert.
                     let pre_mode = st.mode
@@ -4765,6 +4781,10 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                         if ed.cy == binsert_ylo
                             ed = block_replicate(ed, binsert_ylo, binsert_yhi, binsert_col, binsert_flen0, binsert_append)
                         binsert_active = false
+                    // Clipboard sync: a yank/delete changed the unnamed register →
+                    // push it to the OS clipboard so another app can paste it.
+                    if clip_on and str.len(st.reg) > 0 and st.reg != pre_reg
+                        clip_copy(st.reg, st.reg_lw)
                     if wasjump and ed.cy != jy
                         jback = list.push(jback, jentry(curpath, jy, jx))
                         jfwd = []
@@ -5078,6 +5098,54 @@ fn default_nvim_dir() -> Str [io]
         return xdg + "/nvim"
     let home = process.env("HOME") ?? ""
     home + "/.config/nvim"
+
+// ── System clipboard sync (`[options] clipboard = "unnamedplus"`) ────────────
+// Mirrors a Neovim `clipboard=unnamedplus` setup so yank/paste crosses editors:
+// a yank/delete is pushed to the OS clipboard via OSC 52 (a terminal escape — no
+// helper process, works over SSH), and a paste pulls it back through xclip /
+// wl-paste.  A trailing newline marks a linewise yank (the vim convention the
+// receiving editor reads).
+
+fn clip_ends_nl(s: Str) -> Bool
+    str.len(s) > 0 and (str.byte_at(s, str.len(s) - 1) ?? 0) == '\n'
+
+// Push `text` to the OS clipboard with OSC 52: ESC ] 52 ; c ; <base64> ESC \.
+fn clip_copy(text: Str, linewise: Bool) [io]
+    let payload = if linewise and not clip_ends_nl(text) then text + str.from_char('\n') else text
+    let b64 = crypto.base64_encode(payload)
+    emit(str.from_char('\x1b') + "]52;c;" + b64 + str.from_char('\x1b') + str.from_char('\\'))
+
+// The argv that prints the OS clipboard to stdout: Wayland → wl-paste, else
+// X11 → xclip (the same `+`/CLIPBOARD selection Neovim's `unnamedplus` uses).
+fn clip_paste_argv() -> [Str] [io]
+    let wl = process.env("WAYLAND_DISPLAY") ?? ""
+    if str.len(wl) > 0
+        ["wl-paste", "--no-newline"]
+    else
+        ["xclip", "-selection", "clipboard", "-o"]
+
+// Read the OS clipboard: spawn the paste tool and drain its stdout (poll-gated
+// so a stuck helper can't freeze the editor).  "" on spawn failure / empty.
+fn clip_paste() -> Str [io, time]
+    match proc.spawn(clip_paste_argv())
+        None => ""
+        Some(pid) =>
+            let out = proc.stdout_fd(pid)
+            let sb = str.builder_new()
+            var more = true
+            while more
+                if proc.poll(out, 500) == 1
+                    let b = proc.read_byte(out)
+                    if b < 0
+                        more = false
+                    else
+                        str.builder_append_char(sb, b)
+                else
+                    more = false                  // 500ms idle → EOF or stalled
+            let r = str.builder_to_str(sb)
+            str.builder_drop(sb)
+            proc.close(pid)
+            r
 
 // Recursively concatenate every `*.lua` under `dir` (newline-separated) into one
 // buffer — scraping the combined text means a leader set in one file applies to
