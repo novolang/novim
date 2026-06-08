@@ -2456,6 +2456,15 @@ fn colorscheme_named(name: Str) -> Colorscheme
     elif name == "gruvbox-light"
         // gruvbox light — dark fg 237 on a light status bar (bg 223).
         Colorscheme { status_fg: 237, status_bg: 223, tilde_fg: 245, kw_fg: 124, str_fg: 106, cmt_fg: 245, num_fg: 132, type_fg: 172, fn_fg: 106, const_fg: 132, mod_fg: 66 }
+    elif name == "solarized_dark" or name == "solarized-dark" or name == "solarized"
+        // Solarized dark — ported from novoterm's `solarized_dark` theme, using
+        // the canonical Solarized 256-colour approximations and the Solarized
+        // syntax mapping: base01 240, green 64, cyan 37, yellow 136, blue 33,
+        // magenta 125, orange 166, base2 254.
+        Colorscheme { status_fg: 254, status_bg: 240, tilde_fg: 240, kw_fg: 64, str_fg: 37, cmt_fg: 240, num_fg: 37, type_fg: 136, fn_fg: 33, const_fg: 125, mod_fg: 166 }
+    elif name == "solarized_light" or name == "solarized-light"
+        // Solarized light — same hues, dark fg on a light (base2 254) status bar.
+        Colorscheme { status_fg: 241, status_bg: 254, tilde_fg: 245, kw_fg: 64, str_fg: 37, cmt_fg: 245, num_fg: 37, type_fg: 136, fn_fg: 33, const_fg: 125, mod_fg: 166 }
     else
         colorscheme_default()
 
