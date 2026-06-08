@@ -1552,6 +1552,42 @@ fn vblock_fill(ed: Editor, st: InputState, ch: Int) -> Step
         y = y + 1
     Step { ed: clamp(Editor { lines: lines, cy: ylo, cx: xlo }), st: ist_done(st) }
 
+// Yank the column rectangle into the unnamed register: each row's [xlo, xhi]
+// segment (clamped to the line) joined by newlines — so `p` (and the OS
+// clipboard, when synced) gets the column's text.  Leaves Visual; no buffer
+// change.  (True blockwise paste — re-inserting column-wise — is a follow-on.)
+fn vblock_yank(ed: Editor, st: InputState) -> Step
+    let ylo = if st.avy < ed.cy then st.avy else ed.cy
+    let yhi = if st.avy < ed.cy then ed.cy else st.avy
+    let xlo = if st.avx < ed.cx then st.avx else ed.cx
+    let xhi = if st.avx < ed.cx then ed.cx else st.avx
+    var acc = ""
+    var y = ylo
+    while y <= yhi
+        let line = if y < list.len(ed.lines) then ed.lines[y] else ""
+        let n = str.len(line)
+        let hic = if xhi + 1 < n then xhi + 1 else n
+        let seg = if xlo < n then str.slice(line, xlo, hic) else ""
+        if y > ylo
+            acc = acc + str.from_char('\n')
+        acc = acc + seg
+        y = y + 1
+    Step { ed: clamp(Editor { lines: ed.lines, cy: ylo, cx: xlo }), st: InputState { count: 0, pending: 0, mode: 0, reg: acc, reg_lw: false, search: st.search, avy: st.avy, avx: st.avx } }
+
+// Shift every line spanned by the block one shiftwidth right (indent) or left
+// (dedent) — like vim, this acts on whole lines, not just the column band.
+fn vblock_shift(ed: Editor, st: InputState, right: Bool) -> Step
+    let ylo = if st.avy < ed.cy then st.avy else ed.cy
+    let yhi = if st.avy < ed.cy then ed.cy else st.avy
+    var lines = ed.lines
+    var y = ylo
+    while y <= yhi
+        let line = if y < list.len(lines) then lines[y] else ""
+        let nl = if right then indent_one(line) else dedent_one(line)
+        lines = set_line(lines, y, nl)
+        y = y + 1
+    Step { ed: clamp(Editor { lines: lines, cy: ylo, cx: 0 }), st: ist_done(st) }
+
 // Enter Insert for a blockwise `I` / `A` / `c`: `I` at the block's left column,
 // `A` just past its right column (padding a short first row with spaces), `c`
 // deletes the block first then inserts at the left.  Only the first row is
@@ -1644,11 +1680,17 @@ fn feed_visual(ed: Editor, st: InputState, b: Int) -> Step
     if st.mode == 5
         if b == 'd' or b == 'x'                 // delete the block
             return vblock_delete(ed, st)
+        if b == 'y'                             // yank the column
+            return vblock_yank(ed, st)
         if b == 'r'                             // r<char> — fill every cell
             return Step { ed: ed, st: ist_visual_pending(st, 60) }
         if b == 'I' or b == 'A' or b == 'c'     // block insert / append / change
             return feed_vblock_insert(ed, st, b)
-        if b == 's' or b == 'y' or b == '>' or b == '<' or b == '~' or b == 'u' or b == 'U' or b == 'J' or b == 'p' or b == 'i' or b == 'a'
+        if b == '>'                             // shift the spanned lines right
+            return vblock_shift(ed, st, true)
+        if b == '<'                             // shift the spanned lines left
+            return vblock_shift(ed, st, false)
+        if b == 's' or b == '~' or b == 'u' or b == 'U' or b == 'J' or b == 'p' or b == 'i' or b == 'a'
             return Step { ed: ed, st: ist_visual_keep(st, 5) }
     if b == 'd' or b == 'x'                     // d / x — delete selection
         return visual_apply(ed, st, 'd')
