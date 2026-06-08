@@ -97,15 +97,157 @@ fn json_escape(s: Str) -> Str
 fn lsp_q(s: Str) -> Str
     str.from_char('"') + s + str.from_char('"')
 
+// ── Multi-language server resolution ─────────────────────────────────────────
+// novim drives ONE language server per session, chosen from the active file's
+// extension.  `.nv` maps to the built-in novols (byte-identical to v1); other
+// extensions map to common community servers, each overridable by a flat
+// `[lsp]` config section keyed by language id, e.g.
+//
+//     [lsp]
+//     rust   = "rust-analyzer"
+//     python = "pyright-langserver --stdio"
+//
+// A resolved server: the argv `cmd` line, the LSP `language` id, and a
+// space-separated `roots` list (project-root marker files/dirs).  Built only
+// inside this module; callers reach it through the flat string helpers below.
+struct LspSpec
+    cmd:      Str
+    language: Str
+    roots:    Str
+
+// The file's extension WITHOUT the leading dot ("" if none); `path.ext`
+// returns ".rs", we want "rs".
+fn lsp_ext_of(p: Str) -> Str
+    let e = path.ext(p)
+    if str.len(e) >= 1 and (str.byte_at(e, 0) ?? 0) == '.'
+        str.slice(e, 1, str.len(e))
+    else
+        e
+
+// Built-in server table.  Unknown extensions return an empty spec (no LSP).
+// `roots` lists the markers whose nearest ancestor directory is the project
+// root; novo's empty roots → rootUri:null (novols ignores it).
+fn lsp_default_for(ext: Str) -> LspSpec
+    if ext == "nv"
+        LspSpec { cmd: "novols", language: "novo", roots: "" }
+    elif ext == "rs"
+        LspSpec { cmd: "rust-analyzer", language: "rust", roots: "Cargo.toml .git" }
+    elif ext == "go"
+        LspSpec { cmd: "gopls", language: "go", roots: "go.mod go.work .git" }
+    elif ext == "py"
+        LspSpec { cmd: "pyright-langserver --stdio", language: "python", roots: "pyproject.toml setup.py setup.cfg requirements.txt .git" }
+    elif ext == "c" or ext == "h"
+        LspSpec { cmd: "clangd", language: "c", roots: "compile_commands.json .clangd .git" }
+    elif ext == "cpp" or ext == "cc" or ext == "cxx" or ext == "hpp" or ext == "hh"
+        LspSpec { cmd: "clangd", language: "cpp", roots: "compile_commands.json .clangd .git" }
+    elif ext == "ts" or ext == "tsx"
+        LspSpec { cmd: "typescript-language-server --stdio", language: "typescript", roots: "tsconfig.json package.json .git" }
+    elif ext == "js" or ext == "jsx" or ext == "mjs" or ext == "cjs"
+        LspSpec { cmd: "typescript-language-server --stdio", language: "javascript", roots: "package.json .git" }
+    elif ext == "lua"
+        LspSpec { cmd: "lua-language-server", language: "lua", roots: ".luarc.json .luarc.jsonc .git" }
+    elif ext == "json"
+        LspSpec { cmd: "vscode-json-language-server --stdio", language: "json", roots: ".git" }
+    else
+        LspSpec { cmd: "", language: "", roots: "" }
+
+// The LSP languageId for `path`, or "" when no server is known for its type.
+fn lsp_lang_of(p: Str) -> Str
+    lsp_default_for(lsp_ext_of(p)).language
+
+// A `[lsp]` command override for `language` from the config text, or "".
+fn lsp_cmd_override(cfg: Str, language: Str) -> Str
+    if str.len(language) == 0
+        return ""
+    let lines = str.split_lines(cfg)
+    var in_sec = false
+    var out = ""
+    var i = 0
+    let n = list.len(lines)
+    while i < n
+        let raw = str.trim(lines[i])
+        if str.len(raw) > 0 and (str.byte_at(raw, 0) ?? 0) != '#'
+            if (str.byte_at(raw, 0) ?? 0) == '['
+                in_sec = raw == "[lsp]"
+            elif in_sec
+                let eq = util.index_of_byte(raw, '=')
+                if eq > 0
+                    let key = str.trim(str.slice(raw, 0, eq))
+                    if key == language
+                        out = util.strip_quotes(str.trim(util.strip_inline_comment(str.slice(raw, eq + 1, str.len(raw)))))
+        i = i + 1
+    out
+
+// The resolved command line for `path`: a `[lsp]` override if present, else the
+// built-in default; "" when the filetype has no known server.
+fn lsp_cmd_for(p: Str, cfg: Str) -> Str
+    let spec = lsp_default_for(lsp_ext_of(p))
+    let ov = lsp_cmd_override(cfg, spec.language)
+    if str.len(ov) > 0 then ov else spec.cmd
+
+// Walk up from `path`'s directory; the first ancestor that contains any of the
+// space-separated `markers` is the project root.  Falls back to the file's own
+// directory when no marker is found.
+fn lsp_find_root(p: Str, markers: Str) -> Str [io]
+    let ms = str.split(markers, " ")
+    var dir = path.dirname(p)
+    var depth = 0
+    while str.len(dir) > 0 and depth < 64
+        var j = 0
+        while j < list.len(ms)
+            let m = ms[j]
+            if str.len(m) > 0 and fs.exists(path.join(dir, m))
+                return dir
+            j = j + 1
+        let parent = path.dirname(dir)
+        if parent == dir
+            return path.dirname(p)
+        dir = parent
+        depth = depth + 1
+    path.dirname(p)
+
+// The workspace rootUri (`file://…`) for `path`, or "" (→ rootUri:null) when
+// the filetype declares no root markers (novo).
+fn lsp_root_uri_for(p: Str) -> Str [io]
+    let spec = lsp_default_for(lsp_ext_of(p))
+    if str.len(spec.roots) == 0
+        return ""
+    let root = lsp_find_root(p, spec.roots)
+    if str.len(root) == 0 then "" else "file://" + root
+
+// Spawn the server named by a command line (argv split on spaces); returns its
+// pid, or -1 on empty command / spawn failure.
+fn lsp_spawn_cmd(cmd: Str) -> Int [io]
+    let parts = str.split(cmd, " ")
+    var argv: [Str] = []
+    var i = 0
+    while i < list.len(parts)
+        if str.len(parts[i]) > 0
+            argv = list.push(argv, parts[i])
+        i = i + 1
+    if list.len(argv) == 0
+        return 0 - 1
+    match proc.spawn(argv)
+        None => 0 - 1
+        Some(pid) => pid
+
 // Request / notification builders.
-fn lsp_init_req(uri: Str) -> Str
-    "{" + lsp_q("jsonrpc") + ":" + lsp_q("2.0") + "," + lsp_q("id") + ":1," + lsp_q("method") + ":" + lsp_q("initialize") + "," + lsp_q("params") + ":{" + lsp_q("processId") + ":null," + lsp_q("rootUri") + ":null," + lsp_q("capabilities") + ":{}}}"
+//
+// `root_uri` is the workspace root as a `file://` URI, or "" for none (sent as
+// `rootUri:null` — what novols expects, and what every `.nv` session sends, so
+// the novols frame stays byte-identical to v1).  Community servers
+// (rust-analyzer / gopls / …) need a real rootUri to load their project model.
+fn lsp_init_req(uri: Str, root_uri: Str) -> Str
+    let root = if str.len(root_uri) == 0 then "null" else lsp_q(root_uri)
+    "{" + lsp_q("jsonrpc") + ":" + lsp_q("2.0") + "," + lsp_q("id") + ":1," + lsp_q("method") + ":" + lsp_q("initialize") + "," + lsp_q("params") + ":{" + lsp_q("processId") + ":null," + lsp_q("rootUri") + ":" + root + "," + lsp_q("capabilities") + ":{}}}"
 
 fn lsp_initialized() -> Str
     "{" + lsp_q("jsonrpc") + ":" + lsp_q("2.0") + "," + lsp_q("method") + ":" + lsp_q("initialized") + "," + lsp_q("params") + ":{}}"
 
-fn lsp_didopen(uri: Str, text: Str) -> Str
-    "{" + lsp_q("jsonrpc") + ":" + lsp_q("2.0") + "," + lsp_q("method") + ":" + lsp_q("textDocument/didOpen") + "," + lsp_q("params") + ":{" + lsp_q("textDocument") + ":{" + lsp_q("uri") + ":" + lsp_q(uri) + "," + lsp_q("languageId") + ":" + lsp_q("novo") + "," + lsp_q("version") + ":1," + lsp_q("text") + ":" + lsp_q(json_escape(text)) + "}}}"
+// `language` is the LSP languageId ("novo", "rust", "python", …); `.nv`
+// sessions pass "novo", keeping the novols didOpen byte-identical to v1.
+fn lsp_didopen(uri: Str, language: Str, text: Str) -> Str
+    "{" + lsp_q("jsonrpc") + ":" + lsp_q("2.0") + "," + lsp_q("method") + ":" + lsp_q("textDocument/didOpen") + "," + lsp_q("params") + ":{" + lsp_q("textDocument") + ":{" + lsp_q("uri") + ":" + lsp_q(uri) + "," + lsp_q("languageId") + ":" + lsp_q(language) + "," + lsp_q("version") + ":1," + lsp_q("text") + ":" + lsp_q(json_escape(text)) + "}}}"
 
 fn lsp_didclose(uri: Str) -> Str
     "{" + lsp_q("jsonrpc") + ":" + lsp_q("2.0") + "," + lsp_q("method") + ":" + lsp_q("textDocument/didClose") + "," + lsp_q("params") + ":{" + lsp_q("textDocument") + ":{" + lsp_q("uri") + ":" + lsp_q(uri) + "}}}"
@@ -155,14 +297,6 @@ fn lsp_msg_diags(msg: Str) -> Bool
             // See bugs/codegen-llvm/llvm-return-call-in-match-arm-drops-subject.md
             let r = lsp_print_diags(doc)
             return r
-
-//
-// Spawn novols; returns its pid, or -1 on failure.  (A bare-unit `None => ()`
-// arm before a block trips the parser, so this returns a value from each arm.)
-fn lsp_spawn() -> Int [io]
-    match proc.spawn(["novols"])
-        None => 0 - 1
-        Some(pid) => pid
 
 // `textDocument/didChange` (full-document sync; novols files are small).
 fn lsp_didchange(uri: Str, version: Int, text: Str) -> Str

@@ -1,0 +1,3 @@
+# Build artifacts (`novo pkg build` output + package cache)
+/novim
+/_novo

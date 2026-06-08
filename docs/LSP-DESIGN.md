@@ -18,7 +18,12 @@ to it, and surfaces the server's intelligence in the TUI:
   document symbols (`:ls`-style jump).
 
 **Non-goals (v1).**
-- Multiple language servers / non-Novo files.  One server, `.nv` only.
+- ~~Multiple language servers / non-Novo files.  One server, `.nv` only.~~
+  **Shipped (Tier 1):** novim now drives a server chosen from the active file's
+  type — `.nv`→novols, plus rust-analyzer / gopls / pyright / clangd / … for
+  other extensions, with a `[lsp]` config override and marker-based project-root
+  detection.  Still one server *per session* (the first LSP-capable buffer's
+  language wins); a multi-server pool is Tier 2.  See §12.
 - Workspace-wide features beyond what a single open document needs.
 - Semantic tokens (we already have a native syntax highlighter; novols doesn't
   emit semantic tokens anyway).
@@ -279,6 +284,71 @@ the 25-field `EditState` untouched.
    popup row immediately?  (Recommend: status line first.)
 4. **Scope of v1** — is "diagnostics + `gd` + `K`" the right cut to call the LSP
    feature shipped, with completion/rename/format as later slices?
+
+---
+
+## 12. Multi-language support (Tier 1 — shipped)
+
+novim drives **one** language server per session, resolved from the active
+file's extension.  `.nv` stays on novols and is byte-identical to v1 (same
+`languageId: "novo"`, same `rootUri: null`); the layer is purely additive.
+
+**Resolution (in `lsp.nv`).**
+
+| Function | Role |
+|----------|------|
+| `lsp_ext_of(p)` | extension without the dot (`"rs"`) |
+| `lsp_default_for(ext) -> LspSpec` | built-in `{cmd, language, roots}` table |
+| `lsp_lang_of(p)` | the LSP languageId, or `""` (no server for this type) |
+| `lsp_cmd_override(cfg, language)` | a `[lsp]` config command override, or `""` |
+| `lsp_cmd_for(p, cfg)` | override if present, else the built-in default |
+| `lsp_find_root(p, markers)` | nearest ancestor dir containing any marker |
+| `lsp_root_uri_for(p)` | workspace `file://` rootUri (`""` → `null`) |
+| `lsp_spawn_cmd(cmd)` | `proc.spawn` after splitting argv on spaces |
+
+**Built-in servers.**
+
+| Ext | languageId | Default command | Root markers |
+|-----|------------|-----------------|--------------|
+| `nv` | novo | `novols` | *(none → null root)* |
+| `rs` | rust | `rust-analyzer` | `Cargo.toml` `.git` |
+| `go` | go | `gopls` | `go.mod` `go.work` `.git` |
+| `py` | python | `pyright-langserver --stdio` | `pyproject.toml` `setup.py` `setup.cfg` `requirements.txt` `.git` |
+| `c` `h` | c | `clangd` | `compile_commands.json` `.clangd` `.git` |
+| `cpp` `cc` `cxx` `hpp` `hh` | cpp | `clangd` | *(same as c)* |
+| `ts` `tsx` | typescript | `typescript-language-server --stdio` | `tsconfig.json` `package.json` `.git` |
+| `js` `jsx` `mjs` `cjs` | javascript | `typescript-language-server --stdio` | `package.json` `.git` |
+| `lua` | lua | `lua-language-server` | `.luarc.json` `.luarc.jsonc` `.git` |
+| `json` | json | `vscode-json-language-server --stdio` | `.git` |
+
+**Config — `[lsp]` overrides** (keyed by languageId; value is the full argv
+command line).  The default command is used when a language has no override:
+
+```toml
+[lsp]
+rust   = "rust-analyzer"
+python = "pylsp"                       # prefer pylsp over the default pyright
+go     = "gopls -remote=auto"
+```
+
+`.nv` is never rerouted (there is no `novo` key in the table by convention).
+
+**Session model.**  The first LSP-capable buffer opened spawns the server for
+*its* language and pins `lsp_lang`.  Buffers whose `lsp_lang_of` matches join
+the same server (didOpen / diagnostics / didClose); buffers of other languages
+get no LSP this session.  A multi-server pool keyed by language is Tier 2.
+
+**Debugging — `--lsp-resolve <file>`** prints the resolved languageId, command,
+and rootUri without spawning anything; this is also how the resolver is
+regression-tested headlessly (test_novim.sh slice 113), since CI has no
+community servers installed.
+
+```
+$ novim --lsp-resolve src/main.rs
+language: rust
+command: rust-analyzer
+rootUri: file:///home/me/project
+```
 
 ---
 

@@ -4243,6 +4243,12 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var lsp_ver = 1
     var lsp_uri = "file://" + path
     var lsp_lasttext = ""
+    // Multi-language: one server per session, chosen from the active file's
+    // type.  `lsp_lang` is the running server's LSP languageId ("novo", "rust",
+    // …; "" = no server); a buffer gets LSP only when its language matches.
+    // `.nv` resolves to novols/"novo" with a null root — byte-identical to v1.
+    let lsp_cfg = file_to_text(cfg_path)
+    var lsp_lang = ""
     // ── Tree-sitter highlighting (optional; falls back to the native tokenizer)
     // The grammar + queries are installed to ~/.novo/lib by
     // orbit/novo-treesitter/bin/install-lib.sh.  `ts_spans_cache` holds the
@@ -4354,15 +4360,16 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var lsp_dirty = false                // buffer changed since the last didChange
     var lsp_idle = 0                      // consecutive idle poll cycles (debounce)
     var lsp_phase = 0                    // 0 none · 1 init sent (awaiting result) · 2 ready
-    if ends_with_nv(path)
-        lsp_pid = lsp.lsp_spawn()
+    if str.len(lsp.lsp_lang_of(path)) > 0
+        lsp_lang = lsp.lsp_lang_of(path)
+        lsp_pid = lsp.lsp_spawn_cmd(lsp.lsp_cmd_for(path, lsp_cfg))
         if lsp_pid >= 0
             lsp_in = proc.stdin_fd(lsp_pid)
             lsp_out = proc.stdout_fd(lsp_pid)
             // Fire `initialize` and move on — the handshake completes
             // asynchronously in the loop so a big file appears instantly
-            // instead of blocking on novols' (slow) initialize result.
-            lsp.lsp_send(lsp_in, lsp.lsp_init_req(lsp_uri))
+            // instead of blocking on the server's (slow) initialize result.
+            lsp.lsp_send(lsp_in, lsp.lsp_init_req(lsp_uri, lsp.lsp_root_uri_for(path)))
             lsp_phase = 1
     clear_screen()       // one-time clear of whatever was on screen before
     left = hscroll_for(left, ed, opts, cols)
@@ -4647,8 +4654,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                 bufs_markx = list.push(bufs_markx, "")
                                 bufs_diag = list.push(bufs_diag, "")
                                 bufs_lspopen = list.push(bufs_lspopen, false)
-                                if ends_with_nv(tgt) and lsp_phase == 2   // open the doc so its diagnostics go live
-                                    lsp.lsp_send(lsp_in, lsp.lsp_didopen("file://" + tgt, file_to_text(tgt)))
+                                if lsp.lsp_lang_of(tgt) == lsp_lang and lsp_lang != "" and lsp_phase == 2   // open the doc so its diagnostics go live
+                                    lsp.lsp_send(lsp_in, lsp.lsp_didopen("file://" + tgt, lsp_lang, file_to_text(tgt)))
                                     bufs_lspopen = util.set_bool_at(bufs_lspopen, list.len(bufs_path) - 1, true)
                                 lsp_info = "added " + basename_of(tgt) + "; " + str.from_int(list.len(bufs_path)) + " buffers"
                         elif argcmd_kind(cmd_buf) > 0    // :args / :next / :prev / :first / :last / :wn / :wN
@@ -5108,17 +5115,18 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 lsp_uri = "file://" + curpath
                 lsp_lasttext = buf_text(ed)   // debounced didChange now diffs against THIS buffer
                 let already = bufs_lspopen[idx]
-                if ends_with_nv(curpath)
-                    if lsp_pid < 0             // no server yet — spawn + init async (opens all docs at handshake)
-                        lsp_pid = lsp.lsp_spawn()
+                if str.len(lsp.lsp_lang_of(curpath)) > 0
+                    if lsp_pid < 0             // no server yet — spawn for this file's language (opens all matching docs at handshake)
+                        lsp_lang = lsp.lsp_lang_of(curpath)
+                        lsp_pid = lsp.lsp_spawn_cmd(lsp.lsp_cmd_for(curpath, lsp_cfg))
                         if lsp_pid >= 0
                             lsp_in = proc.stdin_fd(lsp_pid)
                             lsp_out = proc.stdout_fd(lsp_pid)
-                            lsp.lsp_send(lsp_in, lsp.lsp_init_req(lsp_uri))
+                            lsp.lsp_send(lsp_in, lsp.lsp_init_req(lsp_uri, lsp.lsp_root_uri_for(curpath)))
                             lsp_phase = 1
-                    elif lsp_phase == 2 and not already   // first visit since server ready — open it
+                    elif lsp_phase == 2 and not already and lsp.lsp_lang_of(curpath) == lsp_lang   // first visit since server ready — open it
                         lsp_ver = lsp_ver + 1
-                        lsp.lsp_send(lsp_in, lsp.lsp_didopen(lsp_uri, lsp_lasttext))
+                        lsp.lsp_send(lsp_in, lsp.lsp_didopen(lsp_uri, lsp_lang, lsp_lasttext))
                         bufs_lspopen = util.set_bool_at(bufs_lspopen, idx, true)
             elif want_y >= 0                   // same buffer — just move the cursor
                 ed = clamp(Editor { lines: ed.lines, cy: want_y, cx: want_x })
@@ -5139,7 +5147,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 bufs_redo = util.remove_at_str(bufs_redo, ci)
                 bufs_marky = util.remove_at_str(bufs_marky, ci)
                 bufs_markx = util.remove_at_str(bufs_markx, ci)
-                if ends_with_nv(want_close) and bufs_lspopen[ci] and lsp_phase == 2
+                if bufs_lspopen[ci] and lsp_phase == 2   // only matching-language buffers were ever opened
                     lsp.lsp_send(lsp_in, lsp.lsp_didclose("file://" + want_close))
                 bufs_diag = util.remove_at_str(bufs_diag, ci)
                 bufs_lspopen = util.remove_at_bool(bufs_lspopen, ci)
@@ -5191,12 +5199,12 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 elif lsp_phase == 1 and lsp.lsp_msg_id(msg) == 1
                     lsp.lsp_send(lsp_in, lsp.lsp_initialized())
                     lsp_phase = 2
-                    var oi = 0                  // open EVERY .nv buffer (multi-doc)
+                    var oi = 0                  // open every buffer of the server's language (multi-doc)
                     while oi < list.len(bufs_path)
                         let opath = bufs_path[oi]
-                        if ends_with_nv(opath)
+                        if lsp.lsp_lang_of(opath) == lsp_lang
                             let otext = if oi == cur_buf then buf_text(ed) else bufs_text[oi]
-                            lsp.lsp_send(lsp_in, lsp.lsp_didopen("file://" + opath, otext))
+                            lsp.lsp_send(lsp_in, lsp.lsp_didopen("file://" + opath, lsp_lang, otext))
                             bufs_lspopen = util.set_bool_at(bufs_lspopen, oi, true)
                         oi = oi + 1
                     lsp_lasttext = buf_text(ed)
@@ -5412,26 +5420,45 @@ fn apply_rename(ed: Editor, triples: [Int], newtexts: [Str]) -> Editor
         k = k - 1
     Editor { lines: lines, cy: ed.cy, cx: ed.cx }
 
-@intent("""`--lsp-diag <file>` entry point: spawn novols, run the full
-initialize/didOpen handshake, wait for publishDiagnostics, and print them.  A
-deterministic, headless smoke test of the language-server transport (no TUI).""")
+@intent("""`--lsp-resolve <file>` debug entry point: print which language server
+novim would drive for a file — its languageId, the resolved command (built-in
+default, or a `[lsp]` config override), and the workspace rootUri — WITHOUT
+spawning anything.  Lets users verify their `[lsp]` config and gives the
+multi-language resolver a deterministic, dependency-free headless test.""")
+fn run_lsp_resolve(cfg_path: Str, path: Str) [io]
+    let lang = lsp.lsp_lang_of(path)
+    if str.len(lang) == 0
+        println("language: (none)")
+        println("command: (none)")
+        println("rootUri: (none)")
+    else
+        let cfg = file_to_text(cfg_path)
+        let root = lsp.lsp_root_uri_for(path)
+        let rootshow = if str.len(root) == 0 then "null" else root
+        println("language: " + lang)
+        println("command: " + lsp.lsp_cmd_for(path, cfg))
+        println("rootUri: " + rootshow)
+
+@intent("""`--lsp-diag <file>` entry point: spawn the resolved server, run the
+full initialize/didOpen handshake, wait for publishDiagnostics, and print them.
+A deterministic, headless smoke test of the language-server transport (no TUI).""")
 fn run_lsp_diag(path: Str) [io, time]
     // Use the free `proc.*` surface (pid-keyed) rather than the Subprocess
     // methods: the method-return slot-type inference is fragile (an fd binder
     // gets a ptr slot for the i64 return) and breaks the build as unrelated
     // code shifts inference.  The free fns are what run_interactive uses.
-    let pid = lsp.lsp_spawn()
+    let pid = lsp.lsp_spawn_cmd(lsp.lsp_cmd_for(path, ""))
     if pid < 0
-        println("novols: spawn failed")
+        println("language server: spawn failed")
     else
         let in_fd = proc.stdin_fd(pid)
         let out_fd = proc.stdout_fd(pid)
         let uri = "file://" + path
-        lsp.lsp_send(in_fd, lsp.lsp_init_req(uri))
+        lsp.lsp_send(in_fd, lsp.lsp_init_req(uri, lsp.lsp_root_uri_for(path)))
         let _ = lsp.lsp_poll_message(out_fd, 2000)               // initialize result
         lsp.lsp_send(in_fd, lsp.lsp_initialized())
         let text = buf_text(Editor { lines: buf_load(path), cy: 0, cx: 0 })
-        lsp.lsp_send(in_fd, lsp.lsp_didopen(uri, text))
+        lsp.lsp_send(in_fd, lsp.lsp_didopen(uri, lsp.lsp_lang_of(path), text))
         var iters = 0
         var shown = false
         while iters < 40 and not shown
@@ -5457,6 +5484,7 @@ fn main() [io, time]
     var extra = ""                        // remaining files, newline-joined → extra buffers
     var cfg = ""
     var lsp_diag = false
+    var lsp_resolve = false
     let mut i = 1
     while i < n
         let a = argv[i]
@@ -5470,6 +5498,9 @@ fn main() [io, time]
         elif a == "--lsp-diag"
             lsp_diag = true
             i = i + 1
+        elif a == "--lsp-resolve"
+            lsp_resolve = true
+            i = i + 1
         elif file == ""
             file = a
             i = i + 1
@@ -5478,7 +5509,9 @@ fn main() [io, time]
             i = i + 1
     let cfg_path = if cfg != "" then cfg else default_config_path()
     if file == ""
-        println("usage: novim [--config <toml>] [--batch <keys>] [--lsp-diag] <file>...")
+        println("usage: novim [--config <toml>] [--batch <keys>] [--lsp-diag] [--lsp-resolve] <file>...")
+    elif lsp_resolve
+        run_lsp_resolve(cfg_path, file)
     elif lsp_diag
         run_lsp_diag(file)
     elif is_batch
