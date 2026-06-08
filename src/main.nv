@@ -18,6 +18,7 @@ use window
 use colorscheme
 use disp
 use excmd
+use nvmap
 
 // Editor state.  The cursor is 0-based (line, col); the buffer is a line vector.
 struct Editor
@@ -4805,6 +4806,88 @@ fn default_config_path() -> Str [io]
     let home = process.env("HOME") ?? ""
     home + "/.config/novim/config.toml"
 
+// ── Neovim keymap import ─────────────────────────────────────────────────────
+// novim never runs Lua; it scrapes `vim.keymap.set` / `vim.g.mapleader` from the
+// user's nvim config (see nvmap.nv).  These helpers own the `[io]` side: locate
+// the config dir, slurp every `*.lua` recursively, and assemble a Keymap.
+
+// $NVIM_CONFIG, else $XDG_CONFIG_HOME/nvim, else ~/.config/nvim.
+fn default_nvim_dir() -> Str [io]
+    let envp = process.env("NVIM_CONFIG") ?? ""
+    if envp != ""
+        return envp
+    let xdg = process.env("XDG_CONFIG_HOME") ?? ""
+    if xdg != ""
+        return xdg + "/nvim"
+    let home = process.env("HOME") ?? ""
+    home + "/.config/nvim"
+
+// Recursively concatenate every `*.lua` under `dir` (newline-separated) into one
+// buffer — scraping the combined text means a leader set in one file applies to
+// maps declared in another.  Skips the `.git` dir; bounded depth guards loops.
+fn collect_lua(dir: Str, depth: Int) -> Str [io]
+    if depth > 16
+        return ""
+    var acc = ""
+    let entries = fs.read_dir(dir)
+    var i = 0
+    while i < list.len(entries)
+        let name = entries[i]
+        let full = path.join(dir, name)
+        if name != ".git"
+            if fs.is_dir(full)
+                acc = acc + collect_lua(full, depth + 1)
+            elif ends_with_lua(name)
+                acc = acc + file_to_text(full) + str.from_char('\n')
+        i = i + 1
+    acc
+
+fn ends_with_lua(p: Str) -> Bool
+    let n = str.len(p)
+    n >= 4 and str.slice(p, n - 4, n) == ".lua"
+
+// Render a byte sequence printably for `--dump-keymaps` (control bytes as <C-x>,
+// ESC/CR/TAB/space named) so the import is inspectable without a terminal.
+fn show_bytes(s: Str) -> Str
+    var o = ""
+    var i = 0
+    let n = str.len(s)
+    while i < n
+        let b = str.byte_at(s, i) ?? 0
+        if b == '\r'
+            o = o + "<CR>"
+        elif b == '\x1b'
+            o = o + "<Esc>"
+        elif b == '\t'
+            o = o + "<Tab>"
+        elif b == '\x7f'
+            o = o + "<BS>"
+        elif b == ' '
+            o = o + "<Space>"
+        elif b >= 1 and b <= 26
+            o = o + "<C-" + str.from_char(b - 1 + 'a') + ">"
+        else
+            o = o + str.from_char(b)
+        i = i + 1
+    o
+
+@intent("""`--dump-keymaps` debug entry point: resolve the nvim config dir, scrape
+its leader + Normal-mode maps, and print each `lhs -> rhs` with control bytes
+shown printably — no TUI.  The headless test hook for the importer.""")
+fn run_dump_keymaps() [io]
+    let dir = default_nvim_dir()
+    let text = collect_lua(dir, 0)
+    let ml = nvmap.find_mapleader(text)
+    let leader = if str.len(ml) > 0 then ml else str.from_char('\\')
+    println("nvim-dir: " + dir)
+    println("leader: " + show_bytes(leader))
+    let pairs = nvmap.scrape_n_maps(text, leader)
+    println("maps: " + str.from_int(list.len(pairs) / 2))
+    var i = 0
+    while i + 1 < list.len(pairs)
+        println("  " + show_bytes(pairs[i]) + " -> " + show_bytes(pairs[i + 1]))
+        i = i + 2
+
 // ── LSP (novols) client — JSON-RPC transport ───────────────────────────────
 // novim talks JSON-RPC over stdio to `novols`.  All of this lives outside the
 // pure `feed`; see orbit/novim/docs/LSP-DESIGN.md.
@@ -5017,6 +5100,7 @@ fn main() [io, time]
     var cfg = ""
     var lsp_diag = false
     var lsp_resolve = false
+    var dump_keymaps = false
     let mut i = 1
     while i < n
         let a = argv[i]
@@ -5033,6 +5117,9 @@ fn main() [io, time]
         elif a == "--lsp-resolve"
             lsp_resolve = true
             i = i + 1
+        elif a == "--dump-keymaps"
+            dump_keymaps = true
+            i = i + 1
         elif file == ""
             file = a
             i = i + 1
@@ -5040,8 +5127,10 @@ fn main() [io, time]
             extra = if str.len(extra) == 0 then a else extra + str.from_char('\n') + a
             i = i + 1
     let cfg_path = if cfg != "" then cfg else default_config_path()
-    if file == ""
-        println("usage: novim [--config <toml>] [--batch <keys>] [--lsp-diag] [--lsp-resolve] <file>...")
+    if dump_keymaps
+        run_dump_keymaps()
+    elif file == ""
+        println("usage: novim [--config <toml>] [--batch <keys>] [--lsp-diag] [--lsp-resolve] [--dump-keymaps] <file>...")
     elif lsp_resolve
         run_lsp_resolve(cfg_path, file)
     elif lsp_diag

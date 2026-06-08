@@ -1,0 +1,275 @@
+// nvmap.nv — import Neovim keymaps into novim (Tier 1: Normal mode).
+//
+// novim never runs Lua; it SCRAPES the mapping declarations from the user's
+// `~/.config/nvim` (`vim.g.mapleader`, `vim.keymap.set("n", lhs, rhs, …)`) by
+// pattern and expands vim key-notation (`<Leader>w`, `<C-d>`, `<CR>`, …) into the
+// raw byte sequences novim's keymap matcher consumes.  Pure (no `[io]`): the
+// recursive `*.lua` walk + Keymap assembly live in main.nv, which owns the type.
+//
+// An unrepresentable notation (an F-key, `<S-Tab>`, a Lua-function RHS) marks the
+// mapping with a NUL byte (`\x00`); the caller drops any LHS/RHS containing one.
+
+use util
+
+// Result of scanning one token out of a Lua source string: the value, the index
+// just past it, and whether the scan matched at all.
+struct Scan
+    val:  Str
+    next: Int
+    ok:   Bool
+
+fn nv_lower_byte(b: Int) -> Int
+    if b >= 'A' and b <= 'Z' then b + 32 else b
+
+fn nv_upper_byte(b: Int) -> Int
+    if b >= 'a' and b <= 'z' then b - 32 else b
+
+fn nv_lower(s: Str) -> Str
+    var o = ""
+    var i = 0
+    let n = str.len(s)
+    while i < n
+        o = o + str.from_char(nv_lower_byte(str.byte_at(s, i) ?? 0))
+        i = i + 1
+    o
+
+// The control byte for `<C-x>`: ctrl-a=1 … ctrl-z=26, plus the `[ \ ] ^ _`
+// block (27-31); -1 when x has no control form.
+fn ctrl_byte(c: Int) -> Int
+    if c >= 'a' and c <= 'z' then c - 'a' + 1 elif c >= 'A' and c <= 'Z' then c - 'A' + 1 elif c == '[' then 27 elif c == '\\' then 28 elif c == ']' then 29 elif c == '^' then 30 elif c == '_' then 31 else 0 - 1
+
+// `\x00` (the unsupported-notation sentinel) as a one-char string.
+fn nul() -> Str
+    str.from_char('\x00')
+
+// True if `s` carries the unsupported-notation marker.
+fn has_nul(s: Str) -> Bool
+    util.index_of_byte(s, 0) >= 0
+
+// Translate one `<...>` token's inner text to bytes (leader, named keys, `<C-x>`,
+// `<S-x>`); an unknown token yields the NUL sentinel so the mapping is dropped.
+fn translate_token(tok: Str, leader: Str) -> Str
+    let low = nv_lower(tok)
+    let n = str.len(tok)
+    if low == "leader"
+        leader
+    elif low == "cr" or low == "enter" or low == "return"
+        str.from_char('\r')
+    elif low == "esc"
+        str.from_char('\x1b')
+    elif low == "tab"
+        str.from_char('\t')
+    elif low == "bs"
+        str.from_char('\x7f')
+    elif low == "space"
+        " "
+    elif low == "lt"
+        "<"
+    elif low == "bar"
+        "|"
+    elif low == "nop"
+        ""
+    elif n == 3 and (str.byte_at(low, 0) ?? 0) == 'c' and (str.byte_at(low, 1) ?? 0) == '-'
+        ctrl_str(str.byte_at(tok, 2) ?? 0)
+    elif n == 3 and (str.byte_at(low, 0) ?? 0) == 's' and (str.byte_at(low, 1) ?? 0) == '-'
+        shift_str(str.byte_at(tok, 2) ?? 0)
+    else
+        nul()
+
+fn ctrl_str(c: Int) -> Str
+    let b = ctrl_byte(c)
+    if b >= 0 then str.from_char(b) else nul()
+
+fn shift_str(c: Int) -> Str
+    if (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') then str.from_char(nv_upper_byte(c)) else nul()
+
+// Expand a vim key-notation string (an LHS or RHS) to raw bytes.  `<cmd>X<CR>`
+// becomes `:X<CR>`; `<Leader>`/`<C-x>`/`<CR>`/… expand per translate_token; plain
+// characters pass through.  Unknown `<...>` tokens insert the NUL sentinel.
+fn parse_notation(s: Str, leader: Str) -> Str
+    let sb = str.builder_new()
+    let n = str.len(s)
+    var i = 0
+    while i < n
+        let b = str.byte_at(s, i) ?? 0
+        if b == '<'
+            let close = util.index_of_byte_from(s, '>', i + 1)
+            if close < 0
+                str.builder_append_char(sb, b)
+                i = i + 1
+            else
+                let tok = str.slice(s, i + 1, close)
+                if nv_lower(tok) == "cmd"
+                    // `<cmd>` … `<cr>`: the inner text is an Ex command → `:…\r`
+                    let lt2 = util.index_of_byte_from(s, '<', close + 1)
+                    let gt2 = if lt2 < 0 then 0 - 1 else util.index_of_byte_from(s, '>', lt2 + 1)
+                    let tok2 = if gt2 < 0 then "" else nv_lower(str.slice(s, lt2 + 1, gt2))
+                    if gt2 >= 0 and (tok2 == "cr" or tok2 == "enter" or tok2 == "return")
+                        str.builder_append(sb, ":" + str.slice(s, close + 1, lt2) + str.from_char('\r'))
+                        i = gt2 + 1
+                    else
+                        str.builder_append(sb, nul())          // malformed <cmd> → drop the map
+                        i = close + 1
+                else
+                    str.builder_append(sb, translate_token(tok, leader))
+                    i = close + 1
+        else
+            str.builder_append_char(sb, b)
+            i = i + 1
+    let out = str.builder_to_str(sb)
+    str.builder_drop(sb)
+    out
+
+// ── Lua source scanning ──────────────────────────────────────────────────────
+
+fn skip_ws(s: Str, from: Int) -> Int
+    var i = from
+    let n = str.len(s)
+    while i < n and ((str.byte_at(s, i) ?? 0) == ' ' or (str.byte_at(s, i) ?? 0) == '\t')
+        i = i + 1
+    i
+
+// Read a Lua double-quoted string starting at `from` (which must be `"`),
+// resolving `\\` `\"` `\t` `\n` `\r`.  ok=false if `from` isn't a quote.
+fn read_dquote(s: Str, from: Int) -> Scan
+    if (str.byte_at(s, from) ?? 0) != '"'
+        return Scan { val: "", next: from, ok: false }
+    let sb = str.builder_new()
+    var i = from + 1
+    let n = str.len(s)
+    var done = false
+    while i < n and not done
+        let b = str.byte_at(s, i) ?? 0
+        if b == '\\' and i + 1 < n
+            let nx = str.byte_at(s, i + 1) ?? 0
+            if nx == 'n' then str.builder_append_char(sb, '\n') elif nx == 'r' then str.builder_append_char(sb, '\r') elif nx == 't' then str.builder_append_char(sb, '\t') else str.builder_append_char(sb, nx)
+            i = i + 2
+        elif b == '"'
+            done = true
+            i = i + 1
+        else
+            str.builder_append_char(sb, b)
+            i = i + 1
+    let out = str.builder_to_str(sb)
+    str.builder_drop(sb)
+    Scan { val: out, next: i, ok: done }
+
+// Read a Lua long-bracket string `[[ … ]]` (verbatim, no escapes) at `from`.
+fn read_longbracket(s: Str, from: Int) -> Scan
+    let n = str.len(s)
+    if not (from + 1 < n and (str.byte_at(s, from) ?? 0) == '[' and (str.byte_at(s, from + 1) ?? 0) == '[')
+        return Scan { val: "", next: from, ok: false }
+    var i = from + 2
+    var endpos = 0 - 1
+    while i + 1 < n and endpos < 0
+        if (str.byte_at(s, i) ?? 0) == ']' and (str.byte_at(s, i + 1) ?? 0) == ']'
+            endpos = i
+        else
+            i = i + 1
+    if endpos < 0
+        return Scan { val: "", next: from, ok: false }
+    Scan { val: str.slice(s, from + 2, endpos), next: endpos + 2, ok: true }
+
+// Read a `[A-Za-z0-9_.]` identifier (dotted, so `vim.cmd.write` reads whole).
+fn read_ident(s: Str, from: Int) -> Scan
+    var i = from
+    let n = str.len(s)
+    while i < n and (nv_ident_byte(str.byte_at(s, i) ?? 0))
+        i = i + 1
+    Scan { val: str.slice(s, from, i), next: i, ok: i > from }
+
+fn nv_ident_byte(b: Int) -> Bool
+    (b >= 'a' and b <= 'z') or (b >= 'A' and b <= 'Z') or (b >= '0' and b <= '9') or b == '_' or b == '.'
+
+// Map a `vim.cmd.<name>` to the Ex command novim understands (write→w, quit→q,
+// etc.); other names pass through as `:<name>`.
+fn vimcmd_alias(name: Str) -> Str
+    if name == "write" then "w" elif name == "quit" then "q" elif name == "wq" then "wq" elif name == "wqall" then "wqa" elif name == "qall" then "qa" else name
+
+// The third `vim.keymap.set` argument starting at `from`: a quoted/long string is
+// its notation; `vim.cmd.X` / `vim.cmd("X")` becomes `:X\r`; anything else
+// (a function, a table) returns ok=false → the map is skipped.
+fn read_rhs(s: Str, from: Int, leader: Str) -> Scan
+    let i = skip_ws(s, from)
+    let b = str.byte_at(s, i) ?? 0
+    if b == '"'
+        let q = read_dquote(s, i)
+        Scan { val: parse_notation(q.val, leader), next: q.next, ok: q.ok }
+    elif b == '['
+        let q = read_longbracket(s, i)
+        Scan { val: parse_notation(q.val, leader), next: q.next, ok: q.ok }
+    elif str_at_is(s, i, "vim.cmd.")
+        let id = read_ident(s, i)
+        let name = str.slice(id.val, 8, str.len(id.val))      // drop "vim.cmd."
+        Scan { val: ":" + vimcmd_alias(name) + str.from_char('\r'), next: id.next, ok: str.len(name) > 0 }
+    elif str_at_is(s, i, "vim.cmd(")
+        let q = read_dquote(s, skip_ws(s, i + 8))
+        Scan { val: ":" + q.val + str.from_char('\r'), next: q.next, ok: q.ok }
+    else
+        Scan { val: "", next: i, ok: false }
+
+// True if `s` at `from` begins with `lit`.
+fn str_at_is(s: Str, from: Int, lit: Str) -> Bool
+    let m = str.len(lit)
+    if from + m > str.len(s)
+        return false
+    str.slice(s, from, from + m) == lit
+
+// ── Public scrapers ──────────────────────────────────────────────────────────
+
+// The leader bytes from `vim.g.mapleader = "<x>"`, or "" if not present in this
+// file's text.  Skips `--` comment lines; ignores `maplocalleader`.
+fn find_mapleader(text: Str) -> Str
+    let lines = str.split_lines(text)
+    var out = ""
+    var found = false
+    var i = 0
+    let n = list.len(lines)
+    while i < n and not found
+        let raw = str.trim(lines[i])
+        if not (str.len(raw) >= 2 and (str.byte_at(raw, 0) ?? 0) == '-' and (str.byte_at(raw, 1) ?? 0) == '-')
+            let at = util.index_of_str(raw, "vim.g.mapleader")
+            if at >= 0
+                let eq = util.index_of_byte_from(raw, '=', at)
+                if eq >= 0
+                    let qi = util.index_of_byte_from(raw, '"', eq)
+                    if qi >= 0
+                        let q = read_dquote(raw, qi)
+                        if q.ok
+                            out = q.val
+                            found = true
+        i = i + 1
+    out
+
+// Flat `[lhs0, rhs0, lhs1, rhs1, …]` of the Normal-mode maps in one Lua file's
+// `text`.  Each `vim.keymap.set("n", "<lhs>", <rhs>, …)` whose LHS and RHS both
+// expand cleanly (no NUL sentinel, non-empty LHS) contributes a pair; everything
+// else (other modes, function RHS, F-keys) is skipped.
+fn scrape_n_maps(text: Str, leader: Str) -> [Str]
+    var out: [Str] = []
+    let lines = str.split_lines(text)
+    var li = 0
+    let nl = list.len(lines)
+    while li < nl
+        let raw = str.trim(lines[li])
+        let is_comment = str.len(raw) >= 2 and (str.byte_at(raw, 0) ?? 0) == '-' and (str.byte_at(raw, 1) ?? 0) == '-'
+        let at = util.index_of_str(raw, "vim.keymap.set(")
+        if at >= 0 and not is_comment
+            // arg1: mode
+            let p0 = skip_ws(raw, at + 15)
+            let mode = read_dquote(raw, p0)
+            if mode.ok and mode.val == "n"
+                let c1 = util.index_of_byte_from(raw, ',', mode.next)
+                if c1 >= 0
+                    let p1 = skip_ws(raw, c1 + 1)
+                    let lhsq = read_dquote(raw, p1)
+                    if lhsq.ok
+                        let c2 = util.index_of_byte_from(raw, ',', lhsq.next)
+                        if c2 >= 0
+                            let lhs = parse_notation(lhsq.val, leader)
+                            let rhs = read_rhs(raw, c2 + 1, leader)
+                            if rhs.ok and str.len(lhs) > 0 and not has_nul(lhs) and not has_nul(rhs.val)
+                                out = list.push(out, lhs)
+                                out = list.push(out, rhs.val)
+        li = li + 1
+    out
