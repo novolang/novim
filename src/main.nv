@@ -14,6 +14,7 @@ use util
 use lsp
 use nvregex
 use ts
+use window
 
 // Editor state.  The cursor is 0-based (line, col); the buffer is a line vector.
 struct Editor
@@ -3881,292 +3882,6 @@ fn ends_with_nv(p: Str) -> Bool
     let n = str.len(p)
     n >= 3 and str.slice(p, n - 3, n) == ".nv"
 
-@intent("""A screen rectangle (1-based-friendly, but stored 0-based): origin
-(x, y) and size (w, h) in terminal cells.  A window draws into one of these.""")
-struct Rect
-    x: Int
-    y: Int
-    w: Int
-    h: Int
-
-@intent("""The window layout as a recursive tree.  `LWin` is a leaf holding a
-window id (index into the win_* parallel arrays); `LRow` tiles its parts
-side-by-side (a `:vsplit`), `LCol` stacks them top-to-bottom (a `:split`).
-A single full-screen window is just `LWin(0)` — the v1 default.""")
-enum Layout
-    LWin(id: Int)
-    LRow(parts: [Layout])
-    LCol(parts: [Layout])
-
-@intent("""Total size weight of every leaf window under `lay`, summed from the
-per-window `weights` array (indexed by winid; missing ids count as 100).  Used
-to divide a split's space in proportion to its children.""")
-fn subtree_weight(lay: Layout, weights: [Int]) -> Int
-    match lay
-        LWin(id) =>
-            if id >= 0 and id < list.len(weights) then weights[id] else 100
-        LRow(parts) =>
-            var s = 0
-            var i = 0
-            while i < list.len(parts)
-                s = s + subtree_weight(parts[i], weights)
-                i = i + 1
-            s
-        LCol(parts) =>
-            var s = 0
-            var i = 0
-            while i < list.len(parts)
-                s = s + subtree_weight(parts[i], weights)
-                i = i + 1
-            s
-
-@intent("""Compute the cell rectangle of every leaf window under `lay`, given
-the screen rect `r`.  Returns a flat [Int] of 5-tuples (winid, x, y, w, h) —
-flat so it sidesteps [[Int]] / struct-list return shapes.  `LRow` divides width
-in proportion to each child's WIDTH weight (`ww`), `LCol` divides height in
-proportion to HEIGHT weight (`hw`); the last child absorbs the rounding
-remainder.  All-equal weights (the default 100) recover even division, so a
-single full-screen window stays byte-identical.""")
-fn layout_rects(lay: Layout, r: Rect, ww: [Int], hw: [Int], acc: [Int]) -> [Int]
-    match lay
-        LWin(id) =>
-            var a = acc
-            a = list.push(a, id)
-            a = list.push(a, r.x)
-            a = list.push(a, r.y)
-            a = list.push(a, r.w)
-            a = list.push(a, r.h)
-            a
-        LRow(parts) =>
-            var a = acc
-            let n = list.len(parts)
-            if n == 0
-                return a
-            var total = 0
-            var t = 0
-            while t < n
-                total = total + subtree_weight(parts[t], ww)
-                t = t + 1
-            if total <= 0
-                total = n
-            var accw = 0
-            var i = 0
-            while i < n
-                let x0 = r.x + r.w * accw / total
-                accw = accw + subtree_weight(parts[i], ww)
-                let x1 = if i == n - 1 then r.x + r.w else r.x + r.w * accw / total
-                a = layout_rects(parts[i], Rect { x: x0, y: r.y, w: x1 - x0, h: r.h }, ww, hw, a)
-                i = i + 1
-            a
-        LCol(parts) =>
-            var a = acc
-            let n = list.len(parts)
-            if n == 0
-                return a
-            var total = 0
-            var t = 0
-            while t < n
-                total = total + subtree_weight(parts[t], hw)
-                t = t + 1
-            if total <= 0
-                total = n
-            var acch = 0
-            var i = 0
-            while i < n
-                let y0 = r.y + r.h * acch / total
-                acch = acch + subtree_weight(parts[i], hw)
-                let y1 = if i == n - 1 then r.y + r.h else r.y + r.h * acch / total
-                a = layout_rects(parts[i], Rect { x: r.x, y: y0, w: r.w, h: y1 - y0 }, ww, hw, a)
-                i = i + 1
-            a
-
-@intent("""The cell rect of window `winid` within `lay` over `screen`, via
-layout_rects.  Falls back to the whole screen if the id isn't present (so a
-stale active-window id can never produce an empty draw rect).""")
-fn window_rect(lay: Layout, winid: Int, screen: Rect, ww: [Int], hw: [Int]) -> Rect
-    let rects = layout_rects(lay, screen, ww, hw, [])
-    var i = 0
-    let n = list.len(rects)
-    while i < n
-        if rects[i] == winid
-            return Rect { x: rects[i + 1], y: rects[i + 2], w: rects[i + 3], h: rects[i + 4] }
-        i = i + 5
-    screen
-
-@intent("""Split the leaf window `winid` into a pair (the old window plus a new
-`newid`), `vertical` → side-by-side LRow (`:vsplit`), else stacked LCol
-(`:split`).  Recurses the tree rebuilding each LRow/LCol so the split lands at
-the right leaf regardless of nesting.  Adjacent same-orientation splits nest
-(no flattening) — fine for v1.""")
-fn layout_split(lay: Layout, winid: Int, newid: Int, vertical: Bool) -> Layout
-    match lay
-        LWin(id) =>
-            if id == winid
-                if vertical
-                    LRow([LWin(id), LWin(newid)])
-                else
-                    LCol([LWin(id), LWin(newid)])
-            else
-                LWin(id)
-        LRow(parts) =>
-            var np: [Layout] = []
-            var i = 0
-            while i < list.len(parts)
-                np = list.push(np, layout_split(parts[i], winid, newid, vertical))
-                i = i + 1
-            LRow(np)
-        LCol(parts) =>
-            var np: [Layout] = []
-            var i = 0
-            while i < list.len(parts)
-                np = list.push(np, layout_split(parts[i], winid, newid, vertical))
-                i = i + 1
-            LCol(np)
-
-@intent("""Number of leaf windows in the layout tree.""")
-fn layout_count(lay: Layout) -> Int
-    match lay
-        LWin(id) => 1
-        LRow(parts) =>
-            var n = 0
-            var i = 0
-            while i < list.len(parts)
-                n = n + layout_count(parts[i])
-                i = i + 1
-            n
-        LCol(parts) =>
-            var n = 0
-            var i = 0
-            while i < list.len(parts)
-                n = n + layout_count(parts[i])
-                i = i + 1
-            n
-
-@intent("""The ordered list of leaf window ids, left-to-right / top-to-bottom as
-they appear in the tree.  Used for `Ctrl-W w` focus cycling (next id after the
-active one, wrapping) and to pick a survivor after a close.""")
-fn layout_winids(lay: Layout, acc: [Int]) -> [Int]
-    match lay
-        LWin(id) => list.push(acc, id)
-        LRow(parts) =>
-            var a = acc
-            var i = 0
-            while i < list.len(parts)
-                a = layout_winids(parts[i], a)
-                i = i + 1
-            a
-        LCol(parts) =>
-            var a = acc
-            var i = 0
-            while i < list.len(parts)
-                a = layout_winids(parts[i], a)
-                i = i + 1
-            a
-
-@intent("""The next window id after `awin` in tree order, wrapping — the target
-for `Ctrl-W w`.  Returns `awin` unchanged when there is only one window.""")
-fn win_cycle_next(lay: Layout, awin: Int) -> Int
-    let ids = layout_winids(lay, [])
-    let nw = list.len(ids)
-    if nw <= 1
-        return awin
-    var pos = 0
-    var k = 0
-    while k < nw
-        if ids[k] == awin
-            pos = k
-        k = k + 1
-    ids[(pos + 1) % nw]
-
-@intent("""The window to move focus to from `awin` in a direction (`Ctrl-W h/j/k/l`):
-dir 0=left 1=down 2=up 3=right.  Scans the computed rects for the nearest window
-that lies in that direction AND overlaps the active window on the perpendicular
-axis, by gap distance.  Returns `awin` unchanged when there is no window that
-way (edge of the layout).""")
-fn window_in_dir(lay: Layout, awin: Int, screen: Rect, dir: Int, ww: [Int], hw: [Int]) -> Int
-    let rects = layout_rects(lay, screen, ww, hw, [])
-    var ax = 0
-    var ay = 0
-    var aw = 0
-    var ah = 0
-    var k = 0
-    while k < list.len(rects)
-        if rects[k] == awin
-            ax = rects[k + 1]
-            ay = rects[k + 2]
-            aw = rects[k + 3]
-            ah = rects[k + 4]
-        k = k + 5
-    var best = awin
-    var bestd = 1000000
-    var j = 0
-    while j < list.len(rects)
-        let wid = rects[j]
-        let wx = rects[j + 1]
-        let wy = rects[j + 2]
-        let ww = rects[j + 3]
-        let wh = rects[j + 4]
-        // overlap on the axis perpendicular to the move
-        let voverlap = wy < ay + ah and wy + wh > ay
-        let hoverlap = wx < ax + aw and wx + ww > ax
-        let indir = if dir == 0
-            wx + ww <= ax and voverlap
-        elif dir == 3
-            wx >= ax + aw and voverlap
-        elif dir == 2
-            wy + wh <= ay and hoverlap
-        else
-            wy >= ay + ah and hoverlap
-        if wid != awin and indir
-            let d = if dir == 0
-                ax - (wx + ww)
-            elif dir == 3
-                wx - (ax + aw)
-            elif dir == 2
-                ay - (wy + wh)
-            else
-                wy - (ay + ah)
-            if d < bestd
-                bestd = d
-                best = wid
-        j = j + 5
-    best
-
-@intent("""Remove window `winid` from the tree, returning a 0-or-1 element list
-(the surviving subtree, or empty if `winid` was the whole tree).  An LRow/LCol
-that loses a child and is left with exactly one collapses to that child (no
-empty or single-child rows linger).  Returns a LIST so a removed leaf yields
-`[]` and the parent flattens — relies on the perceus empty-vec-singleton fix
-(closed/llvm-recursive-fn-returning-list-of-recursive-enum-segfault).""")
-fn layout_remove(lay: Layout, winid: Int) -> [Layout]
-    match lay
-        LWin(id) =>
-            if id == winid then [] else [LWin(id)]
-        LRow(parts) =>
-            var np: [Layout] = []
-            var i = 0
-            while i < list.len(parts)
-                np = list.append(np, layout_remove(parts[i], winid))
-                i = i + 1
-            if list.len(np) == 0
-                []
-            elif list.len(np) == 1
-                [np[0]]
-            else
-                [LRow(np)]
-        LCol(parts) =>
-            var np: [Layout] = []
-            var i = 0
-            while i < list.len(parts)
-                np = list.append(np, layout_remove(parts[i], winid))
-                i = i + 1
-            if list.len(np) == 0
-                []
-            elif list.len(np) == 1
-                [np[0]]
-            else
-                [LCol(np)]
-
 @intent("""Draw ONE window's frame into its rect: the text viewport (scrolled
 to `top`/`left`, optional line-number gutter, tab expansion, Novo syntax
 highlighting, search-match and visual-selection highlighting, per-line
@@ -4176,7 +3891,7 @@ rows); for a single full-screen window (rx=ry=0) these reduce to absolute
 coordinates.  Does NOT touch cursor visibility or place the hardware cursor —
 the orchestrator (`render` / `render_all`) hides the cursor once, draws every
 window, then places it in the active window.""")
-fn draw_window(ed: Editor, win: Rect, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, clip: Bool, active: Bool, ts_spans: [Int]) [io]
+fn draw_window(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, clip: Bool, active: Bool, ts_spans: [Int]) [io]
     let rows = win.h
     let cols = win.w
     let rx = win.x
@@ -4321,7 +4036,7 @@ fn draw_window(ed: Editor, win: Rect, path: Str, top: Int, left: Int, mode: Int,
 offset by the window origin and the (recomputed) gutter width, wrap-aware.
 Split out of draw_window so a multi-window frame draws every window first,
 then homes the cursor in the focused one.""")
-fn place_cursor(ed: Editor, win: Rect, top: Int, left: Int, opts: Options) [io]
+fn place_cursor(ed: Editor, win: window.Rect, top: Int, left: Int, opts: Options) [io]
     let rx = win.x
     let ry = win.y
     let cols = win.w
@@ -4347,7 +4062,7 @@ fn place_cursor(ed: Editor, win: Rect, top: Int, left: Int, opts: Options) [io]
 @intent("""Single-window frame: hide the cursor, draw the one window, place the
 cursor, restore it.  Byte-identical to the pre-split render — the interactive
 driver calls this whenever there is exactly one window.""")
-fn render(ed: Editor, win: Rect, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, ts_spans: [Int]) [io]
+fn render(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, ts_spans: [Int]) [io]
     csi()
     emit("?25l")         // hide cursor while we repaint
     draw_window(ed, win, path, top, left, mode, avy, avx, search, cs, opts, diag_li, diag_msgs, info, modified, false, true, ts_spans)
@@ -4371,14 +4086,14 @@ The active window draws from the live ed cursor / top / left and the real mode
 (selection, INSERT, gd/K info); every other pane draws from its saved win_*
 cursor/viewport in plain NORMAL mode.  Diagnostics + modified flag only follow
 the live active buffer for now.""")
-fn render_all(ed: Editor, lay: Layout, awin: Int, screen: Rect, win_cy: [Int], win_cx: [Int], win_top: [Int], win_left: [Int], win_buf: [Int], win_ww: [Int], win_hw: [Int], cur_buf: Int, bufs_text: [Str], bufs_path: [Str], path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, ts_spans: [Int]) [io]
+fn render_all(ed: Editor, lay: window.Layout, awin: Int, screen: window.Rect, win_cy: [Int], win_cx: [Int], win_top: [Int], win_left: [Int], win_buf: [Int], win_ww: [Int], win_hw: [Int], cur_buf: Int, bufs_text: [Str], bufs_path: [Str], path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, ts_spans: [Int]) [io]
     csi()
     emit("?25l")
-    let rects = layout_rects(lay, screen, win_ww, win_hw, [])
+    let rects = window.layout_rects(lay, screen, win_ww, win_hw, [])
     var i = 0
     while i < list.len(rects)
         let wid = rects[i]
-        let wr = Rect { x: rects[i + 1], y: rects[i + 2], w: rects[i + 3], h: rects[i + 4] }
+        let wr = window.rect(rects[i + 1], rects[i + 2], rects[i + 3], rects[i + 4])
         let isact = wid == awin
         let bi = win_buf[wid]
         let same = bi == cur_buf            // shows the live (active) buffer
@@ -4402,7 +4117,7 @@ fn render_all(ed: Editor, lay: Layout, awin: Int, screen: Rect, win_cy: [Int], w
         let wts = if same then ts_spans else []   // ts spans only for the live (active) buffer
         draw_window(view, wr, wpath, wtop, wleft, wmode, wavy, wavx, search, cs, opts, wdiag_li, wdiag_msgs, winfo, wmod, clip, isact, wts)
         i = i + 5
-    place_cursor(ed, window_rect(lay, awin, screen, win_ww, win_hw), top, left, opts)
+    place_cursor(ed, window.window_rect(lay, awin, screen, win_ww, win_hw), top, left, opts)
     cursor_shape(mode)
     csi()
     emit("?25h")
@@ -4410,10 +4125,10 @@ fn render_all(ed: Editor, lay: Layout, awin: Int, screen: Rect, win_cy: [Int], w
 @intent("""Paint one frame, dispatching on window count: a single window keeps
 the proven byte-identical render path; two or more go through render_all.  (Not
 named `frame` — that is a reserved word in Novo.)""")
-fn paint_frame(ed: Editor, lay: Layout, awin: Int, cols: Int, rows: Int, win_cy: [Int], win_cx: [Int], win_top: [Int], win_left: [Int], win_buf: [Int], win_ww: [Int], win_hw: [Int], cur_buf: Int, bufs_text: [Str], bufs_path: [Str], path: Str, top: Int, left: Int, st: InputState, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, ts_spans: [Int]) [io]
-    let screen = Rect { x: 0, y: 0, w: cols, h: rows }
-    if layout_count(lay) == 1
-        render(ed, window_rect(lay, awin, screen, win_ww, win_hw), path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, info, modified, ts_spans)
+fn paint_frame(ed: Editor, lay: window.Layout, awin: Int, cols: Int, rows: Int, win_cy: [Int], win_cx: [Int], win_top: [Int], win_left: [Int], win_buf: [Int], win_ww: [Int], win_hw: [Int], cur_buf: Int, bufs_text: [Str], bufs_path: [Str], path: Str, top: Int, left: Int, st: InputState, cs: Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, ts_spans: [Int]) [io]
+    let screen = window.rect(0, 0, cols, rows)
+    if window.layout_count(lay) == 1
+        render(ed, window.window_rect(lay, awin, screen, win_ww, win_hw), path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, info, modified, ts_spans)
     else
         render_all(ed, lay, awin, screen, win_cy, win_cx, win_top, win_left, win_buf, win_ww, win_hw, cur_buf, bufs_text, bufs_path, path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, info, modified, ts_spans)
 
@@ -4650,7 +4365,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     // (ed.lines); only the cursor/viewport differ per window.  The active
     // window's live state is ed.cy/ed.cx/top/left; win_* holds the OTHER
     // windows' saved state, synced on every focus change / split.
-    var lay = LWin(0)
+    var lay = window.LWin(0)
     var awin = 0
     var win_cy: [Int] = [0]
     var win_cx: [Int] = [0]
@@ -5055,7 +4770,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                             pending_wcmd = 1
                         elif is_vsplit(cmd_buf)           // :vsplit / :vs — side-by-side split
                             pending_wcmd = 4
-                        elif is_winclose(cmd_buf) and layout_count(lay) > 1   // :close / :q with splits → close window
+                        elif is_winclose(cmd_buf) and window.layout_count(lay) > 1   // :close / :q with splits → close window
                             pending_wcmd = 3
                         elif is_only(cmd_buf)            // :only — keep just the active window
                             pending_wcmd = 5
@@ -5111,15 +4826,15 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                     elif b == 'v' or b == 'V' or b == 22 // Ctrl-W v / V / Ctrl-V — vertical split
                         pending_wcmd = 4
                     elif b == 'w' or b == 23             // Ctrl-W w / Ctrl-W Ctrl-W — cycle focus
-                        pending_focus = win_cycle_next(lay, awin)
+                        pending_focus = window.win_cycle_next(lay, awin)
                     elif b == 'h'                        // Ctrl-W h — focus window to the left
-                        pending_focus = window_in_dir(lay, awin, Rect { x: 0, y: 0, w: cols, h: rows }, 0, win_ww, win_hw)
+                        pending_focus = window.window_in_dir(lay, awin, window.rect(0, 0, cols, rows), 0, win_ww, win_hw)
                     elif b == 'j'                        // Ctrl-W j — focus window below
-                        pending_focus = window_in_dir(lay, awin, Rect { x: 0, y: 0, w: cols, h: rows }, 1, win_ww, win_hw)
+                        pending_focus = window.window_in_dir(lay, awin, window.rect(0, 0, cols, rows), 1, win_ww, win_hw)
                     elif b == 'k'                        // Ctrl-W k — focus window above
-                        pending_focus = window_in_dir(lay, awin, Rect { x: 0, y: 0, w: cols, h: rows }, 2, win_ww, win_hw)
+                        pending_focus = window.window_in_dir(lay, awin, window.rect(0, 0, cols, rows), 2, win_ww, win_hw)
                     elif b == 'l'                        // Ctrl-W l — focus window to the right
-                        pending_focus = window_in_dir(lay, awin, Rect { x: 0, y: 0, w: cols, h: rows }, 3, win_ww, win_hw)
+                        pending_focus = window.window_in_dir(lay, awin, window.rect(0, 0, cols, rows), 3, win_ww, win_hw)
                     elif b == 'c' or b == 'q' or b == 17 // Ctrl-W c / q / Ctrl-Q — close active window
                         pending_wcmd = 3
                     elif b == 'o' or b == 15             // Ctrl-W o / Ctrl-O — close all but the active window
@@ -5326,16 +5041,16 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
             win_buf = list.push(win_buf, cur_buf)   // new window shows the current buffer
             win_ww = list.push(win_ww, 100)
             win_hw = list.push(win_hw, 100)
-            lay = layout_split(lay, awin, newid, vertical)
+            lay = window.layout_split(lay, awin, newid, vertical)
             awin = newid                                   // focus the new window
-            lsp_info = (if vertical then "vsplit (" else "split (") + str.from_int(layout_count(lay)) + " windows)"
+            lsp_info = (if vertical then "vsplit (" else "split (") + str.from_int(window.layout_count(lay)) + " windows)"
             changed = true
         elif pending_wcmd == 3                // Ctrl-W c / Ctrl-W q / :close / :q — close active window
-            if layout_count(lay) > 1
-                let rem = layout_remove(lay, awin)
+            if window.layout_count(lay) > 1
+                let rem = window.layout_remove(lay, awin)
                 if list.len(rem) > 0
                     lay = rem[0]
-                    let ids = layout_winids(lay, [])
+                    let ids = window.layout_winids(lay, [])
                     let surv = ids[0]            // first surviving window takes focus
                     awin = surv
                     if win_buf[surv] == cur_buf
@@ -5349,11 +5064,11 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                         want_path = bufs_path[tb]
                         want_y = win_cy[surv]
                         want_x = win_cx[surv]
-                    lsp_info = "closed (" + str.from_int(layout_count(lay)) + " windows)"
+                    lsp_info = "closed (" + str.from_int(window.layout_count(lay)) + " windows)"
                     changed = true
         elif pending_wcmd == 5                // Ctrl-W o / :only — keep just the active window
-            if layout_count(lay) > 1
-                lay = LWin(awin)              // active window keeps its live ed/top/left
+            if window.layout_count(lay) > 1
+                lay = window.LWin(awin)              // active window keeps its live ed/top/left
                 lsp_info = "only"
                 changed = true
         pending_wcmd = 0
