@@ -3997,7 +3997,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var ts_enabled = util.index_of_str(file_to_text(cfg_path), "treesitter = true") >= 0
     // `[options] clipboard = "unnamedplus"` (or "unnamed") → sync the unnamed
     // register with the OS clipboard, like Neovim's unnamedplus.
-    let clip_on = util.index_of_str(file_to_text(cfg_path), "clipboard = \"unnamed") >= 0
+    let clip_on = clipboard_enabled(cfg_path)
     var diag_li: [Int] = []
     var diag_msgs: [Str] = []
     var lsp_reqid = 1                    // monotonic id for gd/K requests (init used 1)
@@ -5108,6 +5108,31 @@ fn default_nvim_dir() -> Str [io]
 
 fn clip_ends_nl(s: Str) -> Bool
     str.len(s) > 0 and (str.byte_at(s, str.len(s) - 1) ?? 0) == '\n'
+
+// True when `[options] clipboard = "unnamed[plus]"` is set — a proper section
+// parse (whitespace / alignment / inline-comment tolerant), not a brittle
+// fixed-spacing substring match.
+fn clipboard_enabled(cfg_path: Str) -> Bool [io]
+    match fs.read(cfg_path)
+        None => false
+        Some(content) =>
+            let lines = str.split_lines(content)
+            var in_opt = false
+            var on = false
+            var i = 0
+            let n = list.len(lines)
+            while i < n
+                let raw = str.trim(lines[i])
+                if str.len(raw) > 0 and (str.byte_at(raw, 0) ?? 0) != 35
+                    if (str.byte_at(raw, 0) ?? 0) == 91
+                        in_opt = raw == "[options]"
+                    elif in_opt
+                        let eq = util.index_of_byte(raw, 61)
+                        if eq > 0 and str.trim(str.slice(raw, 0, eq)) == "clipboard"
+                            let v = util.strip_quotes(str.trim(util.strip_inline_comment(str.slice(raw, eq + 1, str.len(raw)))))
+                            on = util.index_of_str(v, "unnamed") >= 0
+                i = i + 1
+            on
 
 // Push `text` to the OS clipboard with OSC 52: ESC ] 52 ; c ; <base64> ESC \.
 fn clip_copy(text: Str, linewise: Bool) [io]
