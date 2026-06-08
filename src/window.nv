@@ -266,6 +266,21 @@ fn window_in_dir(lay: Layout, awin: Int, screen: Rect, dir: Int, ww: [Int], hw: 
         j = j + 5
     best
 
+@intent("""The id of the leaf window whose rect contains the cell (px, py), or
+-1 if none.  Used to route a mouse click to the window under the pointer.""")
+fn window_at(lay: Layout, screen: Rect, ww: [Int], hw: [Int], px: Int, py: Int) -> Int
+    let rects = layout_rects(lay, screen, ww, hw, [])
+    var i = 0
+    while i < list.len(rects)
+        let wx = rects[i + 1]
+        let wy = rects[i + 2]
+        let w = rects[i + 3]
+        let h = rects[i + 4]
+        if px >= wx and px < wx + w and py >= wy and py < wy + h
+            return rects[i]
+        i = i + 5
+    0 - 1
+
 @intent("""Remove window `winid` from the tree, returning a 0-or-1 element list
 (the surviving subtree, or empty if `winid` was the whole tree).  An LRow/LCol
 that loses a child and is left with exactly one collapses to that child (no

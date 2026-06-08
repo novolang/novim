@@ -4174,16 +4174,58 @@ fn term_cols() -> Int [io]
 // Recognising these stops their letters being fed in as editor commands —
 // e.g. a focus-in `ESC[I` would otherwise read as `I` (insert mode).
 fn csi_seq() -> Int [io]
+    csi_finish(novo_pty_stdin_read_byte_h())
+
+// Finish a CSI sequence given its already-read first byte (used when the
+// dispatcher peeked one byte to detect an SGR mouse `<`).  Returns
+// param*256 + finalByte, or the (negative) read error.
+fn csi_finish(first: Int) -> Int [io]
     var param = 0
-    var b = novo_pty_stdin_read_byte_h()
-    if b == '<' or b == '=' or b == '>' or b == '?'   // private-parameter prefix (incl. SGR mouse `<`)
+    var b = first
+    if b == '<' or b == '=' or b == '>' or b == '?'   // private-parameter prefix
         b = novo_pty_stdin_read_byte_h()
-    while b >= '0' and b <= '9'                 // leading decimal parameter (mouse: the button)
+    while b >= '0' and b <= '9'                 // leading decimal parameter
         param = param * 10 + (b - '0')
         b = novo_pty_stdin_read_byte_h()
-    while b >= ' ' and b <= '?'                 // further params / intermediates (mouse: ;col;row)
+    while b >= ' ' and b <= '?'                 // further params / intermediates
         b = novo_pty_stdin_read_byte_h()
     if b < 0 then b else param * 256 + b
+
+// Parse an SGR mouse report after the `ESC[<` prefix is consumed.  Returns
+// [button, col, row, final] (col/row 1-based; final 'M' press / 'm' release).
+fn mouse_seq() -> [Int] [io]
+    var btn = 0
+    var b = novo_pty_stdin_read_byte_h()
+    while b >= '0' and b <= '9'
+        btn = btn * 10 + (b - '0')
+        b = novo_pty_stdin_read_byte_h()
+    var col = 0
+    b = novo_pty_stdin_read_byte_h()
+    while b >= '0' and b <= '9'
+        col = col * 10 + (b - '0')
+        b = novo_pty_stdin_read_byte_h()
+    var row = 0
+    b = novo_pty_stdin_read_byte_h()
+    while b >= '0' and b <= '9'
+        row = row * 10 + (b - '0')
+        b = novo_pty_stdin_read_byte_h()
+    [btn, col, row, b]
+
+// Inverse of vis_col: the raw byte index at (or just past) visual column
+// `vcol` in a line, accounting for tab expansion.  Used to map a mouse click's
+// screen column back to a buffer column.
+fn vis_to_byte(raw: Str, vcol: Int, ts: Int) -> Int
+    var b = 0
+    var v = 0
+    let n = str.len(raw)
+    while b < n and v < vcol
+        let ch = str.byte_at(raw, b) ?? 0
+        if ch == '\t'
+            v = v + (ts - (v % ts))
+        else
+            v = v + 1
+        b = b + 1
+    b
 
 // Apply an arrow / Home / End key (decoded from a CSI/SS3 final byte) as a
 // cursor move; any other final byte is ignored (returns `ed` unchanged), so
@@ -4519,55 +4561,85 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 if b == '\e'
                     let nx = novo_pty_stdin_read_byte_h()
                     if nx == '[' or nx == 'O'
-                        let packed = csi_seq()
-                        if packed >= 0 and not cmd_mode and not search_mode
-                            let fin = packed % 256
-                            let prm = packed / 256
-                            let ins = st.mode == 1 or st.mode == 4
-                            if fin == '~' and prm == 5         // PageUp (~ Ctrl-B)
-                                ed = clamp(Editor { lines: ed.lines, cy: scroll_new_cy(ed, rows, 3), cx: ed.cx })
-                                top = scroll_new_top(ed.cy, top, rows, 3)
-                            elif fin == '~' and prm == 6       // PageDown (~ Ctrl-F)
-                                ed = clamp(Editor { lines: ed.lines, cy: scroll_new_cy(ed, rows, 2), cx: ed.cx })
-                                top = scroll_new_top(ed.cy, top, rows, 2)
-                            elif fin == '~' and prm == 3       // Delete — forward-delete the char at the cursor
-                                if ins
-                                    let ln = line_at(ed, ed.cy)
-                                    if ed.cx < str.len(ln)
-                                        es = edit_push_undo(es, ed)
-                                        let newln = str.slice(ln, 0, ed.cx) + str.slice(ln, ed.cx + 1, str.len(ln))
-                                        ed = Editor { lines: set_line(ed.lines, ed.cy, newln), cy: ed.cy, cx: ed.cx }
-                                else
-                                    let dstep = feed_edit(ed, st, km, es, 'x')   // normal/visual: like `x`
-                                    ed = dstep.ed
-                                    st = dstep.st
-                                    es = dstep.es
-                            elif fin == '~' and (prm == 1 or prm == 7)   // Home
-                                ed = arrow_move(ed, 'H', ins)
-                            elif fin == '~' and (prm == 4 or prm == '\b')   // End
-                                ed = arrow_move(ed, 'F', ins)
-                            elif (fin == 'M' or fin == 'm') and (prm == 64 or prm == 65)   // mouse wheel
-                                // Scroll the viewport ~3 lines per tick and keep the
-                                // cursor on screen — so the wheel does real buffer
-                                // scrolling instead of the terminal's scrollback.
-                                let body = rows - 1
-                                let nl = list.len(ed.lines)
-                                var t = 0
-                                while t < 3
-                                    if prm == 65                 // wheel down — view down
-                                        top = if top + 1 < nl then top + 1 else top
-                                    else                         // wheel up — view up
-                                        top = if top - 1 > 0 then top - 1 else 0
-                                    t = t + 1
-                                var ncy = ed.cy
-                                if ncy < top
-                                    ncy = top
-                                if ncy > top + body - 1
-                                    ncy = top + body - 1
-                                ed = clamp(Editor { lines: ed.lines, cy: ncy, cx: ed.cx })
-                            elif fin != '~'                    // arrows / Home(H) / End(F)
-                                ed = arrow_move(ed, fin, ins)
-                        esc_skip = true
+                        // Peek one byte after a CSI `[` to detect an SGR mouse
+                        // report (`ESC[<button;col;rowM`); SS3 `O` never is.
+                        var c1 = 0 - 1
+                        var is_mouse = false
+                        if nx == '['
+                            c1 = novo_pty_stdin_read_byte_h()
+                            is_mouse = c1 == '<'
+                        if is_mouse
+                            let mev = mouse_seq()              // [button, col, row, final]
+                            if list.len(mev) == 4 and not cmd_mode and not search_mode
+                                let btn = mev[0]
+                                let mfin = mev[3]
+                                if btn == 64 or btn == 65         // wheel up / down — scroll the viewport
+                                    let body = rows - 1
+                                    let nl = list.len(ed.lines)
+                                    var t = 0
+                                    while t < 3
+                                        if btn == 65
+                                            top = if top + 1 < nl then top + 1 else top
+                                        else
+                                            top = if top - 1 > 0 then top - 1 else 0
+                                        t = t + 1
+                                    var ncy = ed.cy
+                                    if ncy < top
+                                        ncy = top
+                                    if ncy > top + body - 1
+                                        ncy = top + body - 1
+                                    ed = clamp(Editor { lines: ed.lines, cy: ncy, cx: ed.cx })
+                                elif mfin == 'M' and btn == 0     // left-click press — position the caret
+                                    let scr = window.rect(0, 0, cols, rows)
+                                    let px = mev[1] - 1
+                                    let py = mev[2] - 1
+                                    let wid = window.window_at(lay, scr, win_ww, win_hw, px, py)
+                                    if wid >= 0 and wid != awin
+                                        pending_focus = wid       // clicked a different pane → focus it
+                                    elif wid == awin
+                                        let wr = window.window_rect(lay, awin, scr, win_ww, win_hw)
+                                        let r0 = py - wr.y
+                                        if r0 >= 0 and r0 < wr.h - 1   // a text row (not the status line)
+                                            let nl = list.len(ed.lines)
+                                            let ncy = if top + r0 < nl then top + r0 else (if nl > 0 then nl - 1 else 0)
+                                            let numbered = opts.number or opts.relativenumber
+                                            let numw = if num_digits(nl) > 3 then num_digits(nl) else 3
+                                            let gutter = if numbered then numw + 1 else 0
+                                            let vcol = (px - wr.x) - gutter + left
+                                            let ncx = vis_to_byte(line_at(ed, ncy), if vcol > 0 then vcol else 0, opts.tabstop)
+                                            ed = clamp(Editor { lines: ed.lines, cy: ncy, cx: ncx })
+                            esc_skip = true
+                        else
+                            let packed = if nx == '[' then csi_finish(c1) else csi_seq()
+                            if packed >= 0 and not cmd_mode and not search_mode
+                                let fin = packed % 256
+                                let prm = packed / 256
+                                let ins = st.mode == 1 or st.mode == 4
+                                if fin == '~' and prm == 5         // PageUp (~ Ctrl-B)
+                                    ed = clamp(Editor { lines: ed.lines, cy: scroll_new_cy(ed, rows, 3), cx: ed.cx })
+                                    top = scroll_new_top(ed.cy, top, rows, 3)
+                                elif fin == '~' and prm == 6       // PageDown (~ Ctrl-F)
+                                    ed = clamp(Editor { lines: ed.lines, cy: scroll_new_cy(ed, rows, 2), cx: ed.cx })
+                                    top = scroll_new_top(ed.cy, top, rows, 2)
+                                elif fin == '~' and prm == 3       // Delete — forward-delete the char at the cursor
+                                    if ins
+                                        let ln = line_at(ed, ed.cy)
+                                        if ed.cx < str.len(ln)
+                                            es = edit_push_undo(es, ed)
+                                            let newln = str.slice(ln, 0, ed.cx) + str.slice(ln, ed.cx + 1, str.len(ln))
+                                            ed = Editor { lines: set_line(ed.lines, ed.cy, newln), cy: ed.cy, cx: ed.cx }
+                                    else
+                                        let dstep = feed_edit(ed, st, km, es, 'x')   // normal/visual: like `x`
+                                        ed = dstep.ed
+                                        st = dstep.st
+                                        es = dstep.es
+                                elif fin == '~' and (prm == 1 or prm == 7)   // Home
+                                    ed = arrow_move(ed, 'H', ins)
+                                elif fin == '~' and (prm == 4 or prm == '\b')   // End
+                                    ed = arrow_move(ed, 'F', ins)
+                                elif fin != '~'                    // arrows / Home(H) / End(F)
+                                    ed = arrow_move(ed, fin, ins)
+                            esc_skip = true
                     elif nx >= 0
                         esc_pushback = nx
                 if esc_skip
