@@ -1547,6 +1547,53 @@ fn vblock_fill(ed: Editor, st: InputState, ch: Int) -> Step
         y = y + 1
     Step { ed: clamp(Editor { lines: lines, cy: ylo, cx: xlo }), st: ist_done(st) }
 
+// Enter Insert for a blockwise `I` / `A` / `c`: `I` at the block's left column,
+// `A` just past its right column (padding a short first row with spaces), `c`
+// deletes the block first then inserts at the left.  Only the first row is
+// edited live; the driver records the column band and, on Esc, replays this
+// row's inserted text onto every other selected row (block_replicate).
+fn feed_vblock_insert(ed: Editor, st: InputState, b: Int) -> Step
+    let ylo = if st.avy < ed.cy then st.avy else ed.cy
+    let xlo = if st.avx < ed.cx then st.avx else ed.cx
+    let xhi = if st.avx < ed.cx then ed.cx else st.avx
+    if b == 'A'
+        let col = xhi + 1
+        let line = if ylo < list.len(ed.lines) then ed.lines[ylo] else ""
+        let llen = str.len(line)
+        let padded = if llen < col then line + disp.nspaces(col - llen) else line
+        return Step { ed: clamp_insert(Editor { lines: set_line(ed.lines, ylo, padded), cy: ylo, cx: col }), st: ist_insert(st) }
+    if b == 'c'
+        let del = vblock_delete(ed, st)
+        return Step { ed: clamp_insert(Editor { lines: del.ed.lines, cy: ylo, cx: xlo }), st: ist_insert(st) }
+    return Step { ed: clamp_insert(Editor { lines: ed.lines, cy: ylo, cx: xlo }), st: ist_insert(st) }
+
+// Replay the first row's block-insert onto rows [ylo+1, yhi]: the inserted text
+// is what row `ylo` grew by since insert began (`flen0` = its length then), i.e.
+// the span `[col, col + grew)`.  For `A` (append) a short row is space-padded to
+// `col` first; for `I`/`c` a row shorter than `col` is skipped (vim).  Called by
+// the driver when a block-insert ends; the undo snapshot taken at `Ctrl-V`
+// already covers the whole change.
+fn block_replicate(ed: Editor, ylo: Int, yhi: Int, col: Int, flen0: Int, append: Bool) -> Editor
+    let first = if ylo < list.len(ed.lines) then ed.lines[ylo] else ""
+    let flen = str.len(first)
+    let grew = flen - flen0
+    let ins = if grew > 0 and col + grew <= flen then str.slice(first, col, col + grew) else ""
+    if str.len(ins) == 0
+        return ed
+    var lines = ed.lines
+    var y = ylo + 1
+    while y <= yhi
+        let line = if y < list.len(lines) then lines[y] else ""
+        let n = str.len(line)
+        if append
+            let padded = if n < col then line + disp.nspaces(col - n) else line
+            let pn = str.len(padded)
+            lines = set_line(lines, y, str.slice(padded, 0, col) + ins + str.slice(padded, col, pn))
+        elif col <= n
+            lines = set_line(lines, y, str.slice(line, 0, col) + ins + str.slice(line, col, n))
+        y = y + 1
+    Editor { lines: lines, cy: ylo, cx: col }
+
 fn feed_visual(ed: Editor, st: InputState, b: Int) -> Step
     let cntp = if st.count > 0 then st.count else 1
     // Pending multi-key motions (extend the selection, stay visual).
@@ -1594,7 +1641,9 @@ fn feed_visual(ed: Editor, st: InputState, b: Int) -> Step
             return vblock_delete(ed, st)
         if b == 'r'                             // r<char> — fill every cell
             return Step { ed: ed, st: ist_visual_pending(st, 60) }
-        if b == 'c' or b == 's' or b == 'y' or b == 'I' or b == 'A' or b == '>' or b == '<' or b == '~' or b == 'u' or b == 'U' or b == 'J' or b == 'p' or b == 'i' or b == 'a'
+        if b == 'I' or b == 'A' or b == 'c'     // block insert / append / change
+            return feed_vblock_insert(ed, st, b)
+        if b == 's' or b == 'y' or b == '>' or b == '<' or b == '~' or b == 'u' or b == 'U' or b == 'J' or b == 'p' or b == 'i' or b == 'a'
             return Step { ed: ed, st: ist_visual_keep(st, 5) }
     if b == 'd' or b == 'x'                     // d / x — delete selection
         return visual_apply(ed, st, 'd')
@@ -3969,6 +4018,15 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var comp_cands: [Str] = []           // filtered candidate labels
     var comp_idx = 0                     // current candidate
     var comp_start = 0                   // column where the completed prefix begins
+    // Blockwise-visual insert (`<C-v>…I/A/c`): the column band + row range are
+    // captured when the insert starts; on Esc the first row's inserted text is
+    // replayed onto every other selected row (block_replicate).
+    var binsert_active = false
+    var binsert_ylo = 0
+    var binsert_yhi = 0
+    var binsert_col = 0
+    var binsert_append = false
+    var binsert_flen0 = 0                // first row's length when insert began (post delete/pad)
     // Jumplist (browser-style back/forward) for Ctrl-O / Ctrl-I.  Each stack
     // holds "y|x|path" entries (file-aware, so a jump across files round-trips);
     // a jump pushes the origin onto `jback` and clears `jfwd`.
@@ -4680,10 +4738,33 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                     let jy = ed.cy                    // record G/gg/n/N/{/}/%/*/# jumps
                     let jx = ed.cx
                     let wasjump = is_jump_key(st, b)
+                    // Block-insert start: capture the column band + row range from
+                    // the still-live blockwise selection before feed enters Insert.
+                    let pre_mode = st.mode
+                    if st.mode == 5 and (b == 'I' or b == 'A' or b == 'c')
+                        binsert_ylo = if st.avy < ed.cy then st.avy else ed.cy
+                        binsert_yhi = if st.avy < ed.cy then ed.cy else st.avy
+                        let bxl = if st.avx < ed.cx then st.avx else ed.cx
+                        let bxh = if st.avx < ed.cx then ed.cx else st.avx
+                        binsert_col = if b == 'A' then bxh + 1 else bxl
+                        binsert_append = b == 'A'
+                        binsert_active = true
                     let estep = feed_edit(ed, st, km, es, b)
                     ed = estep.ed
                     st = estep.st
                     es = estep.es
+                    // Insert just began (mode 5 → 1): record the first row's
+                    // length now (after any `c` delete / `A` pad) so the inserted
+                    // span can be diffed precisely on Esc.
+                    if binsert_active and pre_mode == 5 and st.mode == 1
+                        binsert_flen0 = if binsert_ylo < list.len(ed.lines) then str.len(ed.lines[binsert_ylo]) else 0
+                    // Block-insert end (Esc left Insert): replay the first row's
+                    // inserted text onto the rest of the column.  Skip if the
+                    // insert spilled onto another line (e.g. Enter) — like vim.
+                    if binsert_active and pre_mode == 1 and st.mode == 0
+                        if ed.cy == binsert_ylo
+                            ed = block_replicate(ed, binsert_ylo, binsert_yhi, binsert_col, binsert_flen0, binsert_append)
+                        binsert_active = false
                     if wasjump and ed.cy != jy
                         jback = list.push(jback, jentry(curpath, jy, jx))
                         jfwd = []
