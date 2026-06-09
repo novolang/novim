@@ -246,6 +246,11 @@ fn find_mapleader(text: Str) -> Str
 // expand cleanly (no NUL sentinel, non-empty LHS) contributes a pair; everything
 // else (other modes, function RHS, F-keys) is skipped.
 fn scrape_n_maps(text: Str, leader: Str) -> [Str]
+    scrape_mode_maps(text, leader, "n")
+
+// Like scrape_n_maps but for an arbitrary single-char vim mode (`"n"`, `"v"`,
+// `"x"`, `"i"`), so the importer can pull visual / insert maps too.
+fn scrape_mode_maps(text: Str, leader: Str, want_mode: Str) -> [Str]
     var out: [Str] = []
     let lines = str.split_lines(text)
     var li = 0
@@ -258,7 +263,7 @@ fn scrape_n_maps(text: Str, leader: Str) -> [Str]
             // arg1: mode
             let p0 = skip_ws(raw, at + 15)
             let mode = read_dquote(raw, p0)
-            if mode.ok and mode.val == "n"
+            if mode.ok and mode.val == want_mode
                 let c1 = util.index_of_byte_from(raw, ',', mode.next)
                 if c1 >= 0
                     let p1 = skip_ws(raw, c1 + 1)
