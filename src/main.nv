@@ -2360,6 +2360,48 @@ fn ex_sort(ed: Editor, cmd: Str) -> Editor
         ls = list.push(ls, "")               // buffer always keeps one line
     clamp(Editor { lines: ls, cy: 0, cx: 0 })
 
+@intent("""Apply `:move` (copy=false) / `:copy` (copy=true) of the current line
+to after the resolved address.  Move relocates the line (no-op for `:m .`);
+copy duplicates it.  Cursor lands on the moved/copied line.""")
+fn ex_linemove(ed: Editor, cmd: Str, copy: Bool) -> Editor
+    let cur = ed.cy
+    let nl = list.len(ed.lines)
+    var tgt = excmd.move_addr(cmd, cur, nl)
+    if tgt < 0 - 1
+        tgt = 0 - 1                          // clamp to "before first line"
+    if tgt > nl - 1
+        tgt = nl - 1
+    let line = line_at(ed, cur)
+    if copy
+        var ls: [Str] = []
+        if tgt < 0
+            ls = list.push(ls, line)         // copy to the very top
+        var i = 0
+        while i < nl
+            ls = list.push(ls, ed.lines[i])
+            if i == tgt
+                ls = list.push(ls, line)
+            i = i + 1
+        let ncy = if tgt < 0 then 0 else tgt + 1
+        clamp(Editor { lines: ls, cy: ncy, cx: first_nonblank(line) })
+    elif tgt == cur
+        ed                                   // ":m ." — no-op
+    else
+        var ls: [Str] = []
+        if tgt < 0
+            ls = list.push(ls, line)         // move to the very top
+        var i = 0
+        while i < nl
+            if i != cur
+                ls = list.push(ls, ed.lines[i])
+            if i == tgt and i != cur
+                ls = list.push(ls, line)
+            i = i + 1
+        // The moved line sits just past the (possibly shifted) target: removing
+        // `cur` shifts everything above `tgt` down one when cur <= tgt.
+        let ncy = if tgt < 0 then 0 elif cur <= tgt then tgt else tgt + 1
+        clamp(Editor { lines: ls, cy: ncy, cx: first_nonblank(line) })
+
 // Serialise the line buffer to file text (one trailing newline per line).
 fn buf_to_str(lines: [Str]) -> Str
     var s = ""
@@ -3478,6 +3520,9 @@ fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
                 elif excmd.is_sort(cmd_buf)
                     es = edit_push_undo(es, ed)
                     ed = ex_sort(ed, cmd_buf)
+                elif excmd.move_kind(cmd_buf) != 0
+                    es = edit_push_undo(es, ed)
+                    ed = ex_linemove(ed, cmd_buf, excmd.move_kind(cmd_buf) == 2)
                 elif excmd.is_goto(cmd_buf)
                     ed = ex_goto(ed, cmd_buf)
                 else
@@ -4553,6 +4598,9 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                         elif excmd.is_sort(cmd_buf)
                             es = edit_push_undo(es, ed)
                             ed = ex_sort(ed, cmd_buf)
+                        elif excmd.move_kind(cmd_buf) != 0
+                            es = edit_push_undo(es, ed)
+                            ed = ex_linemove(ed, cmd_buf, excmd.move_kind(cmd_buf) == 2)
                         elif excmd.is_goto(cmd_buf)
                             jback = list.push(jback, jentry(curpath, ed.cy, ed.cx))
                             jfwd = []

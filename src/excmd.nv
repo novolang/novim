@@ -68,6 +68,86 @@ fn is_goto(cmd: Str) -> Bool
         i = i + 1
     true
 
+// ── `:move` / `:copy` line addressing ────────────────────────────────────
+// `:m {addr}` moves the current line to after {addr}; `:t`/`:co`/`:copy {addr}`
+// copies it there.  {addr} is a line address: a 1-indexed number, `$` (last
+// line), `0` (before the first line), `.` (current), or relative `+N` / `-N` /
+// `.+N` / `.-N`.  Ranges and the visual `'<,'>` form are a follow-on.
+
+fn is_alpha_byte(b: Int) -> Bool
+    (b >= 'a' and b <= 'z') or (b >= 'A' and b <= 'Z')
+
+// Parse a run of decimal digits at the start of `s` into an Int (0 if none).
+fn parse_uint(s: Str) -> Int
+    var v = 0
+    var i = 0
+    let n = str.len(s)
+    while i < n and (str.byte_at(s, i) ?? 0) >= '0' and (str.byte_at(s, i) ?? 0) <= '9'
+        v = v * 10 + ((str.byte_at(s, i) ?? 0) - '0')
+        i = i + 1
+    v
+
+// Classify a `:move` / `:copy` command: 0 = neither, 1 = move, 2 = copy.  The
+// leading alpha word must be exactly a move/copy alias AND be followed by an
+// address (so `:colo gruvbox` / `:copy` without an address don't match).
+fn move_kind(cmd: Str) -> Int
+    let c = str.trim(cmd)
+    let n = str.len(c)
+    if n == 0
+        return 0
+    var i = 0
+    while i < n and is_alpha_byte(str.byte_at(c, i) ?? 0)
+        i = i + 1
+    let word = str.slice(c, 0, i)
+    var kind = 0
+    if word == "m" or word == "mo" or word == "mov" or word == "move"
+        kind = 1
+    elif word == "t" or word == "co" or word == "cop" or word == "copy"
+        kind = 2
+    if kind == 0
+        return 0
+    var j = i
+    while j < n and (str.byte_at(c, j) ?? 0) == ' '
+        j = j + 1
+    if j >= n
+        return 0                       // ":m" with no address — not handled
+    let a0 = str.byte_at(c, j) ?? 0
+    let okaddr = (a0 >= '0' and a0 <= '9') or a0 == '$' or a0 == '.' or a0 == '+' or a0 == '-'
+    if okaddr then kind else 0
+
+// Resolve a `:move`/`:copy` address to a 0-based "place AFTER this line index"
+// (-1 = before the first line, nlines-1 = after the last).  Relative forms are
+// anchored at the current line `cur`.  Caller clamps to [-1, nlines-1].
+fn move_addr(cmd: Str, cur: Int, nlines: Int) -> Int
+    let c = str.trim(cmd)
+    let n = str.len(c)
+    var i = 0
+    while i < n and is_alpha_byte(str.byte_at(c, i) ?? 0)
+        i = i + 1
+    while i < n and (str.byte_at(c, i) ?? 0) == ' '
+        i = i + 1
+    let a = str.slice(c, i, n)
+    let m = str.len(a)
+    if m == 0
+        return cur
+    if a == "$"
+        return nlines - 1
+    let b0 = str.byte_at(a, 0) ?? 0
+    if b0 == '0' and m == 1
+        return 0 - 1                   // ":m 0" → before the first line
+    if b0 == '.' or b0 == '+' or b0 == '-'
+        let rest = if b0 == '.' then str.slice(a, 1, m) else a
+        if str.len(rest) == 0
+            return cur                 // bare "." → current line
+        let s0 = str.byte_at(rest, 0) ?? 0
+        if s0 == '+'
+            return cur + parse_uint(str.slice(rest, 1, str.len(rest)))
+        elif s0 == '-'
+            return cur - parse_uint(str.slice(rest, 1, str.len(rest)))
+        else
+            return cur
+    parse_uint(a) - 1                  // absolute N (1-indexed) → after index N-1
+
 // `:fmt` / `:format` — reformat the buffer via the language server.
 fn is_fmt(cmd: Str) -> Bool
     let c = str.trim(cmd)
