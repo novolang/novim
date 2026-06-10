@@ -2334,16 +2334,10 @@ fn csort(lines: [Str], numeric: Bool, icase: Bool) -> [Str]
         produced = produced + 1
     out
 
-@intent("""Sort the whole buffer's lines (`:sort`).  `:sort!` reverses; `u`
-drops duplicate lines; `n` sorts by the first number on each line; `i` is
-case-insensitive.  Leaves the cursor on the first line.""")
-fn ex_sort(ed: Editor, cmd: Str) -> Editor
-    let fl = excmd.sort_flags(cmd)
-    let rev = fl[0] == 1
-    let uniq = fl[1] == 1
-    let numeric = fl[2] == 1
-    let icase = fl[3] == 1
-    let base = if numeric or icase then csort(ed.lines, numeric, icase) else list.sort(ed.lines)
+// Sort + reverse + dedup a block of lines under the active flags (shared by the
+// whole-buffer and range paths of `:sort`).
+fn sort_apply(lines: [Str], rev: Bool, uniq: Bool, numeric: Bool, icase: Bool) -> [Str]
+    let base = if numeric or icase then csort(lines, numeric, icase) else list.sort(lines)
     let n = list.len(base)
     var ls: [Str] = []
     var i = 0
@@ -2356,9 +2350,50 @@ fn ex_sort(ed: Editor, cmd: Str) -> Editor
         if not dup
             ls = list.push(ls, line)
         i = i + 1
-    if list.len(ls) == 0
-        ls = list.push(ls, "")               // buffer always keeps one line
-    clamp(Editor { lines: ls, cy: 0, cx: 0 })
+    ls
+
+@intent("""Sort the buffer's lines (`:sort`), or just a line range (`:%sort`,
+`:2,5sort`, `:.,$sort`).  `:sort!` reverses; `u` drops duplicates; `n` sorts by
+the first number; `i` is case-insensitive.  Cursor lands on the first sorted
+line.""")
+fn ex_sort(ed: Editor, cmd: Str) -> Editor
+    let nl = list.len(ed.lines)
+    let rs = excmd.parse_range(cmd, ed.cy, nl)
+    let fl = excmd.sort_flags(rs.body)
+    let rev = fl[0] == 1
+    let uniq = fl[1] == 1
+    let numeric = fl[2] == 1
+    let icase = fl[3] == 1
+    if rs.has
+        // Sort only lines[rs.lo .. rs.hi]; splice the result back between the
+        // untouched prefix and suffix.
+        var seg: [Str] = []
+        var s = rs.lo
+        while s <= rs.hi
+            seg = list.push(seg, ed.lines[s])
+            s = s + 1
+        let sorted_seg = sort_apply(seg, rev, uniq, numeric, icase)
+        var ls: [Str] = []
+        var p = 0
+        while p < rs.lo
+            ls = list.push(ls, ed.lines[p])
+            p = p + 1
+        var q = 0
+        while q < list.len(sorted_seg)
+            ls = list.push(ls, sorted_seg[q])
+            q = q + 1
+        var r = rs.hi + 1
+        while r < nl
+            ls = list.push(ls, ed.lines[r])
+            r = r + 1
+        if list.len(ls) == 0
+            ls = list.push(ls, "")
+        clamp(Editor { lines: ls, cy: rs.lo, cx: 0 })
+    else
+        var ls = sort_apply(ed.lines, rev, uniq, numeric, icase)
+        if list.len(ls) == 0
+            ls = list.push(ls, "")           // buffer always keeps one line
+        clamp(Editor { lines: ls, cy: 0, cx: 0 })
 
 @intent("""Apply `:move` (copy=false) / `:copy` (copy=true) of the current line
 to after the resolved address.  Move relocates the line (no-op for `:m .`);

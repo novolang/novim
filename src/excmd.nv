@@ -153,12 +153,126 @@ fn is_fmt(cmd: Str) -> Bool
     let c = str.trim(cmd)
     c == "fmt" or c == "format"
 
+// ── Ex line ranges ───────────────────────────────────────────────────────
+// A leading range on an Ex command: `%` (whole file), `N,M`, a single address
+// `N`, `.` (current), `$` (last), or relative `.+K` / `-K` (any endpoint may
+// carry trailing `+K`/`-K` offsets).  Resolved to 0-based inclusive lines.
+// The visual `'<,'>` form needs a `:`-from-visual entry and is a follow-on.
+
+struct RangeSpec
+    lo:   Int
+    hi:   Int
+    body: Str
+    has:  Bool
+
+fn range_spec(lo: Int, hi: Int, body: Str, has: Bool) -> RangeSpec
+    RangeSpec { lo: lo, hi: hi, body: body, has: has }
+
+// Parse one address at `s[start]`.  Returns `[found(0/1), value0based, next_i]`.
+fn addr_parse(s: Str, start: Int, cur: Int, nlines: Int) -> [Int]
+    let n = str.len(s)
+    var i = start
+    if i >= n
+        return [0, 0, start]
+    var base = 0
+    var found = false
+    let b = str.byte_at(s, i) ?? 0
+    if b >= '0' and b <= '9'
+        var v = 0
+        while i < n and (str.byte_at(s, i) ?? 0) >= '0' and (str.byte_at(s, i) ?? 0) <= '9'
+            v = v * 10 + ((str.byte_at(s, i) ?? 0) - '0')
+            i = i + 1
+        base = v - 1                       // 1-indexed source → 0-based
+        found = true
+    elif b == '.'
+        base = cur
+        i = i + 1
+        found = true
+    elif b == '$'
+        base = nlines - 1
+        i = i + 1
+        found = true
+    elif b == '+' or b == '-'
+        base = cur                         // bare +K / -K is relative to current
+        found = true
+    if not found
+        return [0, 0, start]
+    var more = true
+    while more and i < n
+        let c = str.byte_at(s, i) ?? 0
+        if c == '+' or c == '-'
+            i = i + 1
+            var k = 0
+            while i < n and (str.byte_at(s, i) ?? 0) >= '0' and (str.byte_at(s, i) ?? 0) <= '9'
+                k = k * 10 + ((str.byte_at(s, i) ?? 0) - '0')
+                i = i + 1
+            if k == 0
+                k = 1                      // bare `+`/`-` means ±1
+            if c == '+'
+                base = base + k
+            else
+                base = base - k
+        else
+            more = false
+    [1, base, i]
+
+// Parse an optional leading range off `cmd`.  `cur`/`nlines` resolve `.`/`$`
+// and relatives.  Returns the 0-based inclusive [lo,hi] (clamped/ordered), the
+// remaining command body, and whether a range was present.
+fn parse_range(cmd: Str, cur: Int, nlines: Int) -> RangeSpec
+    let c = str.trim(cmd)
+    let n = str.len(c)
+    if n == 0
+        return range_spec(0, 0, c, false)
+    if (str.byte_at(c, 0) ?? 0) == '%'
+        return range_spec(0, nlines - 1, str.trim(str.slice(c, 1, n)), true)
+    let a1 = addr_parse(c, 0, cur, nlines)
+    if a1[0] == 0
+        return range_spec(0, 0, c, false)
+    var lo = a1[1]
+    var hi = a1[1]
+    var i = a1[2]
+    if i < n and (str.byte_at(c, i) ?? 0) == ','
+        let a2 = addr_parse(c, i + 1, cur, nlines)
+        if a2[0] == 1
+            hi = a2[1]
+            i = a2[2]
+    if lo > hi                              // `:5,2` → swap
+        let t = lo
+        lo = hi
+        hi = t
+    if lo < 0
+        lo = 0
+    if hi > nlines - 1
+        hi = nlines - 1
+    if hi < 0
+        hi = 0
+    range_spec(lo, hi, str.trim(str.slice(c, i, n)), true)
+
+// The command body with any leading range stripped (for `is_*` matching).
+fn range_body(cmd: Str) -> Str
+    let c = str.trim(cmd)
+    let n = str.len(c)
+    if n == 0
+        return c
+    if (str.byte_at(c, 0) ?? 0) == '%'
+        return str.trim(str.slice(c, 1, n))
+    let a1 = addr_parse(c, 0, 0, n)
+    if a1[0] == 0
+        return c
+    var i = a1[2]
+    if i < n and (str.byte_at(c, i) ?? 0) == ','
+        let a2 = addr_parse(c, i + 1, 0, n)
+        if a2[0] == 1
+            i = a2[2]
+    str.trim(str.slice(c, i, n))
+
 // `:sort[!] [flags]` — sort the buffer's lines.  `!` reverses (descending);
 // `u` removes duplicate lines; `n` sorts by the first number on each line; `i`
 // sorts case-insensitively.  Flag letters follow a space (`:sort n`) or pack
 // after `!` (`:sort!u`).  `n`+`i` combine; `u` dedups by the active key.
 fn is_sort(cmd: Str) -> Bool
-    let c = str.trim(cmd)
+    let c = range_body(cmd)                // tolerate a leading range (:%sort, :2,4sort)
     if str.starts_with(c, "sort")
         let rest = str.slice(c, 4, str.len(c))
         let r0 = if str.len(rest) > 0 then str.byte_at(rest, 0) ?? 0 else 0
