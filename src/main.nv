@@ -64,6 +64,11 @@ fn ist_insert(st: InputState) -> InputState
 fn ist_set_reg(st: InputState, reg: Str, lw: Bool) -> InputState
     InputState { count: st.count, pending: st.pending, mode: st.mode, reg: reg, reg_lw: lw, search: st.search, avy: st.avy, avx: st.avx }
 
+// A copy of `st` with no search pattern — used only to render with search
+// highlight suppressed (`:noh`) while the real `st.search` is kept for `n`/`N`.
+fn ist_blank_search(st: InputState) -> InputState
+    InputState { count: st.count, pending: st.pending, mode: st.mode, reg: st.reg, reg_lw: st.reg_lw, search: "", avy: st.avy, avx: st.avx }
+
 // Record the last search pattern (after `/pattern<Enter>`).
 fn ist_set_search(st: InputState, pat: Str) -> InputState
     InputState { count: 0, pending: 0, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: pat, avy: st.avy, avx: st.avx }
@@ -4043,6 +4048,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var search_mode = false
     var search_buf = ""
     var search_back = false
+    var hl_off = false                   // `:noh` — suppress search highlight until the next search
     var zpend = false                    // awaiting the 2nd byte of a `z` scroll command
     var esc_pushback = 0 - 99            // one-byte pushback: the key after a lone ESC
     var last_subst = ""                  // last :s command, for `&`
@@ -4370,6 +4376,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                         elif is_set(cmd_buf)
                             opts = apply_set(opts, cmd_buf)
                             left = hscroll_for(left, ed, opts, cols)
+                        elif excmd.is_noh(cmd_buf)
+                            hl_off = true                 // hide the highlight; keep the pattern for n/N
                         elif excmd.is_fmt(cmd_buf)
                             if lsp_phase == 2
                                 lsp_reqid = lsp_reqid + 1
@@ -4618,6 +4626,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 elif search_mode
                     if b == '\r' or b == '\n'
                         st = ist_set_search(st, search_buf)
+                        hl_off = false                   // a new search re-lights the highlight
                         jback = list.push(jback, jentry(curpath, ed.cy, ed.cx))
                         jfwd = []
                         ed = find_next(ed, search_buf, not search_back)
@@ -4839,6 +4848,9 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                         let cb = clip_paste()
                         if str.len(cb) > 0
                             st = ist_set_reg(st, cb, clip_ends_nl(cb))
+                    // A search-repeat re-lights the highlight cleared by `:noh`.
+                    if hl_off and st.mode == 0 and (b == 'n' or b == 'N' or b == '*' or b == '#')
+                        hl_off = false
                     let pre_reg = st.reg
                     // Block-insert start: capture the column band + row range from
                     // the still-live blockwise selection before feed enters Insert.
@@ -5136,7 +5148,9 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
             if ts_enabled and ends_with_nv(curpath) and curtxt != ts_lasttext
                 ts_lasttext = curtxt
                 ts_spans_cache = ts.ts_spans(ts_grammar, ts_queries, curtxt)
-            paint_frame(ed, lay, awin, cols, rows, win_cy, win_cx, win_top, win_left, win_buf, win_ww, win_hw, cur_buf, bufs_text, bufs_path, curpath, top, left, st, cs, opts, diag_li, diag_msgs, lsp_info, modified, ts_spans_cache)
+            // `:noh` renders with the highlight suppressed (search pattern kept).
+            let rst = if hl_off then ist_blank_search(st) else st
+            paint_frame(ed, lay, awin, cols, rows, win_cy, win_cx, win_top, win_left, win_buf, win_ww, win_hw, cur_buf, bufs_text, bufs_path, curpath, top, left, rst, cs, opts, diag_li, diag_msgs, lsp_info, modified, ts_spans_cache)
             if cmd_mode
                 cup(rows, 1)
                 csi()

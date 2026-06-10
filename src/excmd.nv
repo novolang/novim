@@ -73,6 +73,12 @@ fn is_fmt(cmd: Str) -> Bool
     let c = str.trim(cmd)
     c == "fmt" or c == "format"
 
+// `:noh` / `:nohl` / `:nohlsearch` — clear the search highlight (the pattern is
+// kept, so `n`/`N` still work and re-light it).
+fn is_noh(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    c == "noh" or c == "nohl" or c == "nohlsearch"
+
 // `:sym <name>` — jump to a document symbol whose name contains <name>.
 fn is_sym(cmd: Str) -> Bool
     let c = str.trim(cmd)
