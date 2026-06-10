@@ -2395,6 +2395,14 @@ fn import_nvim_keymaps(dir: Str, base: Keymap) -> Keymap [io]
         rhs = list.push(rhs, xp[k + 1])
         kmode = list.push(kmode, 1)
         k = k + 2
+    // Insert (mode class 2) — these typically resolve to `<C-o>…` RHS.
+    let ip = nvmap.scrape_mode_maps(text, leader, "i")
+    var m = 0
+    while m + 1 < list.len(ip)
+        lhs = list.push(lhs, ip[m])
+        rhs = list.push(rhs, ip[m + 1])
+        kmode = list.push(kmode, 2)
+        m = m + 2
     Keymap { lhs: lhs, rhs: rhs, kmode: kmode }
 
 // ── Options ──────────────────────────────────────────
@@ -4094,6 +4102,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var win_hw: [Int] = [100]
     var wpend = false                    // awaiting the 2nd byte of a Ctrl-W command
     var comp_active = false              // Ctrl-N/P completion cycle in progress
+    var insert_oneshot = false           // `<C-o>` — run one Normal command, then back to Insert
     var comp_cands: [Str] = []           // filtered candidate labels
     var comp_idx = 0                     // current candidate
     var comp_start = 0                   // column where the completed prefix begins
@@ -4313,8 +4322,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 // one literally.  Single-byte maps are handled in feed (feed_mapped),
                 // so this only fires for multi-byte LHS (`<leader>w`, `vv`, `;p`).
                 // Mode class for the matcher: 0 = Normal, 1 = Visual (char/line/
-                // block); other modes (Insert/Replace) don't run it.
-                let mclass = if st.mode == 0 then 0 elif st.mode == 2 or st.mode == 3 or st.mode == 5 then 1 else 0 - 1
+                // block), 2 = Insert; Replace (4) doesn't run it.
+                let mclass = if st.mode == 0 then 0 elif st.mode == 2 or st.mode == 3 or st.mode == 5 then 1 elif st.mode == 1 then 2 else 0 - 1
                 var map_eat = false
                 if km_active and mclass >= 0 and not from_replay and not esc_skip and b >= 0 and not cmd_mode and not search_mode and not zpend and not wpend and not gpend and not comp_active and esc_pushback == 0 - 99
                     let cand = map_pending + str.from_char(b)
@@ -4814,6 +4823,9 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                 comp_idx = (comp_idx + n - 1) % n
                             ed = comp_apply(ed, comp_start, ed.cx, comp_cands[comp_idx])
                             lsp_info = "match " + str.from_int(comp_idx + 1) + "/" + str.from_int(n) + ": " + comp_cands[comp_idx]
+                elif st.mode == 1 and b == '\x0f'    // Ctrl-O — run one Normal command, then back to Insert
+                    insert_oneshot = true
+                    st = ist_done(st)                // drop to idle Normal for the next command
                 else
                     if comp_active                   // any other key commits the candidate
                         comp_active = false
@@ -4843,6 +4855,15 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                     ed = estep.ed
                     st = estep.st
                     es = estep.es
+                    // `<C-o>` one-shot: once the borrowed Normal command finishes
+                    // (back to idle Normal), step back into Insert.  If the command
+                    // entered Insert/Visual itself (a/i/o/v), just clear the flag.
+                    if insert_oneshot
+                        if st.mode == 0 and st.pending == 0 and st.count == 0 and not es.awaitreg and es.awaitmark == 0 and es.awaitmac == 0
+                            st = ist_insert(st)
+                            insert_oneshot = false
+                        elif st.mode != 0
+                            insert_oneshot = false
                     // Insert just began (mode 5 → 1): record the first row's
                     // length now (after any `c` delete / `A` pad) so the inserted
                     // span can be diffed precisely on Esc.
