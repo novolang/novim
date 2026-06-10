@@ -91,7 +91,7 @@ fn parse_uint(s: Str) -> Int
 // leading alpha word must be exactly a move/copy alias AND be followed by an
 // address (so `:colo gruvbox` / `:copy` without an address don't match).
 fn move_kind(cmd: Str) -> Int
-    let c = str.trim(cmd)
+    let c = range_body(cmd)                // tolerate a leading range (:2,5m$, :'<,'>t0)
     let n = str.len(c)
     if n == 0
         return 0

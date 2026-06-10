@@ -2395,47 +2395,65 @@ fn ex_sort(ed: Editor, cmd: Str, vlo: Int, vhi: Int) -> Editor
             ls = list.push(ls, "")           // buffer always keeps one line
         clamp(Editor { lines: ls, cy: 0, cx: 0 })
 
-@intent("""Apply `:move` (copy=false) / `:copy` (copy=true) of the current line
-to after the resolved address.  Move relocates the line (no-op for `:m .`);
-copy duplicates it.  Cursor lands on the moved/copied line.""")
-fn ex_linemove(ed: Editor, cmd: Str, copy: Bool) -> Editor
-    let cur = ed.cy
+// Append the block lines `blk` to `ls` (helper for ex_linemove's splice).
+fn push_block(ls: [Str], blk: [Str]) -> [Str]
+    var out = ls
+    var i = 0
+    let n = list.len(blk)
+    while i < n
+        out = list.push(out, blk[i])
+        i = i + 1
+    out
+
+@intent("""Apply `:move` (copy=false) / `:copy` (copy=true) of a line range to
+after the resolved target address.  With no range it is the current line; with a
+range (`:2,5m0`, `:'<,'>t$`) the whole block moves/copies.  Move can't relocate
+a range into itself (no-op).  Cursor lands on the first moved/copied line.""")
+fn ex_linemove(ed: Editor, cmd: Str, copy: Bool, vlo: Int, vhi: Int) -> Editor
     let nl = list.len(ed.lines)
-    var tgt = excmd.move_addr(cmd, cur, nl)
+    let rs = excmd.parse_range(cmd, vlo, vhi, ed.cy, nl)
+    let lo = if rs.has then rs.lo else ed.cy
+    let hi = if rs.has then rs.hi else ed.cy
+    var tgt = excmd.move_addr(rs.body, ed.cy, nl)
     if tgt < 0 - 1
         tgt = 0 - 1                          // clamp to "before first line"
     if tgt > nl - 1
         tgt = nl - 1
-    let line = line_at(ed, cur)
+    let cnt = hi - lo + 1
+    var blk: [Str] = []
+    var bi = lo
+    while bi <= hi
+        blk = list.push(blk, ed.lines[bi])
+        bi = bi + 1
     if copy
         var ls: [Str] = []
         if tgt < 0
-            ls = list.push(ls, line)         // copy to the very top
+            ls = push_block(ls, blk)         // copy to the very top
         var i = 0
         while i < nl
             ls = list.push(ls, ed.lines[i])
             if i == tgt
-                ls = list.push(ls, line)
+                ls = push_block(ls, blk)
             i = i + 1
         let ncy = if tgt < 0 then 0 else tgt + 1
-        clamp(Editor { lines: ls, cy: ncy, cx: first_nonblank(line) })
-    elif tgt == cur
-        ed                                   // ":m ." — no-op
+        clamp(Editor { lines: ls, cy: ncy, cx: first_nonblank(blk[0]) })
+    elif tgt >= lo - 1 and tgt <= hi
+        ed                                   // can't move a range into itself (`:m .`)
     else
         var ls: [Str] = []
         if tgt < 0
-            ls = list.push(ls, line)         // move to the very top
+            ls = push_block(ls, blk)         // move to the very top
         var i = 0
         while i < nl
-            if i != cur
+            if i < lo or i > hi
                 ls = list.push(ls, ed.lines[i])
-            if i == tgt and i != cur
-                ls = list.push(ls, line)
+            if i == tgt
+                ls = push_block(ls, blk)
             i = i + 1
-        // The moved line sits just past the (possibly shifted) target: removing
-        // `cur` shifts everything above `tgt` down one when cur <= tgt.
-        let ncy = if tgt < 0 then 0 elif cur <= tgt then tgt else tgt + 1
-        clamp(Editor { lines: ls, cy: ncy, cx: first_nonblank(line) })
+        // Moving up (tgt<lo): block lands at tgt+1.  Moving down (tgt>hi):
+        // removing the block first shifts the target up by `cnt`.
+        let ncy = if tgt < 0 then 0 elif tgt < lo then tgt + 1 else tgt - cnt + 1
+        clamp(Editor { lines: ls, cy: ncy, cx: first_nonblank(blk[0]) })
 
 // Serialise the line buffer to file text (one trailing newline per line).
 fn buf_to_str(lines: [Str]) -> Str
@@ -3559,7 +3577,7 @@ fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
                     ed = ex_sort(ed, cmd_buf, rng_vlo, rng_vhi)
                 elif excmd.move_kind(cmd_buf) != 0
                     es = edit_push_undo(es, ed)
-                    ed = ex_linemove(ed, cmd_buf, excmd.move_kind(cmd_buf) == 2)
+                    ed = ex_linemove(ed, cmd_buf, excmd.move_kind(cmd_buf) == 2, rng_vlo, rng_vhi)
                 elif excmd.is_goto(cmd_buf)
                     ed = ex_goto(ed, cmd_buf)
                 else
@@ -4647,7 +4665,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                             ed = ex_sort(ed, cmd_buf, rng_vlo, rng_vhi)
                         elif excmd.move_kind(cmd_buf) != 0
                             es = edit_push_undo(es, ed)
-                            ed = ex_linemove(ed, cmd_buf, excmd.move_kind(cmd_buf) == 2)
+                            ed = ex_linemove(ed, cmd_buf, excmd.move_kind(cmd_buf) == 2, rng_vlo, rng_vhi)
                         elif excmd.is_goto(cmd_buf)
                             jback = list.push(jback, jentry(curpath, ed.cy, ed.cx))
                             jfwd = []
