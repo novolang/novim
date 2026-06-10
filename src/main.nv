@@ -2455,6 +2455,54 @@ fn ex_linemove(ed: Editor, cmd: Str, copy: Bool, vlo: Int, vhi: Int) -> Editor
         let ncy = if tgt < 0 then 0 elif tgt < lo then tgt + 1 else tgt - cnt + 1
         clamp(Editor { lines: ls, cy: ncy, cx: first_nonblank(blk[0]) })
 
+@intent("""`:d` / `:delete` — delete a line range (the current line with no
+range; `:2,5d` / `:'<,'>d` a block).  Cursor settles on the line that follows
+the deleted block.  The buffer always keeps at least one line.""")
+fn ex_delete(ed: Editor, cmd: Str, vlo: Int, vhi: Int) -> Editor
+    let nl = list.len(ed.lines)
+    let rs = excmd.parse_range(cmd, vlo, vhi, ed.cy, nl)
+    let lo = if rs.has then rs.lo else ed.cy
+    let hi = if rs.has then rs.hi else ed.cy
+    var ls: [Str] = []
+    var i = 0
+    while i < nl
+        if i < lo or i > hi
+            ls = list.push(ls, ed.lines[i])
+        i = i + 1
+    if list.len(ls) == 0
+        ls = list.push(ls, "")
+    var ncy = lo
+    if ncy > list.len(ls) - 1
+        ncy = list.len(ls) - 1
+    clamp(Editor { lines: ls, cy: ncy, cx: 0 })
+
+@intent("""`:>` / `:<` — shift a line range right/left by one indent level
+(repeatable: `:>>` is two).  No range → the current line; `:2,5>` / `:'<,'>>` a
+block.  Reuses indent_one/dedent_one so it honours the same tab/space rule as
+`>>`.""")
+fn ex_shift(ed: Editor, cmd: Str, vlo: Int, vhi: Int) -> Editor
+    let nl = list.len(ed.lines)
+    let amt = excmd.shift_amount(cmd)
+    let rs = excmd.parse_range(cmd, vlo, vhi, ed.cy, nl)
+    let lo = if rs.has then rs.lo else ed.cy
+    let hi = if rs.has then rs.hi else ed.cy
+    let levels = if amt < 0 then 0 - amt else amt
+    let right = amt > 0
+    var ls: [Str] = []
+    var i = 0
+    while i < nl
+        if i >= lo and i <= hi
+            var line = ed.lines[i]
+            var k = 0
+            while k < levels
+                line = if right then indent_one(line) else dedent_one(line)
+                k = k + 1
+            ls = list.push(ls, line)
+        else
+            ls = list.push(ls, ed.lines[i])
+        i = i + 1
+    clamp(Editor { lines: ls, cy: lo, cx: first_nonblank(ls[lo]) })
+
 // Serialise the line buffer to file text (one trailing newline per line).
 fn buf_to_str(lines: [Str]) -> Str
     var s = ""
@@ -3578,6 +3626,12 @@ fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
                 elif excmd.move_kind(cmd_buf) != 0
                     es = edit_push_undo(es, ed)
                     ed = ex_linemove(ed, cmd_buf, excmd.move_kind(cmd_buf) == 2, rng_vlo, rng_vhi)
+                elif excmd.is_delete(cmd_buf)
+                    es = edit_push_undo(es, ed)
+                    ed = ex_delete(ed, cmd_buf, rng_vlo, rng_vhi)
+                elif excmd.shift_amount(cmd_buf) != 0
+                    es = edit_push_undo(es, ed)
+                    ed = ex_shift(ed, cmd_buf, rng_vlo, rng_vhi)
                 elif excmd.is_goto(cmd_buf)
                     ed = ex_goto(ed, cmd_buf)
                 else
@@ -4666,6 +4720,12 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                         elif excmd.move_kind(cmd_buf) != 0
                             es = edit_push_undo(es, ed)
                             ed = ex_linemove(ed, cmd_buf, excmd.move_kind(cmd_buf) == 2, rng_vlo, rng_vhi)
+                        elif excmd.is_delete(cmd_buf)
+                            es = edit_push_undo(es, ed)
+                            ed = ex_delete(ed, cmd_buf, rng_vlo, rng_vhi)
+                        elif excmd.shift_amount(cmd_buf) != 0
+                            es = edit_push_undo(es, ed)
+                            ed = ex_shift(ed, cmd_buf, rng_vlo, rng_vhi)
                         elif excmd.is_goto(cmd_buf)
                             jback = list.push(jback, jentry(curpath, ed.cy, ed.cx))
                             jfwd = []

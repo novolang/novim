@@ -279,6 +279,28 @@ fn range_body(cmd: Str) -> Str
             i = a2[2]
     str.trim(str.slice(c, i, n))
 
+// `:d` / `:delete` (optionally ranged) — delete the line range / current line.
+fn is_delete(cmd: Str) -> Bool
+    let c = range_body(cmd)
+    c == "d" or c == "de" or c == "del" or c == "delete"
+
+// `:>` / `:<` (optionally ranged, repeatable `:>>`) — shift lines right/left.
+// Returns +N for N indent levels, -N for N dedent levels, 0 for neither.
+fn shift_amount(cmd: Str) -> Int
+    let c = range_body(cmd)
+    let n = str.len(c)
+    if n == 0
+        return 0
+    let b0 = str.byte_at(c, 0) ?? 0
+    if b0 != '>' and b0 != '<'
+        return 0
+    var i = 0
+    while i < n
+        if (str.byte_at(c, i) ?? 0) != b0     // must be a uniform run of > or <
+            return 0
+        i = i + 1
+    if b0 == '>' then n else 0 - n
+
 // `:sort[!] [flags]` — sort the buffer's lines.  `!` reverses (descending);
 // `u` removes duplicate lines; `n` sorts by the first number on each line; `i`
 // sorts case-insensitively.  Flag letters follow a space (`:sort n`) or pack
