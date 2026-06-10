@@ -2259,23 +2259,100 @@ fn ex_global(ed: Editor, cmd: Str) -> Editor
         ncy = list.len(ls) - 1
     clamp(Editor { lines: ls, cy: ncy, cx: 0 })
 
-@intent("""Sort the whole buffer's lines lexicographically (`:sort`).  `:sort!`
-reverses (descending); a `u` flag (`:sort u`) drops duplicate lines after
-sorting, like vim.  Leaves the cursor on the first line.""")
+// Byte-wise lexicographic `a < b` (a prefix sorts before its extension).
+fn str_lt(a: Str, b: Str) -> Bool
+    let la = str.len(a)
+    let lb = str.len(b)
+    let n = if la < lb then la else lb
+    var i = 0
+    while i < n
+        let ca = str.byte_at(a, i) ?? 0
+        let cb = str.byte_at(b, i) ?? 0
+        if ca != cb
+            return ca < cb
+        i = i + 1
+    la < lb
+
+// First (optionally `-`-signed) decimal integer in `s`; 0 if the line has no
+// digit.  Used by `:sort n` — matches vim's "sort by the first number" rule.
+fn parse_first_int(s: Str) -> Int
+    let n = str.len(s)
+    var i = 0
+    while i < n and not ((str.byte_at(s, i) ?? 0) >= '0' and (str.byte_at(s, i) ?? 0) <= '9')
+        i = i + 1
+    if i >= n
+        return 0
+    let neg = i > 0 and (str.byte_at(s, i - 1) ?? 0) == '-'
+    var v = 0
+    while i < n and (str.byte_at(s, i) ?? 0) >= '0' and (str.byte_at(s, i) ?? 0) <= '9'
+        v = v * 10 + ((str.byte_at(s, i) ?? 0) - '0')
+        i = i + 1
+    if neg then 0 - v else v
+
+// Comparator for `:sort n` / `:sort i`: numeric by first integer (lexicographic
+// tie-break), else case-folded lexicographic, else plain lexicographic.
+fn line_lt(a: Str, b: Str, numeric: Bool, icase: Bool) -> Bool
+    if numeric
+        let ka = parse_first_int(a)
+        let kb = parse_first_int(b)
+        if ka != kb then ka < kb else str_lt(a, b)
+    elif icase
+        str_lt(str.lower(a), str.lower(b))
+    else
+        str_lt(a, b)
+
+// Two lines share a sort key (for the `u` dedup) under the active mode.
+fn same_key(a: Str, b: Str, numeric: Bool, icase: Bool) -> Bool
+    if numeric
+        parse_first_int(a) == parse_first_int(b)
+    elif icase
+        str.lower(a) == str.lower(b)
+    else
+        a == b
+
+// Stable selection sort by `line_lt` — used only for the `n` / `i` modes (the
+// plain/reverse path uses the faster builtin `list.sort`).  O(n²); fine for
+// editor buffers, a decorate-sort speedup is a noted follow-on.
+fn csort(lines: [Str], numeric: Bool, icase: Bool) -> [Str]
+    let n = list.len(lines)
+    var used: [Bool] = []
+    var k = 0
+    while k < n
+        used = list.push(used, false)
+        k = k + 1
+    var out: [Str] = []
+    var produced = 0
+    while produced < n
+        var best = 0 - 1
+        var j = 0
+        while j < n
+            if not used[j] and (best < 0 or line_lt(lines[j], lines[best], numeric, icase))
+                best = j
+            j = j + 1
+        used = util.set_bool_at(used, best, true)
+        out = list.push(out, lines[best])
+        produced = produced + 1
+    out
+
+@intent("""Sort the whole buffer's lines (`:sort`).  `:sort!` reverses; `u`
+drops duplicate lines; `n` sorts by the first number on each line; `i` is
+case-insensitive.  Leaves the cursor on the first line.""")
 fn ex_sort(ed: Editor, cmd: Str) -> Editor
     let fl = excmd.sort_flags(cmd)
     let rev = fl[0] == 1
     let uniq = fl[1] == 1
-    let asc = list.sort(ed.lines)            // ascending lexicographic
-    let n = list.len(asc)
+    let numeric = fl[2] == 1
+    let icase = fl[3] == 1
+    let base = if numeric or icase then csort(ed.lines, numeric, icase) else list.sort(ed.lines)
+    let n = list.len(base)
     var ls: [Str] = []
     var i = 0
     while i < n
         let idx = if rev then n - 1 - i else i
-        let line = asc[idx]
-        // unique: skip a line equal to the previous kept one — equal lines are
-        // adjacent in the sorted order (and stay adjacent when reversed).
-        let dup = uniq and list.len(ls) > 0 and ls[list.len(ls) - 1] == line
+        let line = base[idx]
+        // unique: skip a line whose key matches the previous kept one — equal
+        // keys are adjacent in sorted order (and stay adjacent when reversed).
+        let dup = uniq and list.len(ls) > 0 and same_key(ls[list.len(ls) - 1], line, numeric, icase)
         if not dup
             ls = list.push(ls, line)
         i = i + 1

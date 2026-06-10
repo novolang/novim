@@ -73,10 +73,10 @@ fn is_fmt(cmd: Str) -> Bool
     let c = str.trim(cmd)
     c == "fmt" or c == "format"
 
-// `:sort[!] [u]` — sort the buffer's lines lexicographically.  `!` reverses
-// (descending); `u` removes duplicate lines (after sorting, vim-style).  Flag
-// letters may follow a space (`:sort u`) or be packed (`:sort!u`).  Numeric /
-// case-insensitive variants (`n` / `i`) are not yet supported.
+// `:sort[!] [flags]` — sort the buffer's lines.  `!` reverses (descending);
+// `u` removes duplicate lines; `n` sorts by the first number on each line; `i`
+// sorts case-insensitively.  Flag letters follow a space (`:sort n`) or pack
+// after `!` (`:sort!u`).  `n`+`i` combine; `u` dedups by the active key.
 fn is_sort(cmd: Str) -> Bool
     let c = str.trim(cmd)
     if str.starts_with(c, "sort")
@@ -86,13 +86,15 @@ fn is_sort(cmd: Str) -> Bool
     else
         false
 
-// Decode `:sort` flags into `[reverse, unique]` (1/0).  Scans the whole arg
-// after "sort": any `!` → reverse, any `u` → unique.
+// Decode `:sort` flags into `[reverse, unique, numeric, icase]` (1/0).  Scans
+// the whole arg after "sort": `!`→reverse, `u`→unique, `n`→numeric, `i`→icase.
 fn sort_flags(cmd: Str) -> [Int]
     let c = str.trim(cmd)
     let rest = str.slice(c, 4, str.len(c))
     var rev = 0
     var uniq = 0
+    var num = 0
+    var ic = 0
     var i = 0
     let n = str.len(rest)
     while i < n
@@ -101,8 +103,12 @@ fn sort_flags(cmd: Str) -> [Int]
             rev = 1
         elif b == 'u'
             uniq = 1
+        elif b == 'n'
+            num = 1
+        elif b == 'i'
+            ic = 1
         i = i + 1
-    [rev, uniq]
+    [rev, uniq, num, ic]
 
 // `:noh` / `:nohl` / `:nohlsearch` — clear the search highlight (the pattern is
 // kept, so `n`/`N` still work and re-light it).
