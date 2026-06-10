@@ -4163,6 +4163,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var lsp_info = ""                    // transient status message (gd/K result)
     var gpend = false                    // awaiting the 2nd byte of a `g` command (gd / gc / gg…)
     var cpend = false                    // `gc` — awaiting the comment-toggle target (c / motion)
+    var cpend_obj = false                // `gca`/`gci` — awaiting the text-object char (p)
+    var cpend_around = false             // the awaited object is `a` (around) vs `i` (inner)
     var vgc_pend = false                 // Visual `g` — awaiting `c` (comment the selection)
     // ── Window splits ───────────────────────────────────────────────────────
     // `lay` is the window-layout tree (`:split` / `:vsplit`, nested); `awin` is
@@ -4407,7 +4409,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 // block), 2 = Insert; Replace (4) doesn't run it.
                 let mclass = if st.mode == 0 then 0 elif st.mode == 2 or st.mode == 3 or st.mode == 5 then 1 elif st.mode == 1 then 2 else 0 - 1
                 var map_eat = false
-                if km_active and mclass >= 0 and not from_replay and not esc_skip and b >= 0 and not cmd_mode and not search_mode and not zpend and not wpend and not gpend and not cpend and not vgc_pend and not comp_active and esc_pushback == 0 - 99
+                if km_active and mclass >= 0 and not from_replay and not esc_skip and b >= 0 and not cmd_mode and not search_mode and not zpend and not wpend and not gpend and not cpend and not cpend_obj and not vgc_pend and not comp_active and esc_pushback == 0 - 99
                     let cand = map_pending + str.from_char(b)
                     let ei = keymap_seq_idx(km, cand, mclass)
                     if ei >= 0
@@ -4797,27 +4799,44 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                         if b == 'g' and ed.cy != jy   // gg moved — record the jump
                             jback = list.push(jback, jentry(curpath, jy, jx))
                             jfwd = []
-                elif cpend                            // `gc` target: gcc / gcj / gck / gcG
+                elif cpend                            // `gc` target: gcc / gcj / gck / gcG / gc} / gca p…
                     cpend = false
-                    let pfx = comment_prefix(curpath)
-                    let last = list.len(ed.lines) - 1
-                    var clo = 0 - 1
-                    var chi = 0 - 1
-                    if b == 'c'                       // gcc — current line
-                        clo = ed.cy
-                        chi = ed.cy
-                    elif b == 'j'                     // gcj — current + next
-                        clo = ed.cy
-                        chi = if ed.cy + 1 <= last then ed.cy + 1 else last
-                    elif b == 'k'                     // gck — previous + current
-                        clo = if ed.cy - 1 >= 0 then ed.cy - 1 else 0
-                        chi = ed.cy
-                    elif b == 'G'                     // gcG — to end of buffer
-                        clo = ed.cy
-                        chi = last
-                    if clo >= 0
-                        es = edit_push_undo(es, ed)
-                        ed = clamp(Editor { lines: comment_toggle(ed.lines, clo, chi, pfx), cy: ed.cy, cx: ed.cx })
+                    if b == 'a' or b == 'i'           // gca{obj} / gci{obj} — await the object char
+                        cpend_obj = true
+                        cpend_around = b == 'a'
+                    else
+                        let pfx = comment_prefix(curpath)
+                        let last = list.len(ed.lines) - 1
+                        var clo = 0 - 1
+                        var chi = 0 - 1
+                        if b == 'c'                   // gcc — current line
+                            clo = ed.cy
+                            chi = ed.cy
+                        elif b == 'j'                 // gcj — current + next
+                            clo = ed.cy
+                            chi = if ed.cy + 1 <= last then ed.cy + 1 else last
+                        elif b == 'k'                 // gck — previous + current
+                            clo = if ed.cy - 1 >= 0 then ed.cy - 1 else 0
+                            chi = ed.cy
+                        elif b == 'G'                 // gcG — to end of buffer
+                            clo = ed.cy
+                            chi = last
+                        elif b == '}'                 // gc} — to the next paragraph break
+                            clo = ed.cy
+                            chi = para_fwd(ed, 1)
+                        elif b == '{'                 // gc{ — back to the previous paragraph break
+                            clo = para_bwd(ed, 1)
+                            chi = ed.cy
+                        if clo >= 0
+                            es = edit_push_undo(es, ed)
+                            ed = clamp(Editor { lines: comment_toggle(ed.lines, clo, chi, pfx), cy: ed.cy, cx: ed.cx })
+                elif cpend_obj                        // gc + a/i, awaiting the object char (p)
+                    cpend_obj = false
+                    if b == 'p'                       // gcap / gcip — the current paragraph
+                        let to = textobj_paragraph(ed, cpend_around)
+                        if to.ok
+                            es = edit_push_undo(es, ed)
+                            ed = clamp(Editor { lines: comment_toggle(ed.lines, to.vr.sy, to.vr.ey, comment_prefix(curpath)), cy: ed.cy, cx: ed.cx })
                 elif vgc_pend                         // Visual `g` 2nd byte (gc on the selection)
                     vgc_pend = false
                     if b == 'c'                       // gc — toggle-comment the selected lines, leave Visual
