@@ -642,6 +642,80 @@ fn dedent_one(line: Str) -> Str
         k = k + 1
     str.slice(line, k, n)
 
+// ── `gc` comment toggle ──────────────────────────────────────────────────────
+
+// The line-comment prefix for a file, by extension (`//` for C-family/Novo/JS/
+// Go/Rust, `#` for Python/shell/TOML/YAML, `--` for Lua/SQL, `"` for Vim).
+fn comment_prefix(path: Str) -> Str
+    let e = if str.len(path.ext(path)) >= 1 then str.slice(path.ext(path), 1, str.len(path.ext(path))) else ""
+    if e == "py" or e == "sh" or e == "bash" or e == "zsh" or e == "rb" or e == "pl" or e == "toml" or e == "yaml" or e == "yml" or e == "conf" or e == "cfg" or e == "r" or e == "ex" or e == "exs"
+        "#"
+    elif e == "lua" or e == "sql" or e == "hs"
+        "--"
+    elif e == "vim"
+        str.from_char('"')
+    else
+        "//"
+
+// True if `line`'s first non-blank run starts with `prefix` (already commented).
+fn line_commented(line: Str, prefix: Str) -> Bool
+    let f = first_nonblank(line)
+    let pl = str.len(prefix)
+    f + pl <= str.len(line) and str.slice(line, f, f + pl) == prefix
+
+// The smallest leading-whitespace width over the non-blank lines in [lo, hi].
+fn min_indent_col(lines: [Str], lo: Int, hi: Int) -> Int
+    var m = 0 - 1
+    var y = lo
+    while y <= hi
+        let line = lines[y]
+        if str.len(str.trim(line)) > 0
+            let f = first_nonblank(line)
+            if m < 0 or f < m
+                m = f
+        y = y + 1
+    if m < 0 then 0 else m
+
+// Strip a leading comment from `line`: remove `prefix` at the first non-blank
+// column, plus one following space if present.
+fn uncomment_line(line: Str, prefix: Str) -> Str
+    let f = first_nonblank(line)
+    let pl = str.len(prefix)
+    let rest_at = if f + pl < str.len(line) and (str.byte_at(line, f + pl) ?? 0) == ' ' then f + pl + 1 else f + pl
+    str.slice(line, 0, f) + str.slice(line, rest_at, str.len(line))
+
+// Toggle line-comments over `lines[lo..hi]` with `prefix`: if every non-blank
+// line is already commented, uncomment; else comment (inserting `prefix `  at
+// the block's minimum indent so the markers align).  Blank lines untouched.
+fn comment_toggle(lines: [Str], lo: Int, hi: Int, prefix: Str) -> [Str]
+    var any = false
+    var all = true
+    var y = lo
+    while y <= hi
+        if str.len(str.trim(lines[y])) > 0
+            any = true
+            if not line_commented(lines[y], prefix)
+                all = false
+        y = y + 1
+    if not any
+        return lines
+    var out = lines
+    if all
+        y = lo
+        while y <= hi
+            if str.len(str.trim(out[y])) > 0
+                out = set_line(out, y, uncomment_line(out[y], prefix))
+            y = y + 1
+    else
+        let col = min_indent_col(lines, lo, hi)
+        y = lo
+        while y <= hi
+            let line = out[y]
+            if str.len(str.trim(line)) > 0
+                out = set_line(out, y, str.slice(line, 0, col) + prefix + " " + str.slice(line, col, str.len(line)))
+            y = y + 1
+    out
+
 // `>>` / `N>>` (right) and `<<` / `N<<` (left): shift `n` lines from the
 // cursor by one indent level.  Cursor lands on the first non-blank of the
 // current line (vim).
@@ -4087,7 +4161,9 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var diag_msgs: [Str] = []
     var lsp_reqid = 1                    // monotonic id for gd/K requests (init used 1)
     var lsp_info = ""                    // transient status message (gd/K result)
-    var gpend = false                    // awaiting the 2nd byte of a `g` command (gd)
+    var gpend = false                    // awaiting the 2nd byte of a `g` command (gd / gc / gg…)
+    var cpend = false                    // `gc` — awaiting the comment-toggle target (c / motion)
+    var vgc_pend = false                 // Visual `g` — awaiting `c` (comment the selection)
     // ── Window splits ───────────────────────────────────────────────────────
     // `lay` is the window-layout tree (`:split` / `:vsplit`, nested); `awin` is
     // the focused window id (also an index into the win_* arrays).  Each window
@@ -4331,7 +4407,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 // block), 2 = Insert; Replace (4) doesn't run it.
                 let mclass = if st.mode == 0 then 0 elif st.mode == 2 or st.mode == 3 or st.mode == 5 then 1 elif st.mode == 1 then 2 else 0 - 1
                 var map_eat = false
-                if km_active and mclass >= 0 and not from_replay and not esc_skip and b >= 0 and not cmd_mode and not search_mode and not zpend and not wpend and not gpend and not comp_active and esc_pushback == 0 - 99
+                if km_active and mclass >= 0 and not from_replay and not esc_skip and b >= 0 and not cmd_mode and not search_mode and not zpend and not wpend and not gpend and not cpend and not vgc_pend and not comp_active and esc_pushback == 0 - 99
                     let cand = map_pending + str.from_char(b)
                     let ei = keymap_seq_idx(km, cand, mclass)
                     if ei >= 0
@@ -4705,7 +4781,9 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                     lsp_info = "definition"
                             else
                                 lsp_info = "no definition found"
-                    else                              // not `gd` — replay g + this byte
+                    elif b == 'c'                     // `gc` — comment toggle; await the target
+                        cpend = true
+                    else                              // not `gd`/`gc` — replay g + this byte
                         let jy = ed.cy
                         let jx = ed.cx
                         let g1 = feed_edit(ed, st, km, es, 'g')
@@ -4719,9 +4797,49 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                         if b == 'g' and ed.cy != jy   // gg moved — record the jump
                             jback = list.push(jback, jentry(curpath, jy, jx))
                             jfwd = []
+                elif cpend                            // `gc` target: gcc / gcj / gck / gcG
+                    cpend = false
+                    let pfx = comment_prefix(curpath)
+                    let last = list.len(ed.lines) - 1
+                    var clo = 0 - 1
+                    var chi = 0 - 1
+                    if b == 'c'                       // gcc — current line
+                        clo = ed.cy
+                        chi = ed.cy
+                    elif b == 'j'                     // gcj — current + next
+                        clo = ed.cy
+                        chi = if ed.cy + 1 <= last then ed.cy + 1 else last
+                    elif b == 'k'                     // gck — previous + current
+                        clo = if ed.cy - 1 >= 0 then ed.cy - 1 else 0
+                        chi = ed.cy
+                    elif b == 'G'                     // gcG — to end of buffer
+                        clo = ed.cy
+                        chi = last
+                    if clo >= 0
+                        es = edit_push_undo(es, ed)
+                        ed = clamp(Editor { lines: comment_toggle(ed.lines, clo, chi, pfx), cy: ed.cy, cx: ed.cx })
+                elif vgc_pend                         // Visual `g` 2nd byte (gc on the selection)
+                    vgc_pend = false
+                    if b == 'c'                       // gc — toggle-comment the selected lines, leave Visual
+                        let vlo = if st.avy < ed.cy then st.avy else ed.cy
+                        let vhi = if st.avy < ed.cy then ed.cy else st.avy
+                        es = edit_push_undo(es, ed)
+                        ed = clamp(Editor { lines: comment_toggle(ed.lines, vlo, vhi, comment_prefix(curpath)), cy: vlo, cx: 0 })
+                        st = ist_done(st)
+                    else                              // not gc — replay g + this byte through Visual
+                        let v1 = feed_edit(ed, st, km, es, 'g')
+                        ed = v1.ed
+                        st = v1.st
+                        es = v1.es
+                        let v2 = feed_edit(ed, st, km, es, b)
+                        ed = v2.ed
+                        st = v2.st
+                        es = v2.es
+                elif (st.mode == 2 or st.mode == 3 or st.mode == 5) and b == 'g' and key_free(km, 'g')   // Visual `g` — await c (gc)
+                    vgc_pend = true
                 elif scroll_idle(st, es) and key_free(km, 23) and b == 23   // Ctrl-W — window command prefix
                     wpend = true
-                elif lsp_phase == 2 and scroll_idle(st, es) and key_free(km, 'g') and b == 'g'   // 'g' — await d (gd)
+                elif scroll_idle(st, es) and key_free(km, 'g') and b == 'g'   // 'g' — await 2nd byte (gd / gc / gg / gu / gv / gi…)
                     gpend = true
                 elif lsp_phase == 2 and scroll_idle(st, es) and key_free(km, 'K') and b == 'K'   // K — hover
                     lsp_reqid = lsp_reqid + 1
