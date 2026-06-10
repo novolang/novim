@@ -4439,6 +4439,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var left = 0
     var cmd_mode = false
     var cmd_buf = ""
+    var cmd_hist: [Str] = []             // executed `:` commands, oldest first
+    var hist_idx = 0                     // history cursor while in cmd mode (len = empty new line)
     var rng_vlo = 0 - 1                   // visual-selection line bounds for `'<,'>`
     var rng_vhi = 0 - 1                   //   (-1 = no active selection)
     var search_mode = false
@@ -4728,6 +4730,22 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                     ed = arrow_move(ed, 'F', ins)
                                 elif fin != '~'                    // arrows / Home(H) / End(F)
                                     ed = arrow_move(ed, fin, ins)
+                            // Up/Down in the Ex line walk command history.
+                            if packed >= 0 and cmd_mode
+                                let cfin = packed % 256
+                                if cfin == 'A' and hist_idx > 0           // older
+                                    hist_idx = hist_idx - 1
+                                    cmd_buf = cmd_hist[hist_idx]
+                                    changed = true
+                                elif cfin == 'B'                          // newer
+                                    if hist_idx < list.len(cmd_hist) - 1
+                                        hist_idx = hist_idx + 1
+                                        cmd_buf = cmd_hist[hist_idx]
+                                        changed = true
+                                    elif hist_idx < list.len(cmd_hist)
+                                        hist_idx = list.len(cmd_hist)     // back to the empty new line
+                                        cmd_buf = ""
+                                        changed = true
                             esc_skip = true
                     elif nx >= 0
                         esc_pushback = nx
@@ -5035,6 +5053,10 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                 else
                                     running = false
                                     done = true
+                        // Record the command in history (skip empties + a repeat
+                        // of the most recent entry).
+                        if str.len(cmd_buf) > 0 and (list.len(cmd_hist) == 0 or cmd_hist[list.len(cmd_hist) - 1] != cmd_buf)
+                            cmd_hist = list.push(cmd_hist, cmd_buf)
                         cmd_mode = false
                         cmd_buf = ""
                     elif b == '\e'                     // Esc — cancel
@@ -5276,6 +5298,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 elif b == 58 and st.mode == 0        // ':' — open the Ex line
                     cmd_mode = true
                     cmd_buf = ""
+                    hist_idx = list.len(cmd_hist)
                     rng_vlo = 0 - 1
                     rng_vhi = 0 - 1
                 elif b == 58 and (st.mode == 2 or st.mode == 3 or st.mode == 5)   // ':' in Visual — prefill '<,'>
@@ -5284,6 +5307,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                     st = ist_done(st)                // leave Visual for the Ex line
                     cmd_mode = true
                     cmd_buf = "'<,'>"
+                    hist_idx = list.len(cmd_hist)
                 elif b == 47 and st.mode == 0        // '/' — search forward
                     search_mode = true
                     search_buf = ""
