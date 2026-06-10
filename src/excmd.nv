@@ -168,8 +168,10 @@ struct RangeSpec
 fn range_spec(lo: Int, hi: Int, body: Str, has: Bool) -> RangeSpec
     RangeSpec { lo: lo, hi: hi, body: body, has: has }
 
-// Parse one address at `s[start]`.  Returns `[found(0/1), value0based, next_i]`.
-fn addr_parse(s: Str, start: Int, cur: Int, nlines: Int) -> [Int]
+// Parse one address at `s[start]`.  `vlo`/`vhi` resolve the visual marks
+// `'<` / `'>` (pass -1 when there's no active selection).  Returns
+// `[found(0/1), value0based, next_i]`.
+fn addr_parse(s: Str, start: Int, vlo: Int, vhi: Int, cur: Int, nlines: Int) -> [Int]
     let n = str.len(s)
     var i = start
     if i >= n
@@ -192,6 +194,16 @@ fn addr_parse(s: Str, start: Int, cur: Int, nlines: Int) -> [Int]
         base = nlines - 1
         i = i + 1
         found = true
+    elif b == 39 and i + 1 < n             // 39 = `'` — a mark: '< / '>
+        let m = str.byte_at(s, i + 1) ?? 0
+        if m == '<'
+            base = vlo
+            i = i + 2
+            found = true
+        elif m == '>'
+            base = vhi
+            i = i + 2
+            found = true
     elif b == '+' or b == '-'
         base = cur                         // bare +K / -K is relative to current
         found = true
@@ -219,21 +231,21 @@ fn addr_parse(s: Str, start: Int, cur: Int, nlines: Int) -> [Int]
 // Parse an optional leading range off `cmd`.  `cur`/`nlines` resolve `.`/`$`
 // and relatives.  Returns the 0-based inclusive [lo,hi] (clamped/ordered), the
 // remaining command body, and whether a range was present.
-fn parse_range(cmd: Str, cur: Int, nlines: Int) -> RangeSpec
+fn parse_range(cmd: Str, vlo: Int, vhi: Int, cur: Int, nlines: Int) -> RangeSpec
     let c = str.trim(cmd)
     let n = str.len(c)
     if n == 0
         return range_spec(0, 0, c, false)
     if (str.byte_at(c, 0) ?? 0) == '%'
         return range_spec(0, nlines - 1, str.trim(str.slice(c, 1, n)), true)
-    let a1 = addr_parse(c, 0, cur, nlines)
+    let a1 = addr_parse(c, 0, vlo, vhi, cur, nlines)
     if a1[0] == 0
         return range_spec(0, 0, c, false)
     var lo = a1[1]
     var hi = a1[1]
     var i = a1[2]
     if i < n and (str.byte_at(c, i) ?? 0) == ','
-        let a2 = addr_parse(c, i + 1, cur, nlines)
+        let a2 = addr_parse(c, i + 1, vlo, vhi, cur, nlines)
         if a2[0] == 1
             hi = a2[1]
             i = a2[2]
@@ -257,12 +269,12 @@ fn range_body(cmd: Str) -> Str
         return c
     if (str.byte_at(c, 0) ?? 0) == '%'
         return str.trim(str.slice(c, 1, n))
-    let a1 = addr_parse(c, 0, 0, n)
+    let a1 = addr_parse(c, 0, 0, 0, 0, n)   // dummy vlo/vhi/cur — body index is value-independent
     if a1[0] == 0
         return c
     var i = a1[2]
     if i < n and (str.byte_at(c, i) ?? 0) == ','
-        let a2 = addr_parse(c, i + 1, 0, n)
+        let a2 = addr_parse(c, i + 1, 0, 0, 0, n)
         if a2[0] == 1
             i = a2[2]
     str.trim(str.slice(c, i, n))

@@ -2356,9 +2356,9 @@ fn sort_apply(lines: [Str], rev: Bool, uniq: Bool, numeric: Bool, icase: Bool) -
 `:2,5sort`, `:.,$sort`).  `:sort!` reverses; `u` drops duplicates; `n` sorts by
 the first number; `i` is case-insensitive.  Cursor lands on the first sorted
 line.""")
-fn ex_sort(ed: Editor, cmd: Str) -> Editor
+fn ex_sort(ed: Editor, cmd: Str, vlo: Int, vhi: Int) -> Editor
     let nl = list.len(ed.lines)
-    let rs = excmd.parse_range(cmd, ed.cy, nl)
+    let rs = excmd.parse_range(cmd, vlo, vhi, ed.cy, nl)
     let fl = excmd.sort_flags(rs.body)
     let rev = fl[0] == 1
     let uniq = fl[1] == 1
@@ -3534,6 +3534,8 @@ fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
     let decoded = decode_escapes(keys)
     var cmd_mode = false
     var cmd_buf = ""
+    var rng_vlo = 0 - 1                   // visual-selection line bounds for `'<,'>`
+    var rng_vhi = 0 - 1                   //   (-1 = no active selection)
     var search_mode = false
     var search_buf = ""
     var search_back = false
@@ -3554,7 +3556,7 @@ fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
                     ed = ex_global(ed, cmd_buf)
                 elif excmd.is_sort(cmd_buf)
                     es = edit_push_undo(es, ed)
-                    ed = ex_sort(ed, cmd_buf)
+                    ed = ex_sort(ed, cmd_buf, rng_vlo, rng_vhi)
                 elif excmd.move_kind(cmd_buf) != 0
                     es = edit_push_undo(es, ed)
                     ed = ex_linemove(ed, cmd_buf, excmd.move_kind(cmd_buf) == 2)
@@ -3593,6 +3595,14 @@ fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
         elif b == 58 and st.mode == 0        // ':' — open the Ex line
             cmd_mode = true
             cmd_buf = ""
+            rng_vlo = 0 - 1
+            rng_vhi = 0 - 1
+        elif b == 58 and (st.mode == 2 or st.mode == 3 or st.mode == 5)   // ':' in Visual — prefill '<,'>
+            rng_vlo = if st.avy < ed.cy then st.avy else ed.cy
+            rng_vhi = if st.avy > ed.cy then st.avy else ed.cy
+            st = ist_done(st)                // leave Visual for the Ex line
+            cmd_mode = true
+            cmd_buf = "'<,'>"
         elif b == 47 and st.mode == 0        // '/' — search forward
             search_mode = true
             search_buf = ""
@@ -4308,6 +4318,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var left = 0
     var cmd_mode = false
     var cmd_buf = ""
+    var rng_vlo = 0 - 1                   // visual-selection line bounds for `'<,'>`
+    var rng_vhi = 0 - 1                   //   (-1 = no active selection)
     var search_mode = false
     var search_buf = ""
     var search_back = false
@@ -4632,7 +4644,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                             ed = ex_global(ed, cmd_buf)
                         elif excmd.is_sort(cmd_buf)
                             es = edit_push_undo(es, ed)
-                            ed = ex_sort(ed, cmd_buf)
+                            ed = ex_sort(ed, cmd_buf, rng_vlo, rng_vhi)
                         elif excmd.move_kind(cmd_buf) != 0
                             es = edit_push_undo(es, ed)
                             ed = ex_linemove(ed, cmd_buf, excmd.move_kind(cmd_buf) == 2)
@@ -5127,6 +5139,14 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 elif b == 58 and st.mode == 0        // ':' — open the Ex line
                     cmd_mode = true
                     cmd_buf = ""
+                    rng_vlo = 0 - 1
+                    rng_vhi = 0 - 1
+                elif b == 58 and (st.mode == 2 or st.mode == 3 or st.mode == 5)   // ':' in Visual — prefill '<,'>
+                    rng_vlo = if st.avy < ed.cy then st.avy else ed.cy
+                    rng_vhi = if st.avy > ed.cy then st.avy else ed.cy
+                    st = ist_done(st)                // leave Visual for the Ex line
+                    cmd_mode = true
+                    cmd_buf = "'<,'>"
                 elif b == 47 and st.mode == 0        // '/' — search forward
                     search_mode = true
                     search_buf = ""
