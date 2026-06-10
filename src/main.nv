@@ -4010,6 +4010,11 @@ fn scroll_to(top: Int, cy: Int, body: Int) -> Int
 fn scroll_idle(st: InputState, es: EditState) -> Bool
     st.mode == 0 and st.pending == 0 and st.count == 0 and es.awaitmac == 0 and (not es.awaitreg) and es.awaitmark == 0
 
+// Like scroll_idle but COUNT-tolerant — for the `g` prefix buffer, so `3gg` /
+// `3gcc` can carry their count to the second key.
+fn g_idle(st: InputState, es: EditState) -> Bool
+    st.mode == 0 and st.pending == 0 and es.awaitmac == 0 and (not es.awaitreg) and es.awaitmark == 0
+
 // New cursor line after a paging command (zz/zt/zb leave the cursor put).
 fn scroll_new_cy(ed: Editor, rows: Int, kind: Int) -> Int
     let body = rows - 1
@@ -4807,29 +4812,31 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                     else
                         let pfx = comment_prefix(curpath)
                         let last = list.len(ed.lines) - 1
+                        let cnt = if st.count > 0 then st.count else 1   // `3gcc` = 3 lines
                         var clo = 0 - 1
                         var chi = 0 - 1
-                        if b == 'c'                   // gcc — current line
+                        if b == 'c'                   // gcc / Ngcc — N lines from the cursor
                             clo = ed.cy
-                            chi = ed.cy
-                        elif b == 'j'                 // gcj — current + next
+                            chi = if ed.cy + cnt - 1 <= last then ed.cy + cnt - 1 else last
+                        elif b == 'j'                 // gcj / Ngcj — current + N down
                             clo = ed.cy
-                            chi = if ed.cy + 1 <= last then ed.cy + 1 else last
-                        elif b == 'k'                 // gck — previous + current
-                            clo = if ed.cy - 1 >= 0 then ed.cy - 1 else 0
+                            chi = if ed.cy + cnt <= last then ed.cy + cnt else last
+                        elif b == 'k'                 // gck / Ngck — current + N up
+                            clo = if ed.cy - cnt >= 0 then ed.cy - cnt else 0
                             chi = ed.cy
                         elif b == 'G'                 // gcG — to end of buffer
                             clo = ed.cy
                             chi = last
-                        elif b == '}'                 // gc} — to the next paragraph break
+                        elif b == '}'                 // gc} / Ngc} — to the Nth paragraph break ahead
                             clo = ed.cy
-                            chi = para_fwd(ed, 1)
-                        elif b == '{'                 // gc{ — back to the previous paragraph break
-                            clo = para_bwd(ed, 1)
+                            chi = para_fwd(ed, cnt)
+                        elif b == '{'                 // gc{ / Ngc{ — back N paragraph breaks
+                            clo = para_bwd(ed, cnt)
                             chi = ed.cy
                         if clo >= 0
                             es = edit_push_undo(es, ed)
                             ed = clamp(Editor { lines: comment_toggle(ed.lines, clo, chi, pfx), cy: ed.cy, cx: ed.cx })
+                        st = ist_done(st)             // consume the count either way
                 elif cpend_obj                        // gc + a/i, awaiting the object char (p)
                     cpend_obj = false
                     if b == 'p'                       // gcap / gcip — the current paragraph
@@ -4837,6 +4844,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                         if to.ok
                             es = edit_push_undo(es, ed)
                             ed = clamp(Editor { lines: comment_toggle(ed.lines, to.vr.sy, to.vr.ey, comment_prefix(curpath)), cy: ed.cy, cx: ed.cx })
+                    st = ist_done(st)                 // consume any count
                 elif vgc_pend                         // Visual `g` 2nd byte (gc on the selection)
                     vgc_pend = false
                     if b == 'c'                       // gc — toggle-comment the selected lines, leave Visual
@@ -4858,7 +4866,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                     vgc_pend = true
                 elif scroll_idle(st, es) and key_free(km, 23) and b == 23   // Ctrl-W — window command prefix
                     wpend = true
-                elif scroll_idle(st, es) and key_free(km, 'g') and b == 'g'   // 'g' — await 2nd byte (gd / gc / gg / gu / gv / gi…)
+                elif g_idle(st, es) and key_free(km, 'g') and b == 'g'   // 'g' — await 2nd byte (gd / gc / gg / gu / gv / gi…), count-carrying
                     gpend = true
                 elif lsp_phase == 2 and scroll_idle(st, es) and key_free(km, 'K') and b == 'K'   // K — hover
                     lsp_reqid = lsp_reqid + 1
