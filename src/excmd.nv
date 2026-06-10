@@ -73,6 +73,37 @@ fn is_fmt(cmd: Str) -> Bool
     let c = str.trim(cmd)
     c == "fmt" or c == "format"
 
+// `:sort[!] [u]` — sort the buffer's lines lexicographically.  `!` reverses
+// (descending); `u` removes duplicate lines (after sorting, vim-style).  Flag
+// letters may follow a space (`:sort u`) or be packed (`:sort!u`).  Numeric /
+// case-insensitive variants (`n` / `i`) are not yet supported.
+fn is_sort(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    if str.starts_with(c, "sort")
+        let rest = str.slice(c, 4, str.len(c))
+        let r0 = if str.len(rest) > 0 then str.byte_at(rest, 0) ?? 0 else 0
+        str.len(rest) == 0 or r0 == '!' or r0 == ' '   // reject "sorted" etc.
+    else
+        false
+
+// Decode `:sort` flags into `[reverse, unique]` (1/0).  Scans the whole arg
+// after "sort": any `!` → reverse, any `u` → unique.
+fn sort_flags(cmd: Str) -> [Int]
+    let c = str.trim(cmd)
+    let rest = str.slice(c, 4, str.len(c))
+    var rev = 0
+    var uniq = 0
+    var i = 0
+    let n = str.len(rest)
+    while i < n
+        let b = str.byte_at(rest, i) ?? 0
+        if b == '!'
+            rev = 1
+        elif b == 'u'
+            uniq = 1
+        i = i + 1
+    [rev, uniq]
+
 // `:noh` / `:nohl` / `:nohlsearch` — clear the search highlight (the pattern is
 // kept, so `n`/`N` still work and re-light it).
 fn is_noh(cmd: Str) -> Bool

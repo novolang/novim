@@ -2259,6 +2259,30 @@ fn ex_global(ed: Editor, cmd: Str) -> Editor
         ncy = list.len(ls) - 1
     clamp(Editor { lines: ls, cy: ncy, cx: 0 })
 
+@intent("""Sort the whole buffer's lines lexicographically (`:sort`).  `:sort!`
+reverses (descending); a `u` flag (`:sort u`) drops duplicate lines after
+sorting, like vim.  Leaves the cursor on the first line.""")
+fn ex_sort(ed: Editor, cmd: Str) -> Editor
+    let fl = excmd.sort_flags(cmd)
+    let rev = fl[0] == 1
+    let uniq = fl[1] == 1
+    let asc = list.sort(ed.lines)            // ascending lexicographic
+    let n = list.len(asc)
+    var ls: [Str] = []
+    var i = 0
+    while i < n
+        let idx = if rev then n - 1 - i else i
+        let line = asc[idx]
+        // unique: skip a line equal to the previous kept one — equal lines are
+        // adjacent in the sorted order (and stay adjacent when reversed).
+        let dup = uniq and list.len(ls) > 0 and ls[list.len(ls) - 1] == line
+        if not dup
+            ls = list.push(ls, line)
+        i = i + 1
+    if list.len(ls) == 0
+        ls = list.push(ls, "")               // buffer always keeps one line
+    clamp(Editor { lines: ls, cy: 0, cx: 0 })
+
 // Serialise the line buffer to file text (one trailing newline per line).
 fn buf_to_str(lines: [Str]) -> Str
     var s = ""
@@ -3374,6 +3398,9 @@ fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
                 elif excmd.is_global(cmd_buf)
                     es = edit_push_undo(es, ed)
                     ed = ex_global(ed, cmd_buf)
+                elif excmd.is_sort(cmd_buf)
+                    es = edit_push_undo(es, ed)
+                    ed = ex_sort(ed, cmd_buf)
                 elif excmd.is_goto(cmd_buf)
                     ed = ex_goto(ed, cmd_buf)
                 else
@@ -4446,6 +4473,9 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                         elif excmd.is_global(cmd_buf)
                             es = edit_push_undo(es, ed)
                             ed = ex_global(ed, cmd_buf)
+                        elif excmd.is_sort(cmd_buf)
+                            es = edit_push_undo(es, ed)
+                            ed = ex_sort(ed, cmd_buf)
                         elif excmd.is_goto(cmd_buf)
                             jback = list.push(jback, jentry(curpath, ed.cy, ed.cx))
                             jfwd = []
