@@ -3883,6 +3883,43 @@ fn ends_with_nv(p: Str) -> Bool
     let n = str.len(p)
     n >= 3 and str.slice(p, n - 3, n) == ".nv"
 
+// ── Yank flash (vim's `on_yank` highlight) ───────────────────────────────────
+// A transient highlight over the just-yanked region, shown for ~150ms after a
+// yank.  Reuses the Visual selection's reverse-video render slot (yank flash and
+// Visual mode never coexist).  `lw` = linewise (highlight whole lines).
+struct Flash
+    active: Bool
+    sy:     Int
+    sx:     Int
+    ey:     Int
+    ex:     Int
+    lw:     Bool
+
+fn flash_none() -> Flash
+    Flash { active: false, sy: 0, sx: 0, ey: 0, ex: 0, lw: false }
+
+@intent("""Build the flash region for a just-completed yank.  The post-yank
+cursor (cy, cx) is the top-left of the yanked text (vim leaves it there); the
+register text + linewise flag give the extent.""")
+fn flash_from_yank(cy: Int, cx: Int, reg: Str, lw: Bool) -> Flash
+    if lw
+        var nlf = 0                          // count the register's lines (one '\n' each)
+        var i = 0
+        let n = str.len(reg)
+        while i < n
+            if (str.byte_at(reg, i) ?? 0) == '\n'
+                nlf = nlf + 1
+            i = i + 1
+        let cnt = if nlf < 1 then 1 else nlf
+        Flash { active: true, sy: cy, sx: 0, ey: cy + cnt - 1, ex: 0, lw: true }
+    else
+        let segs = str.split(reg, str.from_char('\n'))
+        let nseg = list.len(segs)
+        if nseg <= 1
+            Flash { active: true, sy: cy, sx: cx, ey: cy, ex: cx + str.len(reg) - 1, lw: false }
+        else
+            Flash { active: true, sy: cy, sx: cx, ey: cy + nseg - 1, ex: str.len(segs[nseg - 1]) - 1, lw: false }
+
 @intent("""Draw ONE window's frame into its rect: the text viewport (scrolled
 to `top`/`left`, optional line-number gutter, tab expansion, Novo syntax
 highlighting, search-match and visual-selection highlighting, per-line
@@ -3892,7 +3929,7 @@ rows); for a single full-screen window (rx=ry=0) these reduce to absolute
 coordinates.  Does NOT touch cursor visibility or place the hardware cursor —
 the orchestrator (`render` / `render_all`) hides the cursor once, draws every
 window, then places it in the active window.""")
-fn draw_window(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: colorscheme.Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, clip: Bool, active: Bool, ts_spans: [Int]) [io]
+fn draw_window(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: colorscheme.Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, clip: Bool, active: Bool, ts_spans: [Int], flash: Flash) [io]
     let rows = win.h
     let cols = win.w
     let rx = win.x
@@ -3950,6 +3987,17 @@ fn draw_window(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mod
                     let bhi = if li == sey then sex + 1 else str.len(raw)
                     vlo = disp.vis_col(raw, blo, opts.tabstop)
                     vhi = disp.vis_col(raw, bhi, opts.tabstop)
+            // Yank flash: same reverse-video slot as the selection (the two never
+            // coexist — a flash only shows in Normal mode, just after a yank).
+            if (not vis) and flash.active and li >= flash.sy and li <= flash.ey
+                if flash.lw
+                    vlo = 0
+                    vhi = vlen
+                else
+                    let fblo = if li == flash.sy then flash.sx else 0
+                    let fbhi = if li == flash.ey then flash.ex + 1 else str.len(raw)
+                    vlo = disp.vis_col(raw, fblo, opts.tabstop)
+                    vhi = disp.vis_col(raw, fbhi, opts.tabstop)
             let srng = if dohl then search_vis_ranges(satoms, raw, opts.tabstop) else []
             let syncols = if dots then disp.ts_line_syncols(ts_spans, line_byte, raw, opts.tabstop, cs) elif dosyn then disp.syntax_colors(expanded, synkw, synstr, syncmt, synnum) else []
             let segs = if opts.wrap and vlen > width then (vlen + width - 1) / width else 1
@@ -4071,10 +4119,10 @@ fn place_cursor(ed: Editor, win: window.Rect, top: Int, left: Int, opts: Options
 @intent("""Single-window frame: hide the cursor, draw the one window, place the
 cursor, restore it.  Byte-identical to the pre-split render — the interactive
 driver calls this whenever there is exactly one window.""")
-fn render(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: colorscheme.Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, ts_spans: [Int]) [io]
+fn render(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: colorscheme.Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, ts_spans: [Int], flash: Flash) [io]
     csi()
     emit("?25l")         // hide cursor while we repaint
-    draw_window(ed, win, path, top, left, mode, avy, avx, search, cs, opts, diag_li, diag_msgs, info, modified, false, true, ts_spans)
+    draw_window(ed, win, path, top, left, mode, avy, avx, search, cs, opts, diag_li, diag_msgs, info, modified, false, true, ts_spans, flash)
     place_cursor(ed, win, top, left, opts)
     cursor_shape(mode)   // block in normal/visual, bar in insert, underline in replace
     csi()
@@ -4095,7 +4143,7 @@ The active window draws from the live ed cursor / top / left and the real mode
 (selection, INSERT, gd/K info); every other pane draws from its saved win_*
 cursor/viewport in plain NORMAL mode.  Diagnostics + the modified flag follow
 the live active buffer only.""")
-fn render_all(ed: Editor, lay: window.Layout, awin: Int, screen: window.Rect, win_cy: [Int], win_cx: [Int], win_top: [Int], win_left: [Int], win_buf: [Int], win_ww: [Int], win_hw: [Int], cur_buf: Int, bufs_text: [Str], bufs_path: [Str], path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: colorscheme.Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, ts_spans: [Int]) [io]
+fn render_all(ed: Editor, lay: window.Layout, awin: Int, screen: window.Rect, win_cy: [Int], win_cx: [Int], win_top: [Int], win_left: [Int], win_buf: [Int], win_ww: [Int], win_hw: [Int], cur_buf: Int, bufs_text: [Str], bufs_path: [Str], path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: colorscheme.Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, ts_spans: [Int], flash: Flash) [io]
     csi()
     emit("?25l")
     let rects = window.layout_rects(lay, screen, win_ww, win_hw, [])
@@ -4124,7 +4172,8 @@ fn render_all(ed: Editor, lay: window.Layout, awin: Int, screen: window.Rect, wi
         // pane) must bounded-fill its rows, not erase-to-EOL into its neighbour.
         let clip = wr.x + wr.w < screen.w
         let wts = if same then ts_spans else []   // ts spans only for the live (active) buffer
-        draw_window(view, wr, wpath, wtop, wleft, wmode, wavy, wavx, search, cs, opts, wdiag_li, wdiag_msgs, winfo, wmod, clip, isact, wts)
+        let wflash = if isact then flash else flash_none()   // flash only on the active window
+        draw_window(view, wr, wpath, wtop, wleft, wmode, wavy, wavx, search, cs, opts, wdiag_li, wdiag_msgs, winfo, wmod, clip, isact, wts, wflash)
         i = i + 5
     place_cursor(ed, window.window_rect(lay, awin, screen, win_ww, win_hw), top, left, opts)
     cursor_shape(mode)
@@ -4134,12 +4183,12 @@ fn render_all(ed: Editor, lay: window.Layout, awin: Int, screen: window.Rect, wi
 @intent("""Paint one frame, dispatching on window count: a single window keeps
 the proven byte-identical render path; two or more go through render_all.  (Not
 named `frame` — that is a reserved word in Novo.)""")
-fn paint_frame(ed: Editor, lay: window.Layout, awin: Int, cols: Int, rows: Int, win_cy: [Int], win_cx: [Int], win_top: [Int], win_left: [Int], win_buf: [Int], win_ww: [Int], win_hw: [Int], cur_buf: Int, bufs_text: [Str], bufs_path: [Str], path: Str, top: Int, left: Int, st: InputState, cs: colorscheme.Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, ts_spans: [Int]) [io]
+fn paint_frame(ed: Editor, lay: window.Layout, awin: Int, cols: Int, rows: Int, win_cy: [Int], win_cx: [Int], win_top: [Int], win_left: [Int], win_buf: [Int], win_ww: [Int], win_hw: [Int], cur_buf: Int, bufs_text: [Str], bufs_path: [Str], path: Str, top: Int, left: Int, st: InputState, cs: colorscheme.Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, ts_spans: [Int], flash: Flash) [io]
     let screen = window.rect(0, 0, cols, rows)
     if window.layout_count(lay) == 1
-        render(ed, window.window_rect(lay, awin, screen, win_ww, win_hw), path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, info, modified, ts_spans)
+        render(ed, window.window_rect(lay, awin, screen, win_ww, win_hw), path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, info, modified, ts_spans, flash)
     else
-        render_all(ed, lay, awin, screen, win_cy, win_cx, win_top, win_left, win_buf, win_ww, win_hw, cur_buf, bufs_text, bufs_path, path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, info, modified, ts_spans)
+        render_all(ed, lay, awin, screen, win_cy, win_cx, win_top, win_left, win_buf, win_ww, win_hw, cur_buf, bufs_text, bufs_path, path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, info, modified, ts_spans, flash)
 
 fn term_rows() -> Int [io]
     let packed = novo_pty_get_winsize_h()
@@ -4540,6 +4589,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var modified = false                 // active buffer differs from disk → status `[+]`
     var lsp_dirty = false                // buffer changed since the last didChange
     var lsp_idle = 0                      // consecutive idle poll cycles (debounce)
+    var yflash = flash_none()            // yank-highlight overlay (vim's on_yank)
+    var yflash_ticks = 0                 // poll cycles left before the flash clears
     var lsp_phase = 0                    // 0 none · 1 init sent (awaiting result) · 2 ready
     if str.len(lsp.lsp_lang_of(path)) > 0
         lsp_lang = lsp.lsp_lang_of(path)
@@ -4557,13 +4608,21 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     if ts_enabled and ends_with_nv(curpath) and buf_text(ed) != ts_lasttext
         ts_lasttext = buf_text(ed)
         ts_spans_cache = ts.ts_spans(ts_grammar, ts_queries, ts_lasttext)
-    paint_frame(ed, lay, awin, cols, rows, win_cy, win_cx, win_top, win_left, win_buf, win_ww, win_hw, cur_buf, bufs_text, bufs_path, curpath, top, left, st, cs, opts, diag_li, diag_msgs, lsp_info, modified, ts_spans_cache)
+    paint_frame(ed, lay, awin, cols, rows, win_cy, win_cx, win_top, win_left, win_buf, win_ww, win_hw, cur_buf, bufs_text, bufs_path, curpath, top, left, st, cs, opts, diag_li, diag_msgs, lsp_info, modified, ts_spans_cache, yflash)
     var running = true
     while running
         // Short stdin poll keeps the editor responsive while leaving slack to
         // drain novols' stdout each iteration (combined two-fd poll).
         let m = novo_pty_poll_h(0, 50)       // poll host stdin (fd 0)
         var changed = false
+        // Yank flash (vim's on_yank): hold the highlight for ~3 poll cycles
+        // (~150ms), then clear it and repaint.
+        if yflash.active
+            if yflash_ticks <= 0
+                yflash = flash_none()
+                changed = true
+            else
+                yflash_ticks = yflash_ticks - 1
         if m % 2 == 1
             lsp_info = ""                 // a transient gd/K message lasts until the next key
             buflist = false               // the :ls overlay is dismissed by the next key
@@ -5296,10 +5355,18 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                         binsert_col = if b == 'A' then bxh + 1 else bxl
                         binsert_append = b == 'A'
                         binsert_active = true
+                    let pre_y0 = es.regs[26]              // "0 register — changes only on a yank
                     let estep = feed_edit(ed, st, km, es, b)
                     ed = estep.ed
                     st = estep.st
                     es = estep.es
+                    // Yank flash: the "0 (yank) register updated and we are back in
+                    // Normal — a yank just completed (a delete writes "1, not "0).
+                    // The post-yank cursor is the yank's top-left.
+                    if st.mode == 0 and es.regs[26] != pre_y0
+                        yflash = flash_from_yank(ed.cy, ed.cx, es.regs[26], es.reglw[26])
+                        yflash_ticks = 3
+                        changed = true
                     // `<C-o>` one-shot: once the borrowed Normal command finishes
                     // (back to idle Normal), step back into Insert.  If the command
                     // entered Insert/Visual itself (a/i/o/v), just clear the flag.
@@ -5583,7 +5650,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 ts_spans_cache = ts.ts_spans(ts_grammar, ts_queries, curtxt)
             // `:noh` renders with the highlight suppressed (search pattern kept).
             let rst = if hl_off then ist_blank_search(st) else st
-            paint_frame(ed, lay, awin, cols, rows, win_cy, win_cx, win_top, win_left, win_buf, win_ww, win_hw, cur_buf, bufs_text, bufs_path, curpath, top, left, rst, cs, opts, diag_li, diag_msgs, lsp_info, modified, ts_spans_cache)
+            paint_frame(ed, lay, awin, cols, rows, win_cy, win_cx, win_top, win_left, win_buf, win_ww, win_hw, cur_buf, bufs_text, bufs_path, curpath, top, left, rst, cs, opts, diag_li, diag_msgs, lsp_info, modified, ts_spans_cache, yflash)
             if cmd_mode
                 cup(rows, 1)
                 csi()
@@ -5602,7 +5669,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
             top = scroll_to(top, ed.cy, rows - 1)
             left = hscroll_for(left, ed, opts, cols)
             clear_screen()   // dimensions changed — clear stale content once
-            paint_frame(ed, lay, awin, cols, rows, win_cy, win_cx, win_top, win_left, win_buf, win_ww, win_hw, cur_buf, bufs_text, bufs_path, curpath, top, left, st, cs, opts, diag_li, diag_msgs, lsp_info, modified, ts_spans_cache)
+            paint_frame(ed, lay, awin, cols, rows, win_cy, win_cx, win_top, win_left, win_buf, win_ww, win_hw, cur_buf, bufs_text, bufs_path, curpath, top, left, st, cs, opts, diag_li, diag_msgs, lsp_info, modified, ts_spans_cache, yflash)
     if lsp_pid >= 0                       // tear the language server down
         let _ = proc.kill(lsp_pid, 15)
         proc.close(lsp_pid)
