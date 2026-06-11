@@ -85,6 +85,57 @@ fn buf_load(path: Str) -> [Str] [io]
             let ls = str.split_lines(s)
             if list.len(ls) == 0 then [""] else ls
 
+// ── Command / search history persistence ─────────────────────────────────────
+// One entry per line in $XDG_STATE_HOME/novim/history (else
+// ~/.local/state/novim/history): `:cmd` for Ex commands, `/pat` for searches.
+fn history_file() -> Str [io]
+    let xdg = process.env("XDG_STATE_HOME") ?? ""
+    let base = if str.len(xdg) > 0 then xdg else path.join(process.env("HOME") ?? "", ".local/state")
+    path.join(path.join(base, "novim"), "history")
+
+// Keep only the last `n` entries.
+fn hist_cap(xs: [Str], n: Int) -> [Str]
+    let total = list.len(xs)
+    if total <= n
+        return xs
+    var out: [Str] = []
+    var i = total - n
+    while i < total
+        out = list.push(out, xs[i])
+        i = i + 1
+    out
+
+// Parse one kind's entries from the file text (kind 0 = `:` commands, 1 = `/`
+// searches), oldest first, capped to the last 500.
+fn hist_parse(text: Str, kind: Int) -> [Str]
+    let pre = if kind == 0 then ':' else '/'
+    let lines = str.split_lines(text)
+    var out: [Str] = []
+    var i = 0
+    while i < list.len(lines)
+        let ln = lines[i]
+        if str.len(ln) > 0 and (str.byte_at(ln, 0) ?? 0) == pre
+            out = list.push(out, str.slice(ln, 1, str.len(ln)))
+        i = i + 1
+    hist_cap(out, 500)
+
+// Load persisted history of one kind at startup.
+fn history_load(kind: Int) -> [Str] [io]
+    hist_parse(fs.read(history_file()) ?? "", kind)
+
+// Ensure the history dir exists and compact the file to its last 1000 lines.
+fn history_init() [io]
+    let f = history_file()
+    let _ = fs.mkdir_all(path.dirname(f))
+    let cur = fs.read(f) ?? ""
+    if str.len(cur) > 0
+        let kept = hist_cap(str.split_lines(cur), 1000)
+        let _ = fs.write(f, str.join(str.from_char('\n'), kept) + str.from_char('\n'))
+
+// Append one executed entry (best-effort; failures are ignored).
+fn history_append(prefix: Str, entry: Str) [io]
+    let _ = fs.append(history_file(), prefix + entry + str.from_char('\n'))
+
 @intent("""Clamp the cursor into the buffer bounds, following the vim
 normal-mode rule: cx sits on the last glyph (len-1), or col 0 on an empty
 line.""")
@@ -4440,7 +4491,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var cmd_mode = false
     var cmd_buf = ""
     var cmd_cx = 0                       // insertion point within cmd_buf (0..len)
-    var cmd_hist: [Str] = []             // executed `:` commands, oldest first
+    var cmd_hist = history_load(0)       // executed `:` commands, oldest first (persisted)
     var hist_idx = 0                     // history cursor while in cmd mode (len = empty new line)
     var rng_vlo = 0 - 1                   // visual-selection line bounds for `'<,'>`
     var rng_vhi = 0 - 1                   //   (-1 = no active selection)
@@ -4448,7 +4499,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var search_buf = ""
     var search_cx = 0                    // insertion point within search_buf (0..len)
     var search_back = false
-    var search_hist: [Str] = []          // executed `/`?` patterns, oldest first
+    var search_hist = history_load(1)    // executed `/`?` patterns, oldest first (persisted)
     var shist_idx = 0                    // history cursor while in search mode
     var hl_off = false                   // `:noh` — suppress search highlight until the next search
     var zpend = false                    // awaiting the 2nd byte of a `z` scroll command
@@ -4614,6 +4665,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     if ts_enabled and ends_with_nv(curpath) and buf_text(ed) != ts_lasttext
         ts_lasttext = buf_text(ed)
         ts_spans_cache = ts.ts_spans(ts_grammar, ts_queries, ts_lasttext)
+    history_init()                       // ensure the history dir + compact the file
     paint_frame(ed, lay, awin, cols, rows, win_cy, win_cx, win_top, win_left, win_buf, win_ww, win_hw, cur_buf, bufs_text, bufs_path, curpath, top, left, st, cs, opts, diag_li, diag_msgs, lsp_info, modified, ts_spans_cache, yflash)
     var running = true
     while running
@@ -5120,9 +5172,10 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                     running = false
                                     done = true
                         // Record the command in history (skip empties + a repeat
-                        // of the most recent entry).
+                        // of the most recent entry); persist it to disk.
                         if str.len(cmd_buf) > 0 and (list.len(cmd_hist) == 0 or cmd_hist[list.len(cmd_hist) - 1] != cmd_buf)
                             cmd_hist = list.push(cmd_hist, cmd_buf)
+                            history_append(":", cmd_buf)
                         cmd_mode = false
                         cmd_buf = ""
                     elif b == '\e'                     // Esc — cancel
@@ -5144,6 +5197,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                         ed = find_next(ed, search_buf, not search_back)
                         if str.len(search_buf) > 0 and (list.len(search_hist) == 0 or search_hist[list.len(search_hist) - 1] != search_buf)
                             search_hist = list.push(search_hist, search_buf)
+                            history_append("/", search_buf)
                         search_mode = false
                         search_buf = ""
                     elif b == '\e'
