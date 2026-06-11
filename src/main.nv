@@ -4446,6 +4446,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var rng_vhi = 0 - 1                   //   (-1 = no active selection)
     var search_mode = false
     var search_buf = ""
+    var search_cx = 0                    // insertion point within search_buf (0..len)
     var search_back = false
     var search_hist: [Str] = []          // executed `/`?` patterns, oldest first
     var shist_idx = 0                    // history cursor while in search mode
@@ -4772,21 +4773,44 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                     if cmd_cx < str.len(cmd_buf)
                                         cmd_buf = str.slice(cmd_buf, 0, cmd_cx) + str.slice(cmd_buf, cmd_cx + 1, str.len(cmd_buf))
                                         changed = true
-                            // Up/Down in the search line walk search history.
+                            // Search line: Up/Down history, Left/Right/Home/End
+                            // move the insertion point, Delete removes at it.
                             if packed >= 0 and search_mode
                                 let sfin = packed % 256
-                                if sfin == 'A' and shist_idx > 0          // older
+                                let sprm = packed / 256
+                                if sfin == 'A' and shist_idx > 0          // ↑ older
                                     shist_idx = shist_idx - 1
                                     search_buf = search_hist[shist_idx]
+                                    search_cx = str.len(search_buf)
                                     changed = true
-                                elif sfin == 'B'                          // newer
+                                elif sfin == 'B'                          // ↓ newer
                                     if shist_idx < list.len(search_hist) - 1
                                         shist_idx = shist_idx + 1
                                         search_buf = search_hist[shist_idx]
+                                        search_cx = str.len(search_buf)
                                         changed = true
                                     elif shist_idx < list.len(search_hist)
                                         shist_idx = list.len(search_hist)
                                         search_buf = ""
+                                        search_cx = 0
+                                        changed = true
+                                elif sfin == 'D'                          // ← left
+                                    if search_cx > 0
+                                        search_cx = search_cx - 1
+                                        changed = true
+                                elif sfin == 'C'                          // → right
+                                    if search_cx < str.len(search_buf)
+                                        search_cx = search_cx + 1
+                                        changed = true
+                                elif sfin == 'H' or (sfin == '~' and (sprm == 1 or sprm == 7))   // Home
+                                    search_cx = 0
+                                    changed = true
+                                elif sfin == 'F' or (sfin == '~' and sprm == 4)                  // End
+                                    search_cx = str.len(search_buf)
+                                    changed = true
+                                elif sfin == '~' and sprm == 3            // Delete — remove at the cursor
+                                    if search_cx < str.len(search_buf)
+                                        search_buf = str.slice(search_buf, 0, search_cx) + str.slice(search_buf, search_cx + 1, str.len(search_buf))
                                         changed = true
                             esc_skip = true
                     elif nx >= 0
@@ -5125,11 +5149,13 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                     elif b == '\e'
                         search_mode = false
                         search_buf = ""
-                    elif b == '\x7f' or b == '\b'
-                        if str.len(search_buf) > 0
-                            search_buf = str.slice(search_buf, 0, str.len(search_buf) - 1)
-                    elif b >= ' ' and b < '\x7f'
-                        search_buf = search_buf + str.from_char(b)
+                    elif b == '\x7f' or b == '\b'      // Backspace — delete before the cursor
+                        if search_cx > 0
+                            search_buf = str.slice(search_buf, 0, search_cx - 1) + str.slice(search_buf, search_cx, str.len(search_buf))
+                            search_cx = search_cx - 1
+                    elif b >= ' ' and b < '\x7f'       // insert the typed char at the cursor
+                        search_buf = str.slice(search_buf, 0, search_cx) + str.from_char(b) + str.slice(search_buf, search_cx, str.len(search_buf))
+                        search_cx = search_cx + 1
                 elif zpend                            // 2nd byte of a `z` command
                     zpend = false
                     let zk = scroll_z_kind(b)
@@ -5359,11 +5385,13 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 elif b == 47 and st.mode == 0        // '/' — search forward
                     search_mode = true
                     search_buf = ""
+                    search_cx = 0
                     search_back = false
                     shist_idx = list.len(search_hist)
                 elif b == 63 and st.mode == 0        // '?' — search backward
                     search_mode = true
                     search_buf = ""
+                    search_cx = 0
                     search_back = true
                     shist_idx = list.len(search_hist)
                 elif st.mode == 1 and lsp_phase == 2 and (b == '\x0e' or b == '\x10')   // Ctrl-N/P — completion
@@ -5736,6 +5764,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 csi()
                 emit("K")
                 emit("/" + search_buf)
+                cup(rows, 2 + search_cx)         // park the cursor at the insertion point
             if buflist
                 draw_buflist(bufs_path, cur_buf, rows)
         if novo_pty_winsize_changed_h() == 1
