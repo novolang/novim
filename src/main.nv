@@ -4439,6 +4439,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var left = 0
     var cmd_mode = false
     var cmd_buf = ""
+    var cmd_cx = 0                       // insertion point within cmd_buf (0..len)
     var cmd_hist: [Str] = []             // executed `:` commands, oldest first
     var hist_idx = 0                     // history cursor while in cmd mode (len = empty new line)
     var rng_vlo = 0 - 1                   // visual-selection line bounds for `'<,'>`
@@ -4732,21 +4733,44 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                     ed = arrow_move(ed, 'F', ins)
                                 elif fin != '~'                    // arrows / Home(H) / End(F)
                                     ed = arrow_move(ed, fin, ins)
-                            // Up/Down in the Ex line walk command history.
+                            // Ex line: Up/Down walk history, Left/Right/Home/End
+                            // move the insertion point, Delete removes at it.
                             if packed >= 0 and cmd_mode
                                 let cfin = packed % 256
-                                if cfin == 'A' and hist_idx > 0           // older
+                                let cprm = packed / 256
+                                if cfin == 'A' and hist_idx > 0           // ↑ older
                                     hist_idx = hist_idx - 1
                                     cmd_buf = cmd_hist[hist_idx]
+                                    cmd_cx = str.len(cmd_buf)
                                     changed = true
-                                elif cfin == 'B'                          // newer
+                                elif cfin == 'B'                          // ↓ newer
                                     if hist_idx < list.len(cmd_hist) - 1
                                         hist_idx = hist_idx + 1
                                         cmd_buf = cmd_hist[hist_idx]
+                                        cmd_cx = str.len(cmd_buf)
                                         changed = true
                                     elif hist_idx < list.len(cmd_hist)
                                         hist_idx = list.len(cmd_hist)     // back to the empty new line
                                         cmd_buf = ""
+                                        cmd_cx = 0
+                                        changed = true
+                                elif cfin == 'D'                          // ← left
+                                    if cmd_cx > 0
+                                        cmd_cx = cmd_cx - 1
+                                        changed = true
+                                elif cfin == 'C'                          // → right
+                                    if cmd_cx < str.len(cmd_buf)
+                                        cmd_cx = cmd_cx + 1
+                                        changed = true
+                                elif cfin == 'H' or (cfin == '~' and (cprm == 1 or cprm == 7))   // Home
+                                    cmd_cx = 0
+                                    changed = true
+                                elif cfin == 'F' or (cfin == '~' and cprm == 4)                  // End
+                                    cmd_cx = str.len(cmd_buf)
+                                    changed = true
+                                elif cfin == '~' and cprm == 3            // Delete — remove at the cursor
+                                    if cmd_cx < str.len(cmd_buf)
+                                        cmd_buf = str.slice(cmd_buf, 0, cmd_cx) + str.slice(cmd_buf, cmd_cx + 1, str.len(cmd_buf))
                                         changed = true
                             // Up/Down in the search line walk search history.
                             if packed >= 0 and search_mode
@@ -5080,11 +5104,13 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                     elif b == '\e'                     // Esc — cancel
                         cmd_mode = false
                         cmd_buf = ""
-                    elif b == '\x7f' or b == '\b'
-                        if str.len(cmd_buf) > 0
-                            cmd_buf = str.slice(cmd_buf, 0, str.len(cmd_buf) - 1)
-                    elif b >= ' ' and b < '\x7f'
-                        cmd_buf = cmd_buf + str.from_char(b)
+                    elif b == '\x7f' or b == '\b'      // Backspace — delete before the cursor
+                        if cmd_cx > 0
+                            cmd_buf = str.slice(cmd_buf, 0, cmd_cx - 1) + str.slice(cmd_buf, cmd_cx, str.len(cmd_buf))
+                            cmd_cx = cmd_cx - 1
+                    elif b >= ' ' and b < '\x7f'       // insert the typed char at the cursor
+                        cmd_buf = str.slice(cmd_buf, 0, cmd_cx) + str.from_char(b) + str.slice(cmd_buf, cmd_cx, str.len(cmd_buf))
+                        cmd_cx = cmd_cx + 1
                 elif search_mode
                     if b == '\r' or b == '\n'
                         st = ist_set_search(st, search_buf)
@@ -5318,6 +5344,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 elif b == 58 and st.mode == 0        // ':' — open the Ex line
                     cmd_mode = true
                     cmd_buf = ""
+                    cmd_cx = 0
                     hist_idx = list.len(cmd_hist)
                     rng_vlo = 0 - 1
                     rng_vhi = 0 - 1
@@ -5327,6 +5354,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                     st = ist_done(st)                // leave Visual for the Ex line
                     cmd_mode = true
                     cmd_buf = "'<,'>"
+                    cmd_cx = str.len(cmd_buf)        // cursor after the prefilled range
                     hist_idx = list.len(cmd_hist)
                 elif b == 47 and st.mode == 0        // '/' — search forward
                     search_mode = true
@@ -5702,6 +5730,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 csi()
                 emit("K")
                 emit(":" + cmd_buf)
+                cup(rows, 2 + cmd_cx)            // park the cursor at the insertion point
             if search_mode
                 cup(rows, 1)
                 csi()
