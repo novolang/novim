@@ -4446,6 +4446,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var search_mode = false
     var search_buf = ""
     var search_back = false
+    var search_hist: [Str] = []          // executed `/`?` patterns, oldest first
+    var shist_idx = 0                    // history cursor while in search mode
     var hl_off = false                   // `:noh` — suppress search highlight until the next search
     var zpend = false                    // awaiting the 2nd byte of a `z` scroll command
     var esc_pushback = 0 - 99            // one-byte pushback: the key after a lone ESC
@@ -4745,6 +4747,22 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                     elif hist_idx < list.len(cmd_hist)
                                         hist_idx = list.len(cmd_hist)     // back to the empty new line
                                         cmd_buf = ""
+                                        changed = true
+                            // Up/Down in the search line walk search history.
+                            if packed >= 0 and search_mode
+                                let sfin = packed % 256
+                                if sfin == 'A' and shist_idx > 0          // older
+                                    shist_idx = shist_idx - 1
+                                    search_buf = search_hist[shist_idx]
+                                    changed = true
+                                elif sfin == 'B'                          // newer
+                                    if shist_idx < list.len(search_hist) - 1
+                                        shist_idx = shist_idx + 1
+                                        search_buf = search_hist[shist_idx]
+                                        changed = true
+                                    elif shist_idx < list.len(search_hist)
+                                        shist_idx = list.len(search_hist)
+                                        search_buf = ""
                                         changed = true
                             esc_skip = true
                     elif nx >= 0
@@ -5074,6 +5092,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                         jback = list.push(jback, jentry(curpath, ed.cy, ed.cx))
                         jfwd = []
                         ed = find_next(ed, search_buf, not search_back)
+                        if str.len(search_buf) > 0 and (list.len(search_hist) == 0 or search_hist[list.len(search_hist) - 1] != search_buf)
+                            search_hist = list.push(search_hist, search_buf)
                         search_mode = false
                         search_buf = ""
                     elif b == '\e'
@@ -5312,10 +5332,12 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                     search_mode = true
                     search_buf = ""
                     search_back = false
+                    shist_idx = list.len(search_hist)
                 elif b == 63 and st.mode == 0        // '?' — search backward
                     search_mode = true
                     search_buf = ""
                     search_back = true
+                    shist_idx = list.len(search_hist)
                 elif st.mode == 1 and lsp_phase == 2 and (b == '\x0e' or b == '\x10')   // Ctrl-N/P — completion
                     if not comp_active
                         let curline = line_at(ed, ed.cy)
