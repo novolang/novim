@@ -3899,13 +3899,15 @@ fn search_vis_ranges(atoms: [nvregex.ReAtom], raw: Str, ts: Int) -> [Int]
 // helpers).
 
 // Paint a line: syntax colours (`syncols`, per-column fg index) as the base,
-// search matches (`sr`/`scol`) over them, the Visual selection (reverse) on top.
-fn emit_line_styled(expanded: Str, left: Int, width: Int, vlo: Int, vhi: Int, sr: [Int], scol: Str, syncols: [Int]) [io]
+// search matches (`sr`/`scol`) over them, and the [vlo,vhi) highlight on top —
+// reverse video for a Visual selection, or black-on-yellow when `flash_hl`
+// (a yank flash, which never coexists with a selection).
+fn emit_line_styled(expanded: Str, left: Int, width: Int, vlo: Int, vhi: Int, sr: [Int], scol: Str, syncols: [Int], flash_hl: Bool) [io]
     let elen = str.len(expanded)
     let endc = if left + width < elen then left + width else elen
     let sn = list.len(syncols)
     var c = left
-    var cur = 0                      // 0 none, 1 selection, 2 search, 1000+idx syntax
+    var cur = 0                      // 0 none, 1 selection/flash, 2 search, 1000+idx syntax
     while c < endc
         let want = if c >= vlo and c < vhi
             1
@@ -3918,7 +3920,7 @@ fn emit_line_styled(expanded: Str, left: Int, width: Int, vlo: Int, vhi: Int, sr
         if want != cur
             sgr("0")
             if want == 1
-                sgr("7")
+                sgr(if flash_hl then "30;48;5;220" else "7")   // yank flash = black on yellow
             elif want == 2
                 sgr(scol)
             elif want >= 1000
@@ -4096,7 +4098,7 @@ fn draw_window(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mod
                     else
                         emit(disp.nspaces(numw + 1))   // blank gutter on continuation rows
                 let segleft = if opts.wrap then seg * width else left
-                emit_line_styled(expanded, segleft, width, vlo, vhi, srng, "30;43", syncols)
+                emit_line_styled(expanded, segleft, width, vlo, vhi, srng, "30;43", syncols, (not vis) and flash.active)
                 // chars emitted by emit_line_styled = clamp(vlen - segleft, 0, width)
                 let shown = if vlen - segleft < 0 then 0 elif vlen - segleft > width then width else vlen - segleft
                 eol(clip, width - shown)
