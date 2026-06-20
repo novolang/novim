@@ -284,6 +284,12 @@ fn is_delete(cmd: Str) -> Bool
     let c = range_body(cmd)
     c == "d" or c == "de" or c == "del" or c == "delete"
 
+// `:y` / `:yank` (optionally ranged) — yank the line range / current line
+// (linewise) into the unnamed register.
+fn is_yank(cmd: Str) -> Bool
+    let c = range_body(cmd)
+    c == "y" or c == "ya" or c == "yan" or c == "yank"
+
 // `:>` / `:<` (optionally ranged, repeatable `:>>`) — shift lines right/left.
 // Returns +N for N indent levels, -N for N dedent levels, 0 for neither.
 fn shift_amount(cmd: Str) -> Int

@@ -3683,6 +3683,14 @@ fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
                 elif excmd.shift_amount(cmd_buf) != 0
                     es = edit_push_undo(es, ed)
                     ed = ex_shift(ed, cmd_buf, rng_vlo, rng_vhi)
+                elif excmd.is_yank(cmd_buf)
+                    let rs = excmd.parse_range(cmd_buf, rng_vlo, rng_vhi, ed.cy, list.len(ed.lines))
+                    let ylo = if rs.has then rs.lo else ed.cy
+                    let yhi = if rs.has then rs.hi else ed.cy
+                    let ytext = range_yank_text(ed.lines, ylo, yhi)
+                    st = ist_set_reg(st, ytext, true)        // linewise → unnamed register
+                    es = edit_numreg_yank(es, ytext, true)
+                    ed = clamp(Editor { lines: ed.lines, cy: yhi, cx: 0 })
                 elif excmd.is_goto(cmd_buf)
                     ed = ex_goto(ed, cmd_buf)
                 else
@@ -3950,6 +3958,22 @@ struct Flash
 
 fn flash_none() -> Flash
     Flash { active: false, sy: 0, sx: 0, ey: 0, ex: 0, lw: false }
+
+// A linewise flash spanning whole lines [lo..hi] (for `:y` / `:yank`).
+fn flash_lines(lo: Int, hi: Int) -> Flash
+    Flash { active: true, sy: lo, sx: 0, ey: hi, ex: 0, lw: true }
+
+// Linewise register text for lines [lo..hi] — joined with '\n' (separator, no
+// trailing newline), matching `join_lines` so `p`/`P` treat it linewise.
+fn range_yank_text(lines: [Str], lo: Int, hi: Int) -> Str
+    var acc = ""
+    var i = lo
+    while i <= hi
+        if i > lo
+            acc = acc + str.from_char('\n')
+        acc = acc + lines[i]
+        i = i + 1
+    acc
 
 @intent("""Build the flash region for a just-completed yank.  The post-yank
 cursor (cy, cx) is the top-left of the yanked text (vim leaves it there); the
@@ -4926,6 +4950,16 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                         elif excmd.shift_amount(cmd_buf) != 0
                             es = edit_push_undo(es, ed)
                             ed = ex_shift(ed, cmd_buf, rng_vlo, rng_vhi)
+                        elif excmd.is_yank(cmd_buf)
+                            let rs = excmd.parse_range(cmd_buf, rng_vlo, rng_vhi, ed.cy, list.len(ed.lines))
+                            let ylo = if rs.has then rs.lo else ed.cy
+                            let yhi = if rs.has then rs.hi else ed.cy
+                            let ytext = range_yank_text(ed.lines, ylo, yhi)
+                            st = ist_set_reg(st, ytext, true)        // linewise → unnamed register
+                            es = edit_numreg_yank(es, ytext, true)
+                            ed = clamp(Editor { lines: ed.lines, cy: yhi, cx: 0 })
+                            yflash = flash_lines(ylo, yhi)           // flash the yanked range
+                            yflash_ticks = 3
                         elif excmd.is_goto(cmd_buf)
                             jback = list.push(jback, jentry(curpath, ed.cy, ed.cx))
                             jfwd = []
