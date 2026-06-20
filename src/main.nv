@@ -3956,14 +3956,17 @@ cursor (cy, cx) is the top-left of the yanked text (vim leaves it there); the
 register text + linewise flag give the extent.""")
 fn flash_from_yank(cy: Int, cx: Int, reg: Str, lw: Bool) -> Flash
     if lw
-        var nlf = 0                          // count the register's lines (one '\n' each)
+        var nlf = 0                          // count the register's newlines
         var i = 0
         let n = str.len(reg)
         while i < n
             if (str.byte_at(reg, i) ?? 0) == '\n'
                 nlf = nlf + 1
             i = i + 1
-        let cnt = if nlf < 1 then 1 else nlf
+        // linewise registers are newline-SEPARATED (`join_lines`: N lines, N-1
+        // '\n'), but some paths add a trailing '\n' — count both shapes.
+        let ends_nl = n > 0 and (str.byte_at(reg, n - 1) ?? 0) == '\n'
+        let cnt = if ends_nl then nlf else nlf + 1
         Flash { active: true, sy: cy, sx: 0, ey: cy + cnt - 1, ex: 0, lw: true }
     else
         let segs = str.split(reg, str.from_char('\n'))
