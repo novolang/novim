@@ -47,6 +47,15 @@ fn colorscheme_named(name: Str) -> Colorscheme
     elif name == "solarized_light" or name == "solarized-light"
         // Solarized light — same hues, dark fg on a light (base2 254) status bar.
         Colorscheme { status_fg: 241, status_bg: 254, tilde_fg: 245, kw_fg: 64, str_fg: 37, cmt_fg: 245, num_fg: 37, type_fg: 136, fn_fg: 33, const_fg: 125, mod_fg: 166 }
+    elif name == "solarized_osaka" or name == "solarized-osaka" or name == "osaka"
+        // Solarized Osaka — the Solarized palette with solarized-osaka.nvim's
+        // tokyonight-style token assignment (which is what distinguishes it from
+        // classic Solarized): keywords VIOLET (61 #6c71c4) instead of green,
+        // functions blue (33), strings green (64), numbers + constants orange
+        // (166), types cyan (37), modules magenta (125), comments base01 (240).
+        // Osaka's signature dark-teal chrome → status bar on deep teal (23),
+        // bright base2 (254) text.  256-colour approximation (novim is 256-col).
+        Colorscheme { status_fg: 254, status_bg: 23, tilde_fg: 240, kw_fg: 61, str_fg: 64, cmt_fg: 240, num_fg: 166, type_fg: 37, fn_fg: 33, const_fg: 166, mod_fg: 125 }
     else
         colorscheme_default()
 
