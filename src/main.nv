@@ -19,6 +19,7 @@ use colorscheme
 use disp
 use excmd
 use nvmap
+use fuzzy
 
 // Editor state.  The cursor is 0-based (line, col); the buffer is a line vector.
 struct Editor
@@ -6117,6 +6118,20 @@ fn show_bytes(s: Str) -> Str
 @intent("""`--dump-keymaps` debug entry point: resolve the nvim config dir, scrape
 its leader + Normal-mode maps, and print each `lhs -> rhs` with control bytes
 shown printably — no TUI.  The headless test hook for the importer.""")
+// `--fuzzy-rank <query> <file>` debug command: rank the file's lines as picker
+// candidates and print `score<TAB>candidate`, best first (top 10) — the
+// headless test hook for the fuzzy scorer (like --dump-keymaps for keymaps).
+fn run_fuzzy_rank(query: Str, path: Str) [io]
+    let cands = buf_load(path)
+    let top = fuzzy.rank(query, cands, 10)
+    let m = list.len(top)
+    var i = 0
+    while i < m
+        let idx = top[i]
+        println(str.from_int(fuzzy.score(query, cands[idx])) + str.from_char('\t') + cands[idx])
+        i = i + 1
+    println("matches: " + str.from_int(fuzzy.match_count(query, cands)) + "/" + str.from_int(list.len(cands)))
+
 fn run_dump_keymaps() [io]
     let dir = default_nvim_dir()
     let text = collect_lua(dir, 0)
@@ -6344,6 +6359,8 @@ fn main() [io, time]
     var lsp_diag = false
     var lsp_resolve = false
     var dump_keymaps = false
+    var fuzzy_rank = false
+    var fuzzy_query = ""
     let mut i = 1
     while i < n
         let a = argv[i]
@@ -6363,6 +6380,10 @@ fn main() [io, time]
         elif a == "--dump-keymaps"
             dump_keymaps = true
             i = i + 1
+        elif a == "--fuzzy-rank" and i + 1 < n
+            fuzzy_query = argv[i + 1]
+            fuzzy_rank = true
+            i = i + 2
         elif file == ""
             file = a
             i = i + 1
@@ -6372,8 +6393,10 @@ fn main() [io, time]
     let cfg_path = if cfg != "" then cfg else default_config_path()
     if dump_keymaps
         run_dump_keymaps()
+    elif fuzzy_rank and file != ""
+        run_fuzzy_rank(fuzzy_query, file)
     elif file == ""
-        println("usage: novim [--config <toml>] [--batch <keys>] [--lsp-diag] [--lsp-resolve] [--dump-keymaps] <file>...")
+        println("usage: novim [--config <toml>] [--batch <keys>] [--lsp-diag] [--lsp-resolve] [--dump-keymaps] [--fuzzy-rank <q>] <file>...")
     elif lsp_resolve
         run_lsp_resolve(cfg_path, file)
     elif lsp_diag

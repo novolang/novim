@@ -1,0 +1,106 @@
+// fuzzy.nv — the picker's fuzzy scorer (:files / :grep / :bufs / :pins).
+//
+// Subsequence matching with the usual bonuses (word-boundary, camelCase,
+// consecutive-run, filename-over-path weighting), per the picker-and-pins
+// spec: ripgrep is the *producer*, novim is the *ranker*.  Pure — no [io];
+// the picker overlay in main.nv drives it.
+//
+// score(query, cand):
+//   -1  when `query` is not a case-insensitive subsequence of `cand`
+//    0  for the empty query (everything matches equally — `:files` with no
+//       query lists in producer order)
+//   >0  otherwise; higher = better.
+
+use util
+
+// ASCII case-fold.
+fn lower_b(b: Int) -> Int
+    if b >= 'A' and b <= 'Z' then b + 32 else b
+
+@intent("""Score `query` against `cand` as a case-insensitive subsequence match
+(greedy left-to-right).  Per matched char: +1 base, +5 when consecutive with the
+previous match, +10 at the candidate start or after a separator (`/ _ - . space`),
++7 at a camelCase boundary, +8 inside the basename (after the last `/`).  Skipped
+candidate chars between matches cost -1 (skips before the first match are free —
+the basename bonus already rewards late, filename-local matches).  Returns -1
+when the query is not a subsequence.""")
+fn score(query: Str, cand: Str) -> Int
+    let qn = str.len(query)
+    if qn == 0
+        return 0
+    let cn = str.len(cand)
+    var base_at = 0                        // first byte after the last '/'
+    var k = 0
+    while k < cn
+        if (str.byte_at(cand, k) ?? 0) == '/'
+            base_at = k + 1
+        k = k + 1
+    var s = 0
+    var qi = 0
+    var ci = 0
+    var prev_hit = 0 - 2                   // candidate index of the previous match
+    while qi < qn and ci < cn
+        let cb = str.byte_at(cand, ci) ?? 0
+        if lower_b(str.byte_at(query, qi) ?? 0) == lower_b(cb)
+            s = s + 1
+            if ci == prev_hit + 1
+                s = s + 5                  // consecutive run
+            if ci == 0
+                s = s + 10                 // start of the candidate
+            else
+                let pb = str.byte_at(cand, ci - 1) ?? 0
+                if pb == '/' or pb == '_' or pb == '-' or pb == '.' or pb == ' '
+                    s = s + 10             // word boundary
+                elif pb >= 'a' and pb <= 'z' and cb >= 'A' and cb <= 'Z'
+                    s = s + 7              // camelCase boundary
+            if ci >= base_at
+                s = s + 8                  // filename-over-path weighting
+            prev_hit = ci
+            qi = qi + 1
+        elif prev_hit >= 0
+            s = s - 1                      // gap between matches
+        ci = ci + 1
+    if qi < qn then 0 - 1 else s
+
+@intent("""Rank `cands` for `query`: indices of the best-scoring candidates,
+best first, at most `limit` of them; non-matches (score -1) are excluded.  Ties
+keep producer order (stable).  O(n * limit) partial selection — the picker only
+shows a screenful, so `limit` is small.""")
+fn rank(query: Str, cands: [Str], limit: Int) -> [Int]
+    let n = list.len(cands)
+    var scores: [Int] = []
+    var i = 0
+    while i < n
+        scores = list.push(scores, score(query, cands[i]))
+        i = i + 1
+    var out: [Int] = []
+    var round = 0
+    var more = true
+    while more and round < limit
+        var best = 0 - 1
+        var bs = 0 - 1
+        var j = 0
+        while j < n
+            if scores[j] > bs
+                bs = scores[j]
+                best = j
+            j = j + 1
+        if best >= 0 and bs >= 0
+            out = list.push(out, best)
+            scores = util.set_int_at(scores, best, 0 - 2)   // consumed
+            round = round + 1
+        else
+            more = false
+    out
+
+// Total number of candidates that match `query` at all (for the picker's
+// honest "N of M" footer when the list is truncated).
+fn match_count(query: Str, cands: [Str]) -> Int
+    let n = list.len(cands)
+    var c = 0
+    var i = 0
+    while i < n
+        if score(query, cands[i]) >= 0
+            c = c + 1
+        i = i + 1
+    c
