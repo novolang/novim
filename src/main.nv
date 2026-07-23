@@ -5071,8 +5071,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                         let ptop = fuzzy.rank(picker_query, picker_cands, pmaxh)
                         if picker_sel < list.len(ptop)
                             let ridx = ptop[picker_sel]
-                            if picker_src == 0 and picker_meta[ridx] != curpath
-                                want_path = picker_meta[ridx]   // buffer switch (saved cursor restored)
+                            if picker_meta[ridx] != curpath   // :bufs switch / :files open
+                                want_path = picker_meta[ridx]   // want_path opens unseen files too
                                 want_y = 0 - 1
                                 want_x = 0
                         picker_active = false
@@ -5325,6 +5325,19 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                 picker_marks = list.push(picker_marks, if pbi == cur_buf then "% " elif pbi == alt_buf then "# " else "  ")
                                 picker_meta = list.push(picker_meta, bufs_path[pbi])
                                 pbi = pbi + 1
+                        elif excmd.is_files(cmd_buf)         // :files [query] — the file picker
+                            picker_active = true
+                            picker_src = 1
+                            picker_query = excmd.files_query(cmd_buf)
+                            picker_sel = 0
+                            picker_cands = files_candidates(10000)
+                            picker_marks = []
+                            picker_meta = []
+                            var pfi = 0
+                            while pfi < list.len(picker_cands)
+                                picker_marks = list.push(picker_marks, "  ")
+                                picker_meta = list.push(picker_meta, picker_cands[pfi])
+                                pfi = pfi + 1
                         elif excmd.is_bufcmd(cmd_buf)
                             let nb = list.len(bufs_path)
                             let bk = excmd.bufcmd_kind(cmd_buf)
@@ -6173,6 +6186,70 @@ fn clip_paste() -> Str [io, time]
             let r = str.builder_to_str(sb)
             str.builder_drop(sb)
             proc.close(pid)
+            r
+
+// ── `:files` picker source (picker-and-pins) ────────────────────────────────
+
+// Drain a child process's stdout to EOF (poll-gated so a stuck child can't
+// freeze the editor), split into lines.  Reaps the child.
+fn proc_drain_lines(pid: Int) -> [Str] [io, time]
+    let out = proc.stdout_fd(pid)
+    let sb = str.builder_new()
+    var more = true
+    while more
+        if proc.poll(out, 800) == 1
+            let b = proc.read_byte(out)
+            if b < 0
+                more = false
+            else
+                str.builder_append_char(sb, b)
+        else
+            more = false                  // 800ms idle → EOF or stalled
+    let text = str.builder_to_str(sb)
+    str.builder_drop(sb)
+    proc.close(pid)
+    str.split_lines(text)
+
+// Internal recursive file walk (the no-ripgrep fallback for `:files`) —
+// relative paths, skipping VCS/build dirs, bounded depth + count.
+fn walk_files(dir: Str, prefix: Str, depth: Int, acc: [Str], cap: Int) -> [Str] [io]
+    if depth > 12 or list.len(acc) >= cap
+        return acc
+    var a = acc
+    let entries = fs.read_dir(dir)
+    var i = 0
+    while i < list.len(entries) and list.len(a) < cap
+        let name = entries[i]
+        if name != ".git" and name != "_novo" and name != "_build" and name != "node_modules"
+            let full = path.join(dir, name)
+            let rel = if str.len(prefix) == 0 then name else prefix + "/" + name
+            if fs.is_dir(full)
+                a = walk_files(full, rel, depth + 1, a, cap)
+            else
+                a = list.push(a, rel)
+        i = i + 1
+    a
+
+@intent("""Produce the `:files` candidate list: `rg --files` (respects
+.gitignore) when ripgrep is available, else the internal walk.  Relative paths
+either way (both are cwd-relative, matching `:e <rel>`).  Empty lines dropped;
+capped at `cap` entries.""")
+fn files_candidates(cap: Int) -> [Str] [io, time]
+    match proc.spawn(["rg", "--files"])
+        None =>
+            walk_files(".", "", 0, [], cap)
+        Some(pid) =>
+            let raw = proc_drain_lines(pid)
+            var out: [Str] = []
+            var i = 0
+            while i < list.len(raw) and list.len(out) < cap
+                if str.len(raw[i]) > 0
+                    out = list.push(out, raw[i])
+                i = i + 1
+            // let-bound, NOT a tail if/else: a statement-tail if returning a
+            // push-rebound var reads its pre-push value under --llvm — see
+            // bugs/codegen-llvm/stmt-tail-if-value-stale-after-push-rebind.md
+            let r = if list.len(out) == 0 then walk_files(".", "", 0, [], cap) else out
             r
 
 // Recursively concatenate every `*.lua` under `dir` (newline-separated) into one
