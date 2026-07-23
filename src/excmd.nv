@@ -290,6 +290,12 @@ fn is_yank(cmd: Str) -> Bool
     let c = range_body(cmd)
     c == "y" or c == "ya" or c == "yan" or c == "yank"
 
+// `:retab` / `:ret` (optionally ranged; bare = whole buffer, vim-style) —
+// convert each line's LEADING tabs to spaces at the current tabstop.
+fn is_retab(cmd: Str) -> Bool
+    let c = range_body(cmd)
+    c == "ret" or c == "reta" or c == "retab"
+
 // `:>` / `:<` (optionally ranged, repeatable `:>>`) — shift lines right/left.
 // Returns +N for N indent levels, -N for N dedent levels, 0 for neither.
 fn shift_amount(cmd: Str) -> Int

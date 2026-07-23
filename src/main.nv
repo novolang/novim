@@ -2531,7 +2531,29 @@ fn ex_delete(ed: Editor, cmd: Str, vlo: Int, vhi: Int) -> Editor
 (repeatable: `:>>` is two).  No range → the current line; `:2,5>` / `:'<,'>>` a
 block.  Reuses indent_one/dedent_one so it honours the same tab/space rule as
 `>>`.""")
-fn ex_shift(ed: Editor, cmd: Str, vlo: Int, vhi: Int) -> Editor
+// One indent level with expandtab awareness: `et` inserts `ts` spaces, else a
+// hard tab (indent_one).  Blank lines are left alone either way.
+fn indent_one_et(line: Str, et: Bool, ts: Int) -> Str
+    if str.len(line) == 0
+        line
+    elif et
+        disp.nspaces(ts) + line
+    else
+        indent_one(line)
+
+// Remove one indent level: a leading tab, or up to `ts` leading spaces.
+fn dedent_one_et(line: Str, ts: Int) -> Str
+    let n = str.len(line)
+    if n == 0
+        return line
+    if (str.byte_at(line, 0) ?? 0) == '\t'
+        return str.slice(line, 1, n)
+    var k = 0
+    while k < ts and k < n and (str.byte_at(line, k) ?? 0) == ' '
+        k = k + 1
+    str.slice(line, k, n)
+
+fn ex_shift(ed: Editor, cmd: Str, vlo: Int, vhi: Int, et: Bool, ts: Int) -> Editor
     let nl = list.len(ed.lines)
     let amt = excmd.shift_amount(cmd)
     let rs = excmd.parse_range(cmd, vlo, vhi, ed.cy, nl)
@@ -2546,13 +2568,48 @@ fn ex_shift(ed: Editor, cmd: Str, vlo: Int, vhi: Int) -> Editor
             var line = ed.lines[i]
             var k = 0
             while k < levels
-                line = if right then indent_one(line) else dedent_one(line)
+                line = if right then indent_one_et(line, et, ts) else dedent_one_et(line, ts)
                 k = k + 1
             ls = list.push(ls, line)
         else
             ls = list.push(ls, ed.lines[i])
         i = i + 1
     clamp(Editor { lines: ls, cy: lo, cx: first_nonblank(ls[lo]) })
+
+@intent("""`:retab` — replace each line's LEADING whitespace with spaces at the
+current tabstop (a tab advances to the next `ts` multiple, so mixed tab/space
+indents keep their visual width).  Bare `:retab` covers the whole buffer
+(vim behaviour); a range (`:2,5retab`, `:'<,'>retab`) limits it.  Non-leading
+tabs are left untouched.""")
+fn ex_retab(ed: Editor, cmd: Str, vlo: Int, vhi: Int, ts: Int) -> Editor
+    let nl = list.len(ed.lines)
+    let rs = excmd.parse_range(cmd, vlo, vhi, ed.cy, nl)
+    let lo = if rs.has then rs.lo else 0
+    let hi = if rs.has then rs.hi else nl - 1
+    var ls: [Str] = []
+    var i = 0
+    while i < nl
+        if i >= lo and i <= hi
+            let line = ed.lines[i]
+            let n = str.len(line)
+            var w = 0                        // visual width of the leading run
+            var j = 0
+            var scan = true
+            while scan and j < n
+                let c = str.byte_at(line, j) ?? 0
+                if c == '\t'
+                    w = w + (ts - w % ts)    // advance to the next tabstop
+                    j = j + 1
+                elif c == ' '
+                    w = w + 1
+                    j = j + 1
+                else
+                    scan = false
+            ls = list.push(ls, disp.nspaces(w) + str.slice(line, j, n))
+        else
+            ls = list.push(ls, ed.lines[i])
+        i = i + 1
+    clamp(Editor { lines: ls, cy: ed.cy, cx: ed.cx })
 
 // Serialise the line buffer to file text (one trailing newline per line).
 fn buf_to_str(lines: [Str]) -> Str
@@ -2783,7 +2840,8 @@ fn import_nvim_keymaps(dir: Str, base: Keymap) -> Keymap [io]
 @intent("""Editor settings, loaded from the `[options]` config section and
 toggled live by `:set`.  `number`/`relativenumber` drive the line-number gutter,
 `hlsearch` the search highlighting, `wrap` soft line wrapping, `syntax` the Novo
-highlighter, and `tabstop` the tab-expansion width.""")
+highlighter, `tabstop` the tab-expansion width, and `expandtab` makes the Tab
+key insert `tabstop` spaces instead of a hard tab (vim's `et`).""")
 struct Options
     number:         Bool
     relativenumber: Bool
@@ -2791,9 +2849,10 @@ struct Options
     wrap:           Bool
     syntax:         Bool
     tabstop:        Int
+    expandtab:      Bool
 
 fn options_default() -> Options
-    Options { number: false, relativenumber: false, hlsearch: true, wrap: false, syntax: true, tabstop: 8 }
+    Options { number: false, relativenumber: false, hlsearch: true, wrap: false, syntax: true, tabstop: 8, expandtab: false }
 
 fn parse_bool_val(s: Str) -> Bool
     str.trim(util.strip_quotes(str.trim(s))) == "true"
@@ -2808,6 +2867,7 @@ fn load_options(cfg_path: Str) -> Options [io]
             var wrap = false
             var syntax = true
             var tabstop = 8
+            var expandtab = false
             let lines = str.split_lines(content)
             var in_opt = false
             let mut i = 0
@@ -2836,8 +2896,10 @@ fn load_options(cfg_path: Str) -> Options [io]
                                 let tv = util.parse_color_val(valr)
                                 if tv > 0
                                     tabstop = tv
+                            elif key == "expandtab" or key == "et"
+                                expandtab = parse_bool_val(valr)
                 i = i + 1
-            Options { number: number, relativenumber: relativenumber, hlsearch: hlsearch, wrap: wrap, syntax: syntax, tabstop: tabstop }
+            Options { number: number, relativenumber: relativenumber, hlsearch: hlsearch, wrap: wrap, syntax: syntax, tabstop: tabstop, expandtab: expandtab }
 
 // Number formatting (pad_num / pad_num_l / num_digits) and `nspaces` moved to
 // disp.nv (pure display helpers).
@@ -2881,7 +2943,7 @@ fn apply_set_token(o: Options, tok: Str) -> Options
         let nm = str.trim(str.slice(t, 0, eq))
         let v = util.parse_color_val(str.slice(t, eq + 1, str.len(t)))
         if (nm == "tabstop" or nm == "ts") and v > 0
-            return Options { number: o.number, relativenumber: o.relativenumber, hlsearch: o.hlsearch, wrap: o.wrap, syntax: o.syntax, tabstop: v }
+            return Options { number: o.number, relativenumber: o.relativenumber, hlsearch: o.hlsearch, wrap: o.wrap, syntax: o.syntax, tabstop: v, expandtab: o.expandtab }
         return o
     let n = str.len(t)
     let bang = (str.byte_at(t, n - 1) ?? 0) == '!'          // trailing !
@@ -2889,15 +2951,17 @@ fn apply_set_token(o: Options, tok: Str) -> Options
     let neg = str.len(body) >= 2 and str.slice(body, 0, 2) == "no"
     let name = if neg then str.slice(body, 2, str.len(body)) else body
     if name == "number" or name == "nu"
-        return Options { number: if bang then (not o.number) elif neg then false else true, relativenumber: o.relativenumber, hlsearch: o.hlsearch, wrap: o.wrap, syntax: o.syntax, tabstop: o.tabstop }
+        return Options { number: if bang then (not o.number) elif neg then false else true, relativenumber: o.relativenumber, hlsearch: o.hlsearch, wrap: o.wrap, syntax: o.syntax, tabstop: o.tabstop, expandtab: o.expandtab }
     elif name == "relativenumber" or name == "rnu"
-        return Options { number: o.number, relativenumber: if bang then (not o.relativenumber) elif neg then false else true, hlsearch: o.hlsearch, wrap: o.wrap, syntax: o.syntax, tabstop: o.tabstop }
+        return Options { number: o.number, relativenumber: if bang then (not o.relativenumber) elif neg then false else true, hlsearch: o.hlsearch, wrap: o.wrap, syntax: o.syntax, tabstop: o.tabstop, expandtab: o.expandtab }
     elif name == "hlsearch" or name == "hls"
-        return Options { number: o.number, relativenumber: o.relativenumber, hlsearch: if bang then (not o.hlsearch) elif neg then false else true, wrap: o.wrap, syntax: o.syntax, tabstop: o.tabstop }
+        return Options { number: o.number, relativenumber: o.relativenumber, hlsearch: if bang then (not o.hlsearch) elif neg then false else true, wrap: o.wrap, syntax: o.syntax, tabstop: o.tabstop, expandtab: o.expandtab }
     elif name == "wrap"
-        return Options { number: o.number, relativenumber: o.relativenumber, hlsearch: o.hlsearch, wrap: if bang then (not o.wrap) elif neg then false else true, syntax: o.syntax, tabstop: o.tabstop }
+        return Options { number: o.number, relativenumber: o.relativenumber, hlsearch: o.hlsearch, wrap: if bang then (not o.wrap) elif neg then false else true, syntax: o.syntax, tabstop: o.tabstop, expandtab: o.expandtab }
     elif name == "syntax" or name == "syn"
-        return Options { number: o.number, relativenumber: o.relativenumber, hlsearch: o.hlsearch, wrap: o.wrap, syntax: if bang then (not o.syntax) elif neg then false else true, tabstop: o.tabstop }
+        return Options { number: o.number, relativenumber: o.relativenumber, hlsearch: o.hlsearch, wrap: o.wrap, syntax: if bang then (not o.syntax) elif neg then false else true, tabstop: o.tabstop, expandtab: o.expandtab }
+    elif name == "expandtab" or name == "et"
+        return Options { number: o.number, relativenumber: o.relativenumber, hlsearch: o.hlsearch, wrap: o.wrap, syntax: o.syntax, tabstop: o.tabstop, expandtab: if bang then (not o.expandtab) elif neg then false else true }
     else
         o
 
@@ -3647,6 +3711,7 @@ fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
     var st = ist_new()
     var es = edit_new()
     let km = load_keymaps(cfg_path)
+    var opts = load_options(cfg_path)    // tabstop/expandtab drive edits, not just render
     let batch_rows = term_rows()         // 24 off-tty — makes paging deterministic
     let decoded = decode_escapes(keys)
     var cmd_mode = false
@@ -3682,7 +3747,7 @@ fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
                     ed = ex_delete(ed, cmd_buf, rng_vlo, rng_vhi)
                 elif excmd.shift_amount(cmd_buf) != 0
                     es = edit_push_undo(es, ed)
-                    ed = ex_shift(ed, cmd_buf, rng_vlo, rng_vhi)
+                    ed = ex_shift(ed, cmd_buf, rng_vlo, rng_vhi, opts.expandtab, opts.tabstop)
                 elif excmd.is_yank(cmd_buf)
                     let rs = excmd.parse_range(cmd_buf, rng_vlo, rng_vhi, ed.cy, list.len(ed.lines))
                     let ylo = if rs.has then rs.lo else ed.cy
@@ -3691,6 +3756,11 @@ fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
                     st = ist_set_reg(st, ytext, true)        // linewise → unnamed register
                     es = edit_numreg_yank(es, ytext, true)
                     ed = clamp(Editor { lines: ed.lines, cy: yhi, cx: 0 })
+                elif excmd.is_retab(cmd_buf)
+                    es = edit_push_undo(es, ed)
+                    ed = ex_retab(ed, cmd_buf, rng_vlo, rng_vhi, opts.tabstop)
+                elif is_set(cmd_buf)
+                    opts = apply_set(opts, cmd_buf)   // tabstop/expandtab affect edits in batch too
                 elif excmd.is_goto(cmd_buf)
                     ed = ex_goto(ed, cmd_buf)
                 else
@@ -3750,6 +3820,15 @@ fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
         elif scroll_idle(st, es) and key_free(km, b) and b == '&' and str.len(last_subst) > 0   // & — repeat last :s on this line
             es = edit_push_undo(es, ed)
             ed = ex_substitute(ed, excmd.subst_current_line(last_subst))
+        elif b == '\t' and (st.mode == 1 or st.mode == 4) and opts.expandtab
+            // expandtab: Tab in Insert/Replace inserts `tabstop` spaces.
+            var sp = 0
+            while sp < opts.tabstop
+                let estep = feed_edit(ed, st, km, es, ' ')
+                ed = estep.ed
+                st = estep.st
+                es = estep.es
+                sp = sp + 1
         else
             let estep = feed_edit(ed, st, km, es, b)
             ed = estep.ed
@@ -4949,7 +5028,10 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                             ed = ex_delete(ed, cmd_buf, rng_vlo, rng_vhi)
                         elif excmd.shift_amount(cmd_buf) != 0
                             es = edit_push_undo(es, ed)
-                            ed = ex_shift(ed, cmd_buf, rng_vlo, rng_vhi)
+                            ed = ex_shift(ed, cmd_buf, rng_vlo, rng_vhi, opts.expandtab, opts.tabstop)
+                        elif excmd.is_retab(cmd_buf)
+                            es = edit_push_undo(es, ed)
+                            ed = ex_retab(ed, cmd_buf, rng_vlo, rng_vhi, opts.tabstop)
                         elif excmd.is_yank(cmd_buf)
                             let rs = excmd.parse_range(cmd_buf, rng_vlo, rng_vhi, ed.cy, list.len(ed.lines))
                             let ylo = if rs.has then rs.lo else ed.cy
@@ -5522,6 +5604,11 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 elif st.mode == 1 and b == '\x0f'    // Ctrl-O — run one Normal command, then back to Insert
                     insert_oneshot = true
                     st = ist_done(st)                // drop to idle Normal for the next command
+                elif b == '\t' and (st.mode == 1 or st.mode == 4) and opts.expandtab
+                    // expandtab: Tab in Insert/Replace becomes `tabstop` spaces —
+                    // queued through the replay path so each space runs the full
+                    // per-key machinery (block-insert tracking, undo, …).
+                    map_replay = disp.nspaces(opts.tabstop) + map_replay
                 else
                     if comp_active                   // any other key commits the candidate
                         comp_active = false
