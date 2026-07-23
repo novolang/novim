@@ -296,6 +296,22 @@ fn is_retab(cmd: Str) -> Bool
     let c = range_body(cmd)
     c == "ret" or c == "reta" or c == "retab"
 
+// ── Picker commands (picker-and-pins) ────────────────────────────────────
+// `:bufs` — the interactive picker over open buffers (`:ls` stays text-only).
+fn is_bufs(cmd: Str) -> Bool
+    str.trim(cmd) == "bufs"
+
+// `:files [query]` / `:findfiles [query]` — file picker; optional initial query.
+fn is_files(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    c == "files" or c == "findfiles" or str.starts_with(c, "files ") or str.starts_with(c, "findfiles ")
+
+// The optional initial query of a `:files`-family command.
+fn files_query(cmd: Str) -> Str
+    let c = str.trim(cmd)
+    let sp = util.index_of_byte(c, ' ')
+    if sp < 0 then "" else str.trim(str.slice(c, sp + 1, str.len(c)))
+
 // `:>` / `:<` (optionally ranged, repeatable `:>>`) — shift lines right/left.
 // Returns +N for N indent levels, -N for N dedent levels, 0 for neither.
 fn shift_amount(cmd: Str) -> Int

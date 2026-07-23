@@ -2245,6 +2245,41 @@ fn mark_all_saved(texts: [Str], disks: [Str]) -> [Str]
 // A one-line buffer list for `:ls`, marking the current with [..].
 // Render the `:ls` buffer-list overlay over the top rows; the current buffer is
 // marked with `>`.  Dismissed by the next keypress (the normal render repaints).
+// Truncate or space-pad `s` to exactly `w` columns (overlay rows must fully
+// cover what's beneath them).
+fn pad_to(s: Str, w: Int) -> Str
+    let n = str.len(s)
+    if n >= w then str.slice(s, 0, w) else s + disp.nspaces(w - n)
+
+@intent("""Draw the interactive picker overlay (picker-and-pins): a centered
+box — reverse-video prompt row (`> query`), then the fuzzy-ranked candidate
+rows (row = mark + candidate, selection in reverse), then a truncation footer
+when more candidates match than fit.  Parks the terminal cursor at the prompt
+insertion point.  Modal: the driver routes all input here while active.""")
+fn draw_picker(cands: [Str], marks: [Str], top_idx: [Int], sel: Int, query: Str, nmatch: Int, rows: Int, cols: Int) [io]
+    let h = list.len(top_idx)
+    let boxw = if cols - 8 < 60 then cols - 8 else 60
+    let x0 = (cols - boxw) / 2 + 1
+    let y0 = 2
+    cup(y0, x0)
+    sgr("7")
+    emit(pad_to(" > " + query, boxw))
+    sgr("0")
+    var ri = 0
+    while ri < h
+        cup(y0 + 1 + ri, x0)
+        let row = " " + marks[top_idx[ri]] + cands[top_idx[ri]]
+        if ri == sel
+            sgr("7")
+        emit(pad_to(row, boxw))
+        if ri == sel
+            sgr("0")
+        ri = ri + 1
+    if nmatch > h
+        cup(y0 + 1 + h, x0)
+        emit(pad_to(" " + str.from_int(h) + " of " + str.from_int(nmatch) + " matches", boxw))
+    cup(y0, x0 + 3 + str.len(query))
+
 fn draw_buflist(paths: [Str], cur: Int, rows: Int) [io]
     var bi = 0
     let maxn = if rows - 2 > 0 then rows - 2 else 1
@@ -4752,6 +4787,14 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     // Deferred focus change to this window id (Ctrl-W w / h / j / k / l); -1 none.
     var pending_focus = 0 - 1
     var buflist = false                  // `:ls` — show the buffer-list overlay until the next key
+    // ── Picker overlay (picker-and-pins): modal prompt + fuzzy-ranked list ──
+    var picker_active = false
+    var picker_src = 0                   // 0 = :bufs (files/grep/pins are later slices)
+    var picker_query = ""
+    var picker_sel = 0                   // selection index into the ranked view
+    var picker_cands: [Str] = []         // scored + displayed rows
+    var picker_marks: [Str] = []         // per-row display prefix ("% " current, "# " alternate)
+    var picker_meta: [Str] = []          // per-row action payload (bufs: the buffer path)
     var modified = false                 // active buffer differs from disk → status `[+]`
     var lsp_dirty = false                // buffer changed since the last didChange
     var lsp_idle = 0                      // consecutive idle poll cycles (debounce)
@@ -4867,7 +4910,20 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                             esc_skip = true
                         else
                             let packed = if nx == '[' then csi_finish(c1) else csi_seq()
-                            if packed >= 0 and not cmd_mode and not search_mode
+                            // Picker: Up/Down move the selection (same as Ctrl-P/N).
+                            if packed >= 0 and picker_active
+                                let kfin = packed % 256
+                                let kmaxh = if rows - 6 < 10 then rows - 6 else 10
+                                if kfin == 'B'
+                                    let kcnt = list.len(fuzzy.rank(picker_query, picker_cands, kmaxh))
+                                    if picker_sel + 1 < kcnt
+                                        picker_sel = picker_sel + 1
+                                    changed = true
+                                elif kfin == 'A'
+                                    if picker_sel > 0
+                                        picker_sel = picker_sel - 1
+                                    changed = true
+                            if packed >= 0 and not cmd_mode and not search_mode and not picker_active
                                 let fin = packed % 256
                                 let prm = packed / 256
                                 let ins = st.mode == 1 or st.mode == 4
@@ -4986,7 +5042,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 // block), 2 = Insert; Replace (4) doesn't run it.
                 let mclass = if st.mode == 0 then 0 elif st.mode == 2 or st.mode == 3 or st.mode == 5 then 1 elif st.mode == 1 then 2 else 0 - 1
                 var map_eat = false
-                if km_active and mclass >= 0 and not from_replay and not esc_skip and b >= 0 and not cmd_mode and not search_mode and not zpend and not wpend and not gpend and not cpend and not cpend_obj and not vgc_pend and not comp_active and esc_pushback == 0 - 99
+                if km_active and mclass >= 0 and not from_replay and not esc_skip and b >= 0 and not cmd_mode and not search_mode and not picker_active and not zpend and not wpend and not gpend and not cpend and not cpend_obj and not vgc_pend and not comp_active and esc_pushback == 0 - 99
                     let cand = map_pending + str.from_char(b)
                     let ei = keymap_seq_idx(km, cand, mclass)
                     if ei >= 0
@@ -5009,6 +5065,39 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 elif b == -1
                     done = true
                     running = false
+                elif picker_active                       // modal picker input
+                    let pmaxh = if rows - 6 < 10 then rows - 6 else 10
+                    if b == '\r' or b == '\n'            // Enter — act on the selection
+                        let ptop = fuzzy.rank(picker_query, picker_cands, pmaxh)
+                        if picker_sel < list.len(ptop)
+                            let ridx = ptop[picker_sel]
+                            if picker_src == 0 and picker_meta[ridx] != curpath
+                                want_path = picker_meta[ridx]   // buffer switch (saved cursor restored)
+                                want_y = 0 - 1
+                                want_x = 0
+                        picker_active = false
+                        changed = true
+                    elif b == '\e'                       // Esc — dismiss
+                        picker_active = false
+                        changed = true
+                    elif b == '\x0e'                     // Ctrl-N — next row
+                        let pcnt = list.len(fuzzy.rank(picker_query, picker_cands, pmaxh))
+                        if picker_sel + 1 < pcnt
+                            picker_sel = picker_sel + 1
+                        changed = true
+                    elif b == '\x10'                     // Ctrl-P — previous row
+                        if picker_sel > 0
+                            picker_sel = picker_sel - 1
+                        changed = true
+                    elif b == '\x7f' or b == '\b'        // Backspace — shrink the query
+                        if str.len(picker_query) > 0
+                            picker_query = str.slice(picker_query, 0, str.len(picker_query) - 1)
+                            picker_sel = 0
+                        changed = true
+                    elif b >= ' ' and b < '\x7f'         // type — extend the query, re-rank
+                        picker_query = picker_query + str.from_char(b)
+                        picker_sel = 0
+                        changed = true
                 elif cmd_mode
                     if b == '\r' or b == '\n'            // Enter — run command
                         if excmd.is_substitute(cmd_buf)
@@ -5222,6 +5311,20 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                     want_path = arglist[tgt]
                                     want_y = 0 - 1
                                     want_x = 0
+                        elif excmd.is_bufs(cmd_buf)          // :bufs — the interactive buffer picker
+                            picker_active = true
+                            picker_src = 0
+                            picker_query = ""
+                            picker_sel = 0
+                            picker_cands = []
+                            picker_marks = []
+                            picker_meta = []
+                            var pbi = 0
+                            while pbi < list.len(bufs_path)
+                                picker_cands = list.push(picker_cands, bufs_path[pbi])
+                                picker_marks = list.push(picker_marks, if pbi == cur_buf then "% " elif pbi == alt_buf then "# " else "  ")
+                                picker_meta = list.push(picker_meta, bufs_path[pbi])
+                                pbi = pbi + 1
                         elif excmd.is_bufcmd(cmd_buf)
                             let nb = list.len(bufs_path)
                             let bk = excmd.bufcmd_kind(cmd_buf)
@@ -5948,6 +6051,12 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 cup(rows, 2 + search_cx)         // park the cursor at the insertion point
             if buflist
                 draw_buflist(bufs_path, cur_buf, rows)
+            if picker_active
+                let dmaxh = if rows - 6 < 10 then rows - 6 else 10
+                let dtop = fuzzy.rank(picker_query, picker_cands, dmaxh)
+                if picker_sel >= list.len(dtop)
+                    picker_sel = if list.len(dtop) > 0 then list.len(dtop) - 1 else 0
+                draw_picker(picker_cands, picker_marks, dtop, picker_sel, picker_query, fuzzy.match_count(picker_query, picker_cands), rows, cols)
         if novo_pty_winsize_changed_h() == 1
             rows = term_rows()
             cols = term_cols()
