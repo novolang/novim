@@ -137,6 +137,62 @@ fn history_init() [io]
 fn history_append(prefix: Str, entry: Str) [io]
     let _ = fs.append(history_file(), prefix + entry + str.from_char('\n'))
 
+// ── Pins (harpoon slots, picker-and-pins) ───────────────────────────────────
+// Slot i holds a file path + the cursor at pin time; per-project, persisted
+// under the state dir keyed by the project root, written on change.
+
+// The project root: the nearest ancestor of the cwd containing `.git` or
+// `novo.toml`, else the cwd itself.
+fn project_root() -> Str [io]
+    var d = path.absolute(".")
+    let dn = str.len(d)
+    if dn >= 2 and str.slice(d, dn - 2, dn) == "/."
+        d = str.slice(d, 0, dn - 2)          // path.absolute(".") ends in "/."
+    var probe = d
+    var found = ""
+    var scanning = true
+    while scanning
+        if fs.exists(path.join(probe, ".git")) or fs.exists(path.join(probe, "novo.toml"))
+            found = probe
+            scanning = false
+        else
+            let parent = path.dirname(probe)
+            if parent == probe or str.len(parent) == 0
+                scanning = false
+            else
+                probe = parent
+    if str.len(found) > 0 then found else d
+
+// Encode a root path into a filename component (slashes → '%').
+fn pins_key(root: Str) -> Str
+    var out = ""
+    var i = 0
+    let n = str.len(root)
+    while i < n
+        let b = str.byte_at(root, i) ?? 0
+        out = out + (if b == '/' then "%" else str.from_char(b))
+        i = i + 1
+    out
+
+fn pins_file(root: Str) -> Str [io]
+    let xdg = process.env("XDG_STATE_HOME") ?? ""
+    let base = if str.len(xdg) > 0 then xdg else path.join(process.env("HOME") ?? "", ".local/state")
+    path.join(path.join(base, "novim"), "pins-" + pins_key(root))
+
+// One line per slot: `path<TAB>y<TAB>x`; an empty line is a free slot.
+fn pins_save(root: Str, pp: [Str], py: [Int], px: [Int]) [io]
+    let f = pins_file(root)
+    let _ = fs.mkdir_all(path.dirname(f))
+    var out = ""
+    var i = 0
+    let n = list.len(pp)
+    while i < n
+        if str.len(pp[i]) > 0
+            out = out + pp[i] + str.from_char('\t') + str.from_int(py[i]) + str.from_char('\t') + str.from_int(px[i])
+        out = out + str.from_char('\n')
+        i = i + 1
+    let _ = fs.write(f, out)
+
 @intent("""Clamp the cursor into the buffer bounds, following the vim
 normal-mode rule: cx sits on the last glyph (len-1), or col 0 on an empty
 line.""")
@@ -4795,6 +4851,33 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var picker_cands: [Str] = []         // scored + displayed rows
     var picker_marks: [Str] = []         // per-row display prefix ("% " current, "# " alternate)
     var picker_meta: [Str] = []          // per-row action payload (bufs: the buffer path)
+    // ── Pins (harpoon slots): per-project, persisted, loaded at start ──
+    let pins_root = project_root()
+    var pins_p: [Str] = []               // slot i → pinned path ("" = free)
+    var pins_y: [Int] = []
+    var pins_x: [Int] = []
+    let praw = fs.read(pins_file(pins_root)) ?? ""
+    if str.len(praw) > 0
+        let plines = str.split_lines(praw)
+        var pli = 0
+        while pli < list.len(plines)
+            let pln = plines[pli]
+            let pt1 = util.index_of_byte(pln, '\t')
+            if pt1 > 0
+                let pt2 = util.index_of_byte_from(pln, '\t', pt1 + 1)
+                if pt2 > pt1
+                    pins_p = list.push(pins_p, str.slice(pln, 0, pt1))
+                    pins_y = list.push(pins_y, str.to_int(str.slice(pln, pt1 + 1, pt2)) ?? 0)
+                    pins_x = list.push(pins_x, str.to_int(str.slice(pln, pt2 + 1, str.len(pln))) ?? 0)
+                else
+                    pins_p = list.push(pins_p, "")
+                    pins_y = list.push(pins_y, 0)
+                    pins_x = list.push(pins_x, 0)
+            else
+                pins_p = list.push(pins_p, "")
+                pins_y = list.push(pins_y, 0)
+                pins_x = list.push(pins_x, 0)
+            pli = pli + 1
     var modified = false                 // active buffer differs from disk → status `[+]`
     var lsp_dirty = false                // buffer changed since the last didChange
     var lsp_idle = 0                      // consecutive idle poll cycles (debounce)
@@ -5071,10 +5154,17 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                         let ptop = fuzzy.rank(picker_query, picker_cands, pmaxh)
                         if picker_sel < list.len(ptop)
                             let ridx = ptop[picker_sel]
-                            if picker_meta[ridx] != curpath   // :bufs switch / :files open
+                            if picker_meta[ridx] != curpath   // :bufs switch / :files open / :pins jump
                                 want_path = picker_meta[ridx]   // want_path opens unseen files too
                                 want_y = 0 - 1
                                 want_x = 0
+                                if picker_src == 2              // pins restore the pinned cursor
+                                    var pjs = 0
+                                    while pjs < list.len(pins_p)
+                                        if pins_p[pjs] == picker_meta[ridx]
+                                            want_y = pins_y[pjs]
+                                            want_x = pins_x[pjs]
+                                        pjs = pjs + 1
                         picker_active = false
                         changed = true
                     elif b == '\e'                       // Esc — dismiss
@@ -5338,6 +5428,81 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                 picker_marks = list.push(picker_marks, "  ")
                                 picker_meta = list.push(picker_meta, picker_cands[pfi])
                                 pfi = pfi + 1
+                        elif excmd.is_pins(cmd_buf)          // :pins — the pin picker
+                            picker_active = true
+                            picker_src = 2
+                            picker_query = ""
+                            picker_sel = 0
+                            picker_cands = []
+                            picker_marks = []
+                            picker_meta = []
+                            var ppi = 0
+                            while ppi < list.len(pins_p)
+                                if str.len(pins_p[ppi]) > 0
+                                    picker_cands = list.push(picker_cands, pins_p[ppi])
+                                    picker_marks = list.push(picker_marks, str.from_int(ppi + 1) + " ")
+                                    picker_meta = list.push(picker_meta, pins_p[ppi])
+                                ppi = ppi + 1
+                        elif excmd.is_pinjump(cmd_buf)       // :pinjump N — jump to slot N
+                            let jsl = excmd.pin_slot_arg(cmd_buf)
+                            if jsl >= 1 and jsl <= list.len(pins_p) and str.len(pins_p[jsl - 1]) > 0
+                                if pins_p[jsl - 1] != curpath
+                                    want_path = pins_p[jsl - 1]
+                                    want_y = pins_y[jsl - 1]
+                                    want_x = pins_x[jsl - 1]
+                                lsp_info = "pin [" + str.from_int(jsl) + "] " + util.basename_of(pins_p[jsl - 1])
+                            else
+                                lsp_info = "pin [" + str.from_int(jsl) + "]: empty"
+                        elif excmd.is_unpin(cmd_buf)         // :unpin [N] — remove a pin
+                            let usl = excmd.pin_slot_arg(cmd_buf)
+                            var utgt = 0 - 1
+                            if usl >= 1
+                                utgt = usl - 1
+                            else
+                                var usi = 0
+                                while usi < list.len(pins_p)
+                                    if pins_p[usi] == curpath
+                                        utgt = usi
+                                    usi = usi + 1
+                            if utgt >= 0 and utgt < list.len(pins_p) and str.len(pins_p[utgt]) > 0
+                                pins_p = util.set_str_at(pins_p, utgt, "")
+                                pins_save(pins_root, pins_p, pins_y, pins_x)
+                                lsp_info = "unpinned [" + str.from_int(utgt + 1) + "]"
+                            else
+                                lsp_info = "unpin: no pin"
+                        elif excmd.is_pin(cmd_buf)           // :pin [N] — pin the current file
+                            let psl = excmd.pin_slot_arg(cmd_buf)
+                            var phave = 0 - 1
+                            var phi = 0
+                            while phi < list.len(pins_p)
+                                if pins_p[phi] == curpath
+                                    phave = phi
+                                phi = phi + 1
+                            if psl == 0 and phave >= 0
+                                lsp_info = "already pinned [" + str.from_int(phave + 1) + "]"
+                            else
+                                var pslot = 0 - 1
+                                if psl >= 1
+                                    pslot = psl - 1
+                                    if phave >= 0 and phave != pslot
+                                        pins_p = util.set_str_at(pins_p, phave, "")   // a path pins once
+                                else
+                                    var pfi2 = 0
+                                    while pfi2 < list.len(pins_p) and pslot < 0
+                                        if str.len(pins_p[pfi2]) == 0
+                                            pslot = pfi2
+                                        pfi2 = pfi2 + 1
+                                    if pslot < 0
+                                        pslot = list.len(pins_p)
+                                while list.len(pins_p) <= pslot
+                                    pins_p = list.push(pins_p, "")
+                                    pins_y = list.push(pins_y, 0)
+                                    pins_x = list.push(pins_x, 0)
+                                pins_p = util.set_str_at(pins_p, pslot, curpath)
+                                pins_y = util.set_int_at(pins_y, pslot, ed.cy)
+                                pins_x = util.set_int_at(pins_x, pslot, ed.cx)
+                                pins_save(pins_root, pins_p, pins_y, pins_x)
+                                lsp_info = "pinned [" + str.from_int(pslot + 1) + "] " + util.basename_of(curpath)
                         elif excmd.is_bufcmd(cmd_buf)
                             let nb = list.len(bufs_path)
                             let bk = excmd.bufcmd_kind(cmd_buf)

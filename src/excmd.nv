@@ -312,6 +312,31 @@ fn files_query(cmd: Str) -> Str
     let sp = util.index_of_byte(c, ' ')
     if sp < 0 then "" else str.trim(str.slice(c, sp + 1, str.len(c)))
 
+// ── Pins (harpoon slots) ─────────────────────────────────────────────────
+// `:pin` (lowest free slot) / `:pin N` (explicit slot, replacing).
+fn is_pin(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    c == "pin" or str.starts_with(c, "pin ")
+
+// `:unpin` (current file) / `:unpin N` (slot N).
+fn is_unpin(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    c == "unpin" or str.starts_with(c, "unpin ")
+
+// `:pinjump N` — jump straight to slot N.
+fn is_pinjump(cmd: Str) -> Bool
+    str.starts_with(str.trim(cmd), "pinjump ")
+
+// `:pins` — the pin picker.
+fn is_pins(cmd: Str) -> Bool
+    str.trim(cmd) == "pins"
+
+// The 1-based slot argument of a pin command (0 = none given).
+fn pin_slot_arg(cmd: Str) -> Int
+    let c = str.trim(cmd)
+    let sp = util.index_of_byte(c, ' ')
+    if sp < 0 then 0 else parse_uint(str.trim(str.slice(c, sp + 1, str.len(c))))
+
 // `:>` / `:<` (optionally ranged, repeatable `:>>`) — shift lines right/left.
 // Returns +N for N indent levels, -N for N dedent levels, 0 for neither.
 fn shift_amount(cmd: Str) -> Int
