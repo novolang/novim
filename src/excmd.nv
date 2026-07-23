@@ -312,6 +312,12 @@ fn files_query(cmd: Str) -> Str
     let sp = util.index_of_byte(c, ' ')
     if sp < 0 then "" else str.trim(str.slice(c, sp + 1, str.len(c)))
 
+// `:grep [query]` / `:livegrep [query]` — the live-grep picker (rg --vimgrep,
+// re-spawned as the prompt changes).  The argument is shared with files_query.
+fn is_grep(cmd: Str) -> Bool
+    let c = str.trim(cmd)
+    c == "grep" or c == "livegrep" or str.starts_with(c, "grep ") or str.starts_with(c, "livegrep ")
+
 // ── Pins (harpoon slots) ─────────────────────────────────────────────────
 // `:pin` (lowest free slot) / `:pin N` (explicit slot, replacing).
 fn is_pin(cmd: Str) -> Bool

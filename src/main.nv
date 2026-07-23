@@ -2307,34 +2307,86 @@ fn pad_to(s: Str, w: Int) -> Str
     let n = str.len(s)
     if n >= w then str.slice(s, 0, w) else s + disp.nspaces(w - n)
 
-@intent("""Draw the interactive picker overlay (picker-and-pins): a centered
-box — reverse-video prompt row (`> query`), then the fuzzy-ranked candidate
-rows (row = mark + candidate, selection in reverse), then a truncation footer
-when more candidates match than fit.  Parks the terminal cursor at the prompt
-insertion point.  Modal: the driver routes all input here while active.""")
-fn draw_picker(cands: [Str], marks: [Str], top_idx: [Int], sel: Int, query: Str, nmatch: Int, rows: Int, cols: Int) [io]
+// A run of `n` horizontal box-drawing dashes.
+fn hbar(n: Int) -> Str
+    var s = ""
+    var i = 0
+    while i < n
+        s = s + "─"
+        i = i + 1
+    s
+
+// Top border with a centered title: `┌── Title ──┐` (w display columns).
+fn box_top(title: Str, w: Int) -> Str
+    let tl = str.len(title) + 2
+    let fill = w - 2 - tl
+    let lf = if fill > 0 then fill / 2 else 0
+    let rf = if fill > 0 then fill - lf else 0
+    "┌" + hbar(lf) + " " + title + " " + hbar(rf) + "┐"
+
+fn box_bot(w: Int) -> Str
+    "└" + hbar(w - 2) + "┘"
+
+// The picker's results-list height (interior rows) for a terminal of `rows`:
+// total overlay = results box (list + 2 border rows) + a 3-row prompt box.
+fn picker_maxh(rows: Int) -> Int
+    let oh = if rows - 4 < 20 then rows - 4 else 20
+    if oh - 5 > 0 then oh - 5 else 1
+
+@intent("""Draw the interactive picker overlay (picker-and-pins), telescope
+style: a bordered Results box (title centered in the top border) with the
+fuzzy-ranked rows drawn BOTTOM-UP — rank 0 (best) sits on the bottom interior
+row, adjacent to the prompt — and the selection in reverse video with a `>`
+marker; below it a bordered 3-row prompt box carrying the source title, the
+`> query` line, and a right-aligned `nmatch / total` counter.  Parks the
+terminal cursor at the prompt insertion point.  Modal: the driver routes all
+input here while active.""")
+fn draw_picker(cands: [Str], marks: [Str], top_idx: [Int], sel: Int, query: Str, nmatch: Int, total: Int, title: Str, rows: Int, cols: Int) [io]
     let h = list.len(top_idx)
-    let boxw = if cols - 8 < 60 then cols - 8 else 60
+    let maxh = picker_maxh(rows)
+    let boxw = if cols - 8 < 90 then cols - 8 else 90
+    let iw = boxw - 2                        // interior width
     let x0 = (cols - boxw) / 2 + 1
     let y0 = 2
+    // ── results box ──
     cup(y0, x0)
-    sgr("7")
-    emit(pad_to(" > " + query, boxw))
-    sgr("0")
+    emit(box_top("Results", boxw))
     var ri = 0
-    while ri < h
-        cup(y0 + 1 + ri, x0)
-        let row = " " + marks[top_idx[ri]] + cands[top_idx[ri]]
-        if ri == sel
-            sgr("7")
-        emit(pad_to(row, boxw))
-        if ri == sel
-            sgr("0")
+    while ri < maxh
+        // interior row `ri` counted from the BOTTOM: rank ri sits at
+        // y0 + maxh - ri; rows above the ranked count render blank.
+        cup(y0 + maxh - ri, x0)
+        emit("│")
+        if ri < h
+            let row = (if ri == sel then "> " else "  ") + marks[top_idx[ri]] + cands[top_idx[ri]]
+            if ri == sel
+                sgr("7")
+            emit(pad_to(row, iw))
+            if ri == sel
+                sgr("0")
+        else
+            emit(disp.nspaces(iw))
+        emit("│")
         ri = ri + 1
-    if nmatch > h
-        cup(y0 + 1 + h, x0)
-        emit(pad_to(" " + str.from_int(h) + " of " + str.from_int(nmatch) + " matches", boxw))
-    cup(y0, x0 + 3 + str.len(query))
+    cup(y0 + maxh + 1, x0)
+    emit(box_bot(boxw))
+    // ── prompt box ──
+    let yp = y0 + maxh + 2
+    cup(yp, x0)
+    emit(box_top(title, boxw))
+    cup(yp + 1, x0)
+    emit("│")
+    let counter = str.from_int(nmatch) + " / " + str.from_int(total)
+    let ptext = "> " + query
+    let gap = iw - str.len(ptext) - str.len(counter) - 1
+    if gap >= 1
+        emit(ptext + disp.nspaces(gap) + counter + " ")
+    else
+        emit(pad_to(ptext, iw))
+    emit("│")
+    cup(yp + 2, x0)
+    emit(box_bot(boxw))
+    cup(yp + 1, x0 + 3 + str.len(query))
 
 fn draw_buflist(paths: [Str], cur: Int, rows: Int) [io]
     var bi = 0
@@ -4851,6 +4903,13 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var picker_cands: [Str] = []         // scored + displayed rows
     var picker_marks: [Str] = []         // per-row display prefix ("% " current, "# " alternate)
     var picker_meta: [Str] = []          // per-row action payload (bufs: the buffer path)
+    // ── :grep live source: an rg --vimgrep child streams into the picker ──
+    var grep_pid = 0 - 1                 // running rg (-1 = none)
+    var grep_fd = 0 - 1
+    var grep_buf = ""                    // partial-line accumulator
+    var grep_total = 0                   // rows received (honest counter)
+    var grep_pending = false             // query changed — respawn after the debounce
+    var grep_debounce = 0                // poll ticks until the respawn fires
     // ── Pins (harpoon slots): per-project, persisted, loaded at start ──
     let pins_root = project_root()
     var pins_p: [Str] = []               // slot i → pinned path ("" = free)
@@ -4916,6 +4975,62 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 changed = true
             else
                 yflash_ticks = yflash_ticks - 1
+        // ── :grep pump: debounced rg respawn + non-blocking row streaming ──
+        if picker_active and picker_src == 3
+            if grep_pending
+                if grep_debounce > 0
+                    grep_debounce = grep_debounce - 1
+                else
+                    grep_pending = false
+                    grep_child_kill(grep_pid)        // a newer prompt kills the older rg
+                    grep_pid = 0 - 1
+                    grep_buf = ""
+                    grep_total = 0
+                    picker_cands = []
+                    picker_marks = []
+                    picker_meta = []
+                    picker_sel = 0
+                    changed = true
+                    if str.len(picker_query) > 0
+                        // explicit "." path: with a piped stdin and NO path,
+                        // rg searches stdin and produces nothing for the tree.
+                        match proc.spawn(["rg", "--vimgrep", "--", picker_query, "."])
+                            None =>
+                                picker_active = false
+                                lsp_info = "grep: needs ripgrep (rg) on PATH"
+                            Some(gp) =>
+                                grep_pid = gp
+                                grep_fd = proc.stdout_fd(gp)
+            if grep_pid >= 0
+                // Drain what rg has produced without blocking keystrokes:
+                // poll-0 reads, bounded per tick so the UI stays responsive.
+                var gbudget = 8192
+                var gmore = true
+                while gmore and gbudget > 0
+                    if proc.poll(grep_fd, 0) == 1
+                        let gb = proc.read_byte(grep_fd)
+                        if gb < 0                    // EOF — rg finished
+                            grep_child_kill(grep_pid)
+                            grep_pid = 0 - 1
+                            gmore = false
+                            changed = true
+                        elif gb == '\n'
+                            if str.len(grep_buf) > 0
+                                // strip rg's "./" path prefix (from the explicit
+                                // "." search root) so rows read + compare clean
+                                let grow2 = if str.len(grep_buf) > 2 and str.slice(grep_buf, 0, 2) == "./" then str.slice(grep_buf, 2, str.len(grep_buf)) else grep_buf
+                                grep_total = grep_total + 1
+                                if list.len(picker_cands) < 2000
+                                    picker_cands = list.push(picker_cands, grow2)
+                                    picker_marks = list.push(picker_marks, "")
+                                    picker_meta = list.push(picker_meta, grow2)
+                            grep_buf = ""
+                            changed = true
+                        else
+                            grep_buf = grep_buf + str.from_char(gb)
+                        gbudget = gbudget - 1
+                    else
+                        gmore = false
         if m % 2 == 1
             lsp_info = ""                 // a transient gd/K message lasts until the next key
             buflist = false               // the :ls overlay is dismissed by the next key
@@ -4993,16 +5108,16 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                             esc_skip = true
                         else
                             let packed = if nx == '[' then csi_finish(c1) else csi_seq()
-                            // Picker: Up/Down move the selection (same as Ctrl-P/N).
+                            // Picker: Up/Down move the selection (visual
+                            // directions — bottom-up list, so Up = rank+1).
                             if packed >= 0 and picker_active
                                 let kfin = packed % 256
-                                let kmaxh = if rows - 6 < 10 then rows - 6 else 10
-                                if kfin == 'B'
-                                    let kcnt = list.len(fuzzy.rank(picker_query, picker_cands, kmaxh))
+                                if kfin == 'A'
+                                    let kcnt = list.len(fuzzy.rank(picker_query, picker_cands, picker_maxh(rows)))
                                     if picker_sel + 1 < kcnt
                                         picker_sel = picker_sel + 1
                                     changed = true
-                                elif kfin == 'A'
+                                elif kfin == 'B'
                                     if picker_sel > 0
                                         picker_sel = picker_sel - 1
                                     changed = true
@@ -5149,12 +5264,29 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                     done = true
                     running = false
                 elif picker_active                       // modal picker input
-                    let pmaxh = if rows - 6 < 10 then rows - 6 else 10
-                    if b == '\r' or b == '\n'            // Enter — act on the selection
+                    let pmaxh = picker_maxh(rows)
+                    if b == '\r'                         // Enter ('\r' only — Ctrl-J is 0x0a)
                         let ptop = fuzzy.rank(picker_query, picker_cands, pmaxh)
                         if picker_sel < list.len(ptop)
                             let ridx = ptop[picker_sel]
-                            if picker_meta[ridx] != curpath   // :bufs switch / :files open / :pins jump
+                            if picker_src == 3               // :grep — jump to file:line:col
+                                let grow = picker_meta[ridx]
+                                let g1 = util.index_of_byte(grow, ':')
+                                let g2 = if g1 >= 0 then util.index_of_byte_from(grow, ':', g1 + 1) else 0 - 1
+                                let g3 = if g2 >= 0 then util.index_of_byte_from(grow, ':', g2 + 1) else 0 - 1
+                                if g1 > 0 and g2 > g1 and g3 > g2
+                                    let gfile = str.slice(grow, 0, g1)
+                                    let gline = (str.to_int(str.slice(grow, g1 + 1, g2)) ?? 1) - 1
+                                    let gcol = (str.to_int(str.slice(grow, g2 + 1, g3)) ?? 1) - 1
+                                    jback = list.push(jback, jentry(curpath, ed.cy, ed.cx))
+                                    jfwd = []
+                                    if gfile == curpath
+                                        ed = clamp(Editor { lines: ed.lines, cy: gline, cx: gcol })
+                                    else
+                                        want_path = gfile
+                                        want_y = gline
+                                        want_x = gcol
+                            elif picker_meta[ridx] != curpath   // :bufs switch / :files open / :pins jump
                                 want_path = picker_meta[ridx]   // want_path opens unseen files too
                                 want_y = 0 - 1
                                 want_x = 0
@@ -5165,17 +5297,25 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                             want_y = pins_y[pjs]
                                             want_x = pins_x[pjs]
                                         pjs = pjs + 1
+                        grep_child_kill(grep_pid)
+                        grep_pid = 0 - 1
+                        grep_pending = false
                         picker_active = false
                         changed = true
                     elif b == '\e'                       // Esc — dismiss
+                        grep_child_kill(grep_pid)
+                        grep_pid = 0 - 1
+                        grep_pending = false
                         picker_active = false
                         changed = true
-                    elif b == '\x0e'                     // Ctrl-N — next row
+                    elif b == '\x0b' or b == '\x10'      // Ctrl-K / Ctrl-P — visually UP
+                        // Bottom-up list: rank 0 (best) is the bottom row, so
+                        // moving up on screen means a HIGHER rank index.
                         let pcnt = list.len(fuzzy.rank(picker_query, picker_cands, pmaxh))
                         if picker_sel + 1 < pcnt
                             picker_sel = picker_sel + 1
                         changed = true
-                    elif b == '\x10'                     // Ctrl-P — previous row
+                    elif b == '\x0a' or b == '\x0e'      // Ctrl-J / Ctrl-N — visually DOWN
                         if picker_sel > 0
                             picker_sel = picker_sel - 1
                         changed = true
@@ -5183,10 +5323,16 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                         if str.len(picker_query) > 0
                             picker_query = str.slice(picker_query, 0, str.len(picker_query) - 1)
                             picker_sel = 0
+                            if picker_src == 3           // :grep re-runs rg for the new prompt
+                                grep_pending = true
+                                grep_debounce = 2        // ~100ms at the 50ms poll cadence
                         changed = true
                     elif b >= ' ' and b < '\x7f'         // type — extend the query, re-rank
                         picker_query = picker_query + str.from_char(b)
                         picker_sel = 0
+                        if picker_src == 3
+                            grep_pending = true
+                            grep_debounce = 2
                         changed = true
                 elif cmd_mode
                     if b == '\r' or b == '\n'            // Enter — run command
@@ -5428,6 +5574,29 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                 picker_marks = list.push(picker_marks, "  ")
                                 picker_meta = list.push(picker_meta, picker_cands[pfi])
                                 pfi = pfi + 1
+                        elif excmd.is_grep(cmd_buf)          // :grep [query] — live grep
+                            // Probe for rg first: spawn() fork+execs, so a missing
+                            // binary still yields Some(dead child) — an empty
+                            // `rg --version` is the reliable absence signal.
+                            let rgprobe = match proc.spawn(["rg", "--version"])
+                                None => []
+                                Some(vp) => proc_drain_lines(vp)
+                            if list.len(rgprobe) == 0
+                                lsp_info = "grep: needs ripgrep (rg) on PATH"
+                            else
+                                picker_active = true
+                                picker_src = 3
+                                picker_query = excmd.files_query(cmd_buf)
+                                picker_sel = 0
+                                picker_cands = []
+                                picker_marks = []
+                                picker_meta = []
+                                grep_child_kill(grep_pid)
+                                grep_pid = 0 - 1
+                                grep_buf = ""
+                                grep_total = 0
+                                grep_pending = true
+                                grep_debounce = 0        // first spawn fires immediately
                         elif excmd.is_pins(cmd_buf)          // :pins — the pin picker
                             picker_active = true
                             picker_src = 2
@@ -6230,11 +6399,15 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
             if buflist
                 draw_buflist(bufs_path, cur_buf, rows)
             if picker_active
-                let dmaxh = if rows - 6 < 10 then rows - 6 else 10
-                let dtop = fuzzy.rank(picker_query, picker_cands, dmaxh)
+                let dtop = fuzzy.rank(picker_query, picker_cands, picker_maxh(rows))
                 if picker_sel >= list.len(dtop)
                     picker_sel = if list.len(dtop) > 0 then list.len(dtop) - 1 else 0
-                draw_picker(picker_cands, picker_marks, dtop, picker_sel, picker_query, fuzzy.match_count(picker_query, picker_cands), rows, cols)
+                let dtitle = if picker_src == 0 then "Buffers" elif picker_src == 1 then "Find Files" elif picker_src == 2 then "Pins" else "Live Grep"
+                // :grep counter = rows received from rg (honest when the stored
+                // list is capped); other sources count fuzzy matches.
+                let dnm = if picker_src == 3 then grep_total else fuzzy.match_count(picker_query, picker_cands)
+                let dtot = if picker_src == 3 then grep_total else list.len(picker_cands)
+                draw_picker(picker_cands, picker_marks, dtop, picker_sel, picker_query, dnm, dtot, dtitle, rows, cols)
         if novo_pty_winsize_changed_h() == 1
             rows = term_rows()
             cols = term_cols()
@@ -6394,6 +6567,13 @@ fn walk_files(dir: Str, prefix: Str, depth: Int, acc: [Str], cap: Int) -> [Str] 
                 a = list.push(a, rel)
         i = i + 1
     a
+
+// Kill + reap a running `:grep` child (no-op when none; also used at EOF —
+// killing an already-exited pid is harmless and close() reaps it).
+fn grep_child_kill(pid: Int) [io]
+    if pid >= 0
+        let _ = proc.kill(pid, 15)
+        proc.close(pid)
 
 @intent("""Produce the `:files` candidate list: `rg --files` (respects
 .gitignore) when ripgrep is available, else the internal walk.  Relative paths
