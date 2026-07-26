@@ -4379,7 +4379,10 @@ fn draw_window(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mod
     // Base status (path/pos/mode/count) is emitted in full — only the on-cursor
     // diagnostic message is bounded to the remaining width so it can't wrap.
     let modflag = if modified then " [+]" else ""
-    var statusln = " " + path + modflag + "  " + str.from_int(ed.cy + 1) + ":" + str.from_int(ed.cx + 1) + "  " + modestr + dsum
+    // vim's label for a buffer with no file name; without it the status
+    // line just has a gap where the name should be.
+    let shown_path = if str.len(path) == 0 then "[No Name]" else path
+    var statusln = " " + shown_path + modflag + "  " + str.from_int(ed.cy + 1) + ":" + str.from_int(ed.cx + 1) + "  " + modestr + dsum
     // An explicit `info` line (a gd/K result) wins over the passive on-cursor
     // diagnostic message; either is bounded to the remaining width.
     let cmsg = diag_msg_for_line(diag_li, diag_msgs, ed.cy)
@@ -5539,8 +5542,11 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                     lsp_info = if tgt < 0 then "at first arg" else "at last arg"
                                 else
                                     if ak == 6 or ak == 7     // :wn / :wN — write current first
-                                        save_buf(curpath, ed.lines)
-                                        disk_text = buf_text(ed)
+                                        // Skip the write for an unnamed
+                                        // buffer rather than creating "".
+                                        if curpath != ""
+                                            save_buf(curpath, ed.lines)
+                                            disk_text = buf_text(ed)
                                     arg_idx = tgt
                                     jback = list.push(jback, jentry(curpath, ed.cy, ed.cx))
                                     jfwd = []
@@ -5734,9 +5740,15 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                         else
                             let r = excmd.exec_ex(cmd_buf)
                             if r.save
-                                save_buf(curpath, ed.lines)
-                                disk_text = buf_text(ed)
-                                lsp_info = wrote_msg(curpath, ed.lines)
+                                // An unnamed buffer (novim with no file
+                                // argument) has nowhere to go: writing
+                                // would create a file literally named "".
+                                if curpath == ""
+                                    lsp_info = "E32: no file name"
+                                else
+                                    save_buf(curpath, ed.lines)
+                                    disk_text = buf_text(ed)
+                                    lsp_info = wrote_msg(curpath, ed.lines)
                             if r.quit
                                 if (not r.save) and util.index_of_byte(cmd_buf, '!') < 0 and buffers_modified(bufs_text, bufs_disk, cur_buf, buf_text(ed), disk_text)
                                     lsp_info = "unsaved buffers (:q! to override)"
@@ -6926,7 +6938,10 @@ fn main() [io, time]
         run_dump_keymaps()
     elif fuzzy_rank and file != ""
         run_fuzzy_rank(fuzzy_query, file)
-    elif file == ""
+    elif file == "" and (is_batch or lsp_diag or lsp_resolve or fuzzy_rank)
+        // These modes operate ON a file; without one there is nothing to
+        // do, so they still refuse.  Plain interactive does not — it
+        // opens an empty unnamed buffer, like vim.
         println("usage: novim [--config <toml>] [--batch <keys>] [--lsp-diag] [--lsp-resolve] [--dump-keymaps] [--fuzzy-rank <q>] <file>...")
     elif lsp_resolve
         run_lsp_resolve(cfg_path, file)
