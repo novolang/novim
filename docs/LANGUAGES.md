@@ -82,19 +82,36 @@ llvm     = "my-llvm-lsp --stdio"    # works even with no built-in entry
 
 `~` expands to `$HOME` in every path above.
 
-## Installing a grammar nvim-treesitter doesn't ship
+## Installing grammars + queries
 
-LLVM IR is the case that comes up: nvim-treesitter ships the `llvm`
-*queries* but not the parser, so `.ll` resolves a query file and no
-grammar. One command fixes it:
+The search path finds whatever nvim-treesitter has, but relying on that
+makes novim's highlighting a side effect of another editor's plugin
+install.  To own the whole set:
 
 ```sh
-orbit/novo-treesitter/bin/install-grammar.sh llvm
+orbit/novo-treesitter/bin/install-grammar.sh --all     # c python toml markdown llvm
+orbit/novo-treesitter/bin/install-grammar.sh python    # just one
+orbit/novo-treesitter/bin/install-grammar.sh foo https://github.com/…/tree-sitter-foo
 ```
 
-It clones, builds, and installs `~/.novo/lib/tree-sitter-llvm.so`, which
-is the first name the search path looks for.  Pass a repo URL as a
-second argument for any other language.
+Each language installs two files, because a grammar without queries
+parses fine and renders in a single colour:
+
+```
+~/.novo/lib/tree-sitter-<lang>.so
+~/.novo/lib/<lang>-highlights.scm
+```
+
+`~/.novo/lib` is first on the search path, so these win over
+nvim-treesitter's copies, and novim keeps working if you uninstall it.
+Queries come from the grammar's own repo when it ships them — they track
+that grammar's node names and so cannot drift out of sync with the
+parser just built — falling back to nvim-treesitter's for grammars that
+ship none.  `--all` does not abort the batch when one language fails.
+
+LLVM IR is the case that forces the issue: nvim-treesitter ships the
+`llvm` *queries* but not the parser, so `.ll` resolves a query file and
+no grammar until you run the above.
 
 ### The ABI trap it handles for you
 
@@ -169,12 +186,22 @@ and `orbit/novo-treesitter/tests/run.sh` is 22/22 under both libraries.
 - **No LLVM IR language server.**  Highlighting works once the grammar
   is installed, but there is no established `.ll` language server to
   point at.  `[lsp] llvm = "..."` works if you find one.
-- **Markdown inline emphasis is not highlighted.**  Headings, code
-  blocks, quotes and list markers come from the block-level `markdown`
-  grammar; `**bold**` / `_italic_` / inline links live in the separate
+- **Markdown inline content is not highlighted.**  Headings and fenced
+  code blocks come from the block-level `markdown` grammar and do
+  colour; `**bold**`, `` `code` `` and inline links live in the separate
   `markdown_inline` grammar, which tree-sitter applies through *language
   injection*.  novim runs one grammar per buffer and does not yet
   process injections.
+
+- **Capture vocabularies differ by grammar age.**  Query files use one
+  of two naming schemes for prose: the current `@markup.*` and the
+  legacy `@text.*` it replaced.  Both are mapped, which matters more
+  than it sounds — tree-sitter-markdown vendors an old copy of
+  nvim-treesitter's queries, so its `highlights.scm` is entirely
+  `@text.title` / `@text.literal` / `@text.uri` and rendered with no
+  colour at all until `@text.*` was handled.  A grammar that parses
+  correctly and shows no colour is almost always this: an unmapped
+  capture family, not a broken parser.
 - **One language server per session.**  novim spawns a server for the
   first buffer whose type has one; buffers of other languages get
   highlighting but no LSP until the session restarts.  This is

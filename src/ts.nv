@@ -79,6 +79,18 @@ fn ts_capture_kind(name: Str) -> Int
         6                                   // links + list bullets as constants
     elif str.starts_with(name, "markup")
         1                                   // strong / italic / underline as types
+    // The legacy @text.* vocabulary that @markup.* replaced.  Still shipped by
+    // plenty of grammars — tree-sitter-markdown vendors a copy of the old
+    // nvim-treesitter queries, so its highlights.scm is entirely
+    // @text.title / @text.literal / @text.uri and coloured nothing until this.
+    elif str.starts_with(name, "text.title")
+        0
+    elif str.starts_with(name, "text.literal")
+        2
+    elif str.starts_with(name, "text.uri") or str.starts_with(name, "text.reference")
+        6
+    elif str.starts_with(name, "text")
+        1
     elif str.starts_with(name, "label") or str.starts_with(name, "attribute")
         6
     elif str.starts_with(name, "tag")
