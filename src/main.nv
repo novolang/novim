@@ -4965,7 +4965,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
             lsp_phase = 1
     clear_screen()       // one-time clear of whatever was on screen before
     left = hscroll_for(left, ed, opts, cols)
-    if ts_enabled and ends_with_nv(curpath) and buf_text(ed) != ts_lasttext
+    if ts_enabled and str.len(ts_grammar) > 0 and buf_text(ed) != ts_lasttext
         ts_lasttext = buf_text(ed)
         ts_spans_cache = ts.ts_spans(ts_grammar, ts_symbol, ts_queries, ts_lasttext)
     history_init()                       // ensure the history dir + compact the file
@@ -6406,7 +6406,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
             modified = curtxt != disk_text
             // re-parse the active buffer for tree-sitter highlighting when its
             // text (or the focused buffer) changed; empty cache → native tokenizer
-            if ts_enabled and ends_with_nv(curpath) and curtxt != ts_lasttext
+            if ts_enabled and str.len(ts_grammar) > 0 and curtxt != ts_lasttext
                 ts_lasttext = curtxt
                 ts_spans_cache = ts.ts_spans(ts_grammar, ts_symbol, ts_queries, curtxt)
             // `:noh` renders with the highlight suppressed (search pattern kept).
