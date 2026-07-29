@@ -15,7 +15,7 @@ built-in per-line tokenizer.
 | `.c` `.h` | `c` | `clangd` |
 | `.toml` | `toml` | `taplo lsp stdio` |
 | `.py` | `python` | `pyright-langserver --stdio` |
-| `.ll` | `llvm` | — *(no established LLVM IR server)* |
+| `.ll` | `llvm` (see below) | — *(no established LLVM IR server)* |
 | `.rs` | — | `rust-analyzer` |
 | `.go` | — | `gopls` |
 | `.ts` `.tsx` `.js` `.jsx` | — | `typescript-language-server` |
@@ -82,14 +82,48 @@ llvm     = "my-llvm-lsp --stdio"    # works even with no built-in entry
 
 `~` expands to `$HOME` in every path above.
 
+## Installing a grammar nvim-treesitter doesn't ship
+
+LLVM IR is the case that comes up: nvim-treesitter ships the `llvm`
+*queries* but not the parser, so `.ll` resolves a query file and no
+grammar. One command fixes it:
+
+```sh
+orbit/novo-treesitter/bin/install-grammar.sh llvm
+```
+
+It clones, builds, and installs `~/.novo/lib/tree-sitter-llvm.so`, which
+is the first name the search path looks for.  Pass a repo URL as a
+second argument for any other language.
+
+### The ABI trap it handles for you
+
+Grammar repos regenerate `src/parser.c` with whatever tree-sitter CLI
+their maintainer had, and that is routinely **newer** than the
+libtree-sitter on your system.  `tree-sitter-llvm`'s HEAD emits ABI 15;
+Debian's `libtree-sitter0` is 0.20.3, which accepts 13–14.  A HEAD build
+compiles and links cleanly, then fails at load:
+
+```
+novo-treesitter: ts_parser_set_language failed (incompatible ABI?)
+```
+
+and — because the language handle is then invalid — the *query* compile
+fails too, which reads like a broken `highlights.scm` rather than a
+version mismatch.  `install-grammar.sh` reads the ceiling out of
+`tree_sitter/api.h` and walks the grammar's history for the newest
+commit within it, instead of trusting HEAD.
+
+ABI 15 support arrives in **tree-sitter 0.25.0** (0.22–0.24 are all
+13–14).  `min_compatible` stays 13 there, so upgrading libtree-sitter is
+backward compatible with every grammar you already have — but it means
+building from source, since distro packages lag well behind.
+
 ## Known gaps
 
-- **LLVM IR has no grammar installed by default.**  nvim-treesitter
-  ships the `llvm` *queries* but not the parser on most setups, so `.ll`
-  files resolve queries and no grammar, and fall back to the native
-  tokenizer.  Build `tree-sitter-llvm` and point `[treesitter.llvm]` at
-  it to enable highlighting.  There is also no established LLVM IR
-  language server to wire up.
+- **No LLVM IR language server.**  Highlighting works once the grammar
+  is installed, but there is no established `.ll` language server to
+  point at.  `[lsp] llvm = "..."` works if you find one.
 - **Markdown inline emphasis is not highlighted.**  Headings, code
   blocks, quotes and list markers come from the block-level `markdown`
   grammar; `**bold**` / `_italic_` / inline links live in the separate
