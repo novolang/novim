@@ -148,7 +148,16 @@ fn lsp_default_for(ext: Str) -> LspSpec
         LspSpec { cmd: "lua-language-server", language: "lua", roots: ".luarc.json .luarc.jsonc .git" }
     elif ext == "json"
         LspSpec { cmd: "vscode-json-language-server --stdio", language: "json", roots: ".git" }
+    elif ext == "md" or ext == "markdown"
+        LspSpec { cmd: "marksman server", language: "markdown", roots: ".marksman.toml .git" }
+    elif ext == "toml"
+        LspSpec { cmd: "taplo lsp stdio", language: "toml", roots: ".taplo.toml taplo.toml .git" }
     else
+        // No entry for `.ll` (LLVM IR): there is no established LLVM IR
+        // language server to point at.  Tree-sitter highlighting still
+        // applies — see ts.nv's language table — and a user who has one
+        // can wire it up with `[lsp] llvm = "..."`, which
+        // lsp_cmd_override honours for any language id.
         LspSpec { cmd: "", language: "", roots: "" }
 
 // The LSP languageId for `path`, or "" when no server is known for its type.

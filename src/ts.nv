@@ -65,16 +65,39 @@ fn ts_capture_kind(name: Str) -> Int
         7
     elif str.starts_with(name, "module")
         8
+    // The @markup.* family is the modern nvim-treesitter vocabulary for prose
+    // and documentation grammars.  Without these, markdown resolves a grammar
+    // and a query file and then renders completely uncoloured, because its
+    // highlights.scm is almost entirely @markup.* + @label — none of which
+    // matched any branch above.  Mapped onto the existing colour kinds rather
+    // than growing the colorscheme:
+    elif str.starts_with(name, "markup.heading")
+        0                                   // headings read as keywords
+    elif str.starts_with(name, "markup.raw") or str.starts_with(name, "markup.quote")
+        2                                   // code spans / block quotes as strings
+    elif str.starts_with(name, "markup.link") or str.starts_with(name, "markup.list")
+        6                                   // links + list bullets as constants
+    elif str.starts_with(name, "markup")
+        1                                   // strong / italic / underline as types
+    elif str.starts_with(name, "label") or str.starts_with(name, "attribute")
+        6
+    elif str.starts_with(name, "tag")
+        1
     else
         0 - 1
 
-// Parse `source` with the tree-sitter-novo grammar at `grammar_path` and run the
-// highlight `queries`; return a flat [Int] of (start_byte, end_byte, kind)
-// triples (later captures override earlier on overlap — the renderer applies
-// them in order).  Returns [] if the grammar/shim can't load or parsing fails,
-// so the caller falls back to the native tokenizer.
-fn ts_spans(grammar_path: Str, queries: Str, source: Str) -> [Int]
-    let lang = novo_ts_load_grammar(grammar_path, "tree_sitter_novo")
+// Parse `source` with the grammar at `grammar_path` (whose TSLanguage
+// constructor is `symbol`) and run the highlight `queries`; return a flat
+// [Int] of (start_byte, end_byte, kind) triples (later captures override
+// earlier on overlap — the renderer applies them in order).  Returns [] if
+// the grammar/shim can't load or parsing fails, so the caller falls back to
+// the native tokenizer.
+//
+// `symbol` used to be hardcoded to "tree_sitter_novo", which made the
+// grammar_path parameter a fiction: any other grammar loaded and then failed
+// at dlsym.  Callers pass ts_symbol_of(ts_lang_of(path)).
+fn ts_spans(grammar_path: Str, symbol: Str, queries: Str, source: Str) -> [Int]
+    let lang = novo_ts_load_grammar(grammar_path, symbol)
     if lang == 0
         return []
     let p = ts_parser_new()

@@ -1,0 +1,198 @@
+// tslang.nv — filetype -> tree-sitter grammar resolution for novim.
+//
+// Split out of ts.nv deliberately: ts.nv carries the @ffi declarations for
+// libtree-sitter and the shim, so anything living there can only be linked
+// (or tested) on a machine that has both.  Everything here is pure string +
+// filesystem work, so the language tables and the search-path logic are
+// testable on their own — which is what tests/test_tslang.sh does.
+
+// ── Language resolution ──────────────────────────────────────────────────
+// Highlighting is not Novo-only: any grammar that exposes the standard
+// tree-sitter capture names works, because ts.nv's ts_capture_kind matches
+// capture FAMILIES (@keyword.*, @string.*, …) rather than anything
+// language-specific.  What varies per language is three strings — the
+// grammar .so, its TSLanguage constructor symbol, and its highlights.scm —
+// so resolving those is all multi-language support needs.
+
+// File extension → tree-sitter language id ("" when we have no grammar
+// mapping and the native tokenizer should handle it).
+fn ts_ext_of(p: Str) -> Str
+    let e = path.ext(p)
+    if str.len(e) >= 1 and (str.byte_at(e, 0) ?? 0) == '.'
+        str.slice(e, 1, str.len(e))
+    else
+        e
+
+fn ts_lang_of(p: Str) -> Str
+    let ext = ts_ext_of(p)
+    if ext == "nv"
+        "novo"
+    elif ext == "md" or ext == "markdown"
+        "markdown"
+    elif ext == "c" or ext == "h"
+        "c"
+    elif ext == "toml"
+        "toml"
+    elif ext == "py"
+        "python"
+    elif ext == "ll"
+        "llvm"
+    else
+        ""
+
+// TSLanguage constructor exported by a grammar .so.  tree-sitter's convention
+// is `tree_sitter_<lang>` with hyphens folded to underscores.
+fn ts_symbol_of(lang: Str) -> Str
+    if str.len(lang) == 0
+        ""
+    else
+        "tree_sitter_" + str.replace(lang, "-", "_")
+
+// Directories searched for `<lang>.so` / `<lang>-highlights.scm`, in order.
+// ~/.novo/lib comes first so a grammar installed by
+// orbit/novo-treesitter/bin/install-lib.sh always wins; the nvim-treesitter
+// parser directories follow because a machine with nvim already has compiled
+// grammars and matching queries for most languages, and rebuilding them would
+// be pure duplication.  Overridable wholesale with:
+//
+//     [treesitter]
+//     paths = ["/my/parsers", "~/.novo/lib"]
+fn ts_search_paths(cfg: Str) -> [Str] [io]
+    let home = process.env("HOME") ?? ""
+    let configured = ts_cfg_list(cfg, "paths")
+    if list.len(configured) > 0
+        var out: [Str] = []
+        var i = 0
+        let n = list.len(configured)
+        while i < n
+            out = list.push(out, ts_expand_home(configured[i], home))
+            i = i + 1
+        out
+    else
+        [ path.join(home, ".novo/lib"),
+          path.join(home, ".local/share/nvim/lazy/nvim-treesitter/parser"),
+          path.join(home, ".local/share/nvim/site/pack/packer/start/nvim-treesitter/parser"),
+          "/usr/local/lib/nvim/parser",
+          "/usr/lib/nvim/parser" ]
+
+fn ts_expand_home(p: Str, home: Str) -> Str
+    if str.starts_with(p, "~/") and str.len(home) > 0
+        path.join(home, str.slice(p, 2, str.len(p)))
+    else
+        p
+
+// First existing file among `cands`, or "".
+fn ts_first_existing(cands: [Str]) -> Str [io]
+    var out = ""
+    var i = 0
+    let n = list.len(cands)
+    while i < n
+        if str.len(out) == 0 and fs.exists(cands[i])
+            out = cands[i]
+        i = i + 1
+    out
+
+// Locate the grammar .so for `lang`.  nvim-treesitter names them `<lang>.so`;
+// novo-treesitter installs `tree-sitter-<lang>.so`.  A per-language config
+// override wins over both:  [treesitter.llvm] grammar = "/path/llvm.so"
+fn ts_grammar_path(cfg: Str, lang: Str) -> Str [io]
+    if str.len(lang) == 0
+        return ""
+    let home = process.env("HOME") ?? ""
+    let ov = ts_cfg_str(cfg, lang, "grammar")
+    if str.len(ov) > 0
+        return ts_expand_home(ov, home)
+    var cands: [Str] = []
+    let dirs = ts_search_paths(cfg)
+    var i = 0
+    let n = list.len(dirs)
+    while i < n
+        cands = list.push(cands, path.join(dirs[i], "tree-sitter-" + lang + ".so"))
+        cands = list.push(cands, path.join(dirs[i], lang + ".so"))
+        i = i + 1
+    ts_first_existing(cands)
+
+// Locate highlights.scm for `lang`.  Checked shapes, in order:
+//   <dir>/<lang>-highlights.scm          novo-treesitter install layout
+//   <dir>/../queries/<lang>/highlights.scm   nvim-treesitter layout
+// plus a [treesitter.<lang>] queries = "..." override.
+fn ts_queries_path(cfg: Str, lang: Str) -> Str [io]
+    if str.len(lang) == 0
+        return ""
+    let home = process.env("HOME") ?? ""
+    let ov = ts_cfg_str(cfg, lang, "queries")
+    if str.len(ov) > 0
+        return ts_expand_home(ov, home)
+    var cands: [Str] = []
+    let dirs = ts_search_paths(cfg)
+    var i = 0
+    let n = list.len(dirs)
+    while i < n
+        cands = list.push(cands, path.join(dirs[i], lang + "-highlights.scm"))
+        let parent = path.dirname(dirs[i])
+        cands = list.push(cands,
+            path.join(parent, path.join("queries", path.join(lang, "highlights.scm"))))
+        i = i + 1
+    ts_first_existing(cands)
+
+// `[treesitter] <key> = ["a", "b"]` → the string items, [] when absent.
+fn ts_cfg_list(cfg: Str, key: Str) -> [Str]
+    let lines = str.split_lines(cfg)
+    var in_sec = false
+    var acc = ""
+    var i = 0
+    let n = list.len(lines)
+    while i < n
+        let raw = str.trim(lines[i])
+        if str.len(raw) > 0 and (str.byte_at(raw, 0) ?? 0) != '#'
+            if (str.byte_at(raw, 0) ?? 0) == '['
+                in_sec = raw == "[treesitter]"
+            elif in_sec
+                let eq = util.index_of_byte(raw, '=')
+                if eq > 0 and str.trim(str.slice(raw, 0, eq)) == key
+                    acc = str.slice(raw, eq + 1, str.len(raw))
+        i = i + 1
+    ts_quoted_items(acc)
+
+// `[treesitter.<lang>] <key> = "value"` → value, "" when absent.
+fn ts_cfg_str(cfg: Str, lang: Str, key: Str) -> Str
+    let want = "[treesitter." + lang + "]"
+    let lines = str.split_lines(cfg)
+    var in_sec = false
+    var out = ""
+    var i = 0
+    let n = list.len(lines)
+    while i < n
+        let raw = str.trim(lines[i])
+        if str.len(raw) > 0 and (str.byte_at(raw, 0) ?? 0) != '#'
+            if (str.byte_at(raw, 0) ?? 0) == '['
+                in_sec = raw == want
+            elif in_sec
+                let eq = util.index_of_byte(raw, '=')
+                if eq > 0 and str.trim(str.slice(raw, 0, eq)) == key
+                    let items = ts_quoted_items(str.slice(raw, eq + 1, str.len(raw)))
+                    if list.len(items) > 0
+                        out = items[0]
+        i = i + 1
+    out
+
+// Every "…" run in `s`, in order.
+fn ts_quoted_items(s: Str) -> [Str]
+    var out: [Str] = []
+    var cur = ""
+    var inq = false
+    var i = 0
+    let n = str.len(s)
+    while i < n
+        let b = str.byte_at(s, i) ?? 0
+        if b == '"'
+            if inq
+                out = list.push(out, cur)
+                cur = ""
+                inq = false
+            else
+                inq = true
+        elif inq
+            cur = cur + str.slice(s, i, i + 1)
+        i = i + 1
+    out

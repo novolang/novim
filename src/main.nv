@@ -4775,14 +4775,20 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     let lsp_cfg = file_to_text(cfg_path)
     var lsp_lang = ""
     // ── Tree-sitter highlighting (optional; falls back to the native tokenizer)
-    // The grammar + queries are installed to ~/.novo/lib by
-    // orbit/novo-treesitter/bin/install-lib.sh.  `ts_spans_cache` holds the
-    // ACTIVE buffer's capture spans, recomputed when its text changes; an empty
-    // cache (grammar missing / non-.nv / parse failed) means the renderer uses
-    // syntax_colors instead.
-    let ts_lib = "/home/klajen/.novo/lib"
-    let ts_grammar = ts_lib + "/tree-sitter-novo.so"
-    let ts_queries = file_to_text(ts_lib + "/novo-highlights.scm")
+    // `ts_spans_cache` holds the ACTIVE buffer's capture spans, recomputed when
+    // its text changes; an empty cache (grammar missing / unknown filetype /
+    // parse failed) means the renderer uses syntax_colors instead.
+    //
+    // Grammar + queries resolve PER FILETYPE from a search path — ~/.novo/lib
+    // first (where orbit/novo-treesitter/bin/install-lib.sh puts the Novo
+    // grammar), then any nvim-treesitter parser dirs — so markdown / C / TOML /
+    // Python / LLVM-IR buffers highlight with their own grammar instead of
+    // everything being parsed as Novo.  `ts_lang` is "" for a filetype we have
+    // no grammar for.  See ts.nv for the tables and the config overrides.
+    var ts_lang = tslang.ts_lang_of(path)
+    var ts_grammar = tslang.ts_grammar_path(lsp_cfg, ts_lang)
+    var ts_symbol = tslang.ts_symbol_of(ts_lang)
+    var ts_queries = file_to_text(tslang.ts_queries_path(lsp_cfg, ts_lang))
     var ts_spans_cache: [Int] = []
     var ts_lasttext = "\x00"             // sentinel ≠ any buffer → first frame parses
     // Opt-in (config `[options] treesitter = true` or `:set treesitter`); when
@@ -4961,7 +4967,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     left = hscroll_for(left, ed, opts, cols)
     if ts_enabled and ends_with_nv(curpath) and buf_text(ed) != ts_lasttext
         ts_lasttext = buf_text(ed)
-        ts_spans_cache = ts.ts_spans(ts_grammar, ts_queries, ts_lasttext)
+        ts_spans_cache = ts.ts_spans(ts_grammar, ts_symbol, ts_queries, ts_lasttext)
     history_init()                       // ensure the history dir + compact the file
     paint_frame(ed, lay, awin, cols, rows, win_cy, win_cx, win_top, win_left, win_buf, win_ww, win_hw, cur_buf, bufs_text, bufs_path, curpath, top, left, st, cs, opts, diag_li, diag_msgs, lsp_info, modified, ts_spans_cache, yflash)
     var running = true
@@ -6276,6 +6282,16 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 diag_msgs = diag_de_msgs(dsaved)
                 lsp_uri = "file://" + curpath
                 lsp_lasttext = buf_text(ed)   // debounced didChange now diffs against THIS buffer
+                // Re-resolve the grammar for the incoming buffer's filetype —
+                // switching from foo.nv to bar.py must switch grammars too, or
+                // the new buffer would be parsed with the old language (or, for
+                // an unknown type, keep stale spans from the previous one).
+                ts_lang = tslang.ts_lang_of(curpath)
+                ts_grammar = tslang.ts_grammar_path(lsp_cfg, ts_lang)
+                ts_symbol = tslang.ts_symbol_of(ts_lang)
+                ts_queries = file_to_text(tslang.ts_queries_path(lsp_cfg, ts_lang))
+                ts_spans_cache = []
+                ts_lasttext = "\x00"          // force a re-parse under the new grammar
                 let already = bufs_lspopen[idx]
                 if str.len(lsp.lsp_lang_of(curpath)) > 0
                     if lsp_pid < 0             // no server yet — spawn for this file's language (opens all matching docs at handshake)
@@ -6392,7 +6408,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
             // text (or the focused buffer) changed; empty cache → native tokenizer
             if ts_enabled and ends_with_nv(curpath) and curtxt != ts_lasttext
                 ts_lasttext = curtxt
-                ts_spans_cache = ts.ts_spans(ts_grammar, ts_queries, curtxt)
+                ts_spans_cache = ts.ts_spans(ts_grammar, ts_symbol, ts_queries, curtxt)
             // `:noh` renders with the highlight suppressed (search pattern kept).
             let rst = if hl_off then ist_blank_search(st) else st
             paint_frame(ed, lay, awin, cols, rows, win_cy, win_cx, win_top, win_left, win_buf, win_ww, win_hw, cur_buf, bufs_text, bufs_path, curpath, top, left, rst, cs, opts, diag_li, diag_msgs, lsp_info, modified, ts_spans_cache, yflash)
