@@ -116,8 +116,53 @@ commit within it, instead of trusting HEAD.
 
 ABI 15 support arrives in **tree-sitter 0.25.0** (0.22–0.24 are all
 13–14).  `min_compatible` stays 13 there, so upgrading libtree-sitter is
-backward compatible with every grammar you already have — but it means
-building from source, since distro packages lag well behind.
+backward compatible with every grammar you already have.
+
+### Upgrading libtree-sitter for ABI 15+
+
+Distro packages lag badly — Debian ships 0.20.3 — so this means building
+from source.  Into a private prefix, not over the system library:
+
+```sh
+git clone --depth 1 -b v0.25.8 https://github.com/tree-sitter/tree-sitter
+cd tree-sitter && make -j"$(nproc)" PREFIX="$HOME/.novo" && make install PREFIX="$HOME/.novo"
+
+# the .pc emits no rpath, and SONAME libtree-sitter.so.0.25 is not in the
+# system cache, so bake one in or binaries fail at load:
+sed -i 's|^Libs: -L${libdir} -ltree-sitter$|Libs: -L${libdir} -ltree-sitter -Wl,-rpath,${libdir}|' \
+  "$HOME/.novo/lib/pkgconfig/tree-sitter.pc"
+
+export PKG_CONFIG_PATH="$HOME/.novo/lib/pkgconfig:$PKG_CONFIG_PATH"
+```
+
+Nothing in the repo changes: `novo.toml` binds libtree-sitter through
+`[ffi.tree_sitter] pkg_config = "tree-sitter"`, so `PKG_CONFIG_PATH`
+alone decides which library a rebuild links.  That is deliberate — no
+machine-specific absolute path belongs in a committed manifest.  Confirm
+with `ldd`:
+
+```
+$ ldd orbit/novo-treesitter/novo-treesitter | grep tree-sitter
+libtree-sitter.so.0.25 => /home/you/.novo/lib/libtree-sitter.so.0.25
+```
+
+The SONAME differs from the system library's (`.so.0`), so the two
+coexist and neither shadows the other.
+
+**Keep the variable and the grammars in sync.**  A grammar only loads in
+a binary whose libtree-sitter ceiling covers its ABI.  Install an ABI-15
+grammar with `PKG_CONFIG_PATH` set, then rebuild novim *without* it, and
+that grammar silently stops loading — highlighting just disappears, with
+no error pointing at the cause.  `install-grammar.sh` warns when it
+installs an ABI above the system library's ceiling.  Either export
+`PKG_CONFIG_PATH` persistently in your shell profile, or leave it unset
+and let the script pick system-compatible ABIs; both are consistent, the
+mixture is not.
+
+Verified on this repo: with 0.25.8 linked, ABI-15 `tree-sitter-llvm`
+HEAD parses, **and** every existing ABI-14 grammar (novo, python, c,
+toml, markdown) still loads — `min_compatible = 13` holds in practice,
+and `orbit/novo-treesitter/tests/run.sh` is 22/22 under both libraries.
 
 ## Known gaps
 
