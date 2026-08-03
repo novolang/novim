@@ -44,73 +44,49 @@ fn index_of_str(s: Str, needle: Str) -> Int
     0 - 1
 
 @intent("Return a copy of `xs` with element `idx` replaced by `v`.")
+fn set_at<T>(xs: [T], idx: Int, v: T) -> [T]
+    var out: [T] = []
+    let n = list.len(xs)
+    let mut i = 0
+    while i < n
+        if i == idx
+            out = list.append(out, [v])
+        else
+            out = list.append(out, [xs[i]])
+        i = i + 1
+    out
+
+// Typed delegates over the generic set_at — kept so the existing call
+// sites (set_str_at / set_int_at / set_bool_at) need no change.
 fn set_str_at(xs: [Str], idx: Int, v: Str) -> [Str]
-    var out: [Str] = []
-    let n = list.len(xs)
-    let mut i = 0
-    while i < n
-        if i == idx
-            out = list.append(out, [v])
-        else
-            out = list.append(out, [xs[i]])
-        i = i + 1
-    out
+    set_at(xs, idx, v)
 
-@intent("Return a copy of `xs` with element `idx` replaced by `v`.")
 fn set_int_at(xs: [Int], idx: Int, v: Int) -> [Int]
-    var out: [Int] = []
-    let n = list.len(xs)
-    let mut i = 0
-    while i < n
-        if i == idx
-            out = list.append(out, [v])
-        else
-            out = list.append(out, [xs[i]])
-        i = i + 1
-    out
+    set_at(xs, idx, v)
 
-@intent("Return a copy of `xs` with element `idx` replaced by `v`.")
 fn set_bool_at(xs: [Bool], idx: Int, v: Bool) -> [Bool]
-    var out: [Bool] = []
-    let n = list.len(xs)
-    let mut i = 0
-    while i < n
-        if i == idx
-            out = list.append(out, [v])
-        else
-            out = list.append(out, [xs[i]])
+    set_at(xs, idx, v)
+
+@intent("Return a copy of `xs` with element `idx` removed.")
+fn remove_at<T>(xs: [T], idx: Int) -> [T]
+    var out: [T] = []
+    var i = 0
+    while i < list.len(xs)
+        if i != idx
+            out = list.push(out, xs[i])
         i = i + 1
     out
 
-@intent("Return a copy of `xs` with element `idx` removed.")
+// Typed delegates over the generic remove_at — kept so existing call
+// sites (remove_at_str / remove_at_int / remove_at_bool) need no change.
 fn remove_at_str(xs: [Str], idx: Int) -> [Str]
-    var out: [Str] = []
-    var i = 0
-    while i < list.len(xs)
-        if i != idx
-            out = list.push(out, xs[i])
-        i = i + 1
-    out
+    remove_at(xs, idx)
 
-@intent("Return a copy of `xs` with element `idx` removed.")
 fn remove_at_int(xs: [Int], idx: Int) -> [Int]
-    var out: [Int] = []
-    var i = 0
-    while i < list.len(xs)
-        if i != idx
-            out = list.push(out, xs[i])
-        i = i + 1
-    out
+    remove_at(xs, idx)
 
-@intent("Return a copy of `xs` with element `idx` removed.")
 fn remove_at_bool(xs: [Bool], idx: Int) -> [Bool]
-    var out: [Bool] = []
-    var i = 0
-    while i < list.len(xs)
-        if i != idx
-            out = list.push(out, xs[i])
-        i = i + 1
-    out
+    remove_at(xs, idx)
 
 // ── Config / colour value helpers (shared by the colorscheme, options, and
 // keymap loaders) ──────────────────────────────────────────────────────────

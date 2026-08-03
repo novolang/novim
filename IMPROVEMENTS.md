@@ -2,6 +2,14 @@
 
 _Structural / readability review (auto-generated). Each item cites `file:line`._
 
+## Status
+
+Legend: ✅ done · ☐ open.
+
+- ✅ **util.nv `set_at<T>` / `remove_at<T>` generics** — folded the byte-identical `set_str_at`/`set_int_at`/`set_bool_at` and `remove_at_str`/`_int`/`_bool` into two generic functions; the six typed functions are now one-line delegates (so the ~80 call sites are unchanged). Verified: generic spike green, `pkg build` clean, `test_novim.sh` **557/0**.
+- ☐ `run_interactive` (~1732 lines) split — open; it threads 50+ session `var`s and runs the interactive event loop (the `--batch` tests exercise `feed`, not the driver), so a safe extraction needs care and isn't headless-verifiable. Deferred.
+- ☐ `InputState.mode`/`pending` Int codes → enum, `list.sort` comparator (the O(n²) `csort`) — open.
+
 ## 1. Long functions
 
 - `src/main.nv:4726` — `fn run_interactive` (~1732 lines): the whole interactive
