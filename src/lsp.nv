@@ -273,7 +273,7 @@ fn lsp_diag_line(d: JsonValueH) -> Int
 // If `doc` is a publishDiagnostics notification, print its diagnostics and
 // return true; otherwise return false.  Flattens the nesting that the parser
 // chokes on when inlined into run_lsp_diag's poll loop.
-fn lsp_print_diag_list(ds: [JsonValueH])
+fn lsp_print_diag_list(ds: [JsonValueH]) [io]
     println("diagnostics: " + str.from_int(list.len(ds)))
     var di = 0
     while di < list.len(ds)
@@ -281,7 +281,7 @@ fn lsp_print_diag_list(ds: [JsonValueH])
         println("  line " + str.from_int(lsp_diag_line(d) + 1) + " sev " + str.from_int(json.get_int(d, "severity") ?? 0) + ": " + (json.get_str(d, "message") ?? ""))
         di = di + 1
 
-fn lsp_print_diags(doc: JsonValueH) -> Bool
+fn lsp_print_diags(doc: JsonValueH) -> Bool [io]
     if (json.get_str(doc, "method") ?? "") != "textDocument/publishDiagnostics"
         return false
     match json.get(doc, "params")
@@ -294,7 +294,7 @@ fn lsp_print_diags(doc: JsonValueH) -> Bool
 
 // Parse one framed message and, if it is a publishDiagnostics notification,
 // print it.  Returns true once diagnostics have been shown.
-fn lsp_msg_diags(msg: Str) -> Bool
+fn lsp_msg_diags(msg: Str) -> Bool [io]
     if str.len(msg) == 0
         return false
     match json.parse(msg)
