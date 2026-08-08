@@ -32,29 +32,50 @@ fn lsp_content_length(hdr: Str) -> Int
 
 // Read one framed message body (blocking; the server sends complete frames).
 // Returns "" on EOF/error.
+//
+// V1-WAVE3 §S1: the two hand-rolled accumulate loops that used to be
+// here are now `Read.read_until` / `Read.read_exact` — trait defaults
+// in compiler/stdlib/io_traits.nv, reached through
+// `impl Read[io] for FdStream`.  The identical loop also existed in
+// orbit/orbit-registry-backend, orbit/ml's mlserve and
+// orbit/http-server; this file's copy was the byte-at-a-time one.
+//
+// The two chunk sizes are the interesting part:
+//
+//   * The HEADER IoBuf pulls ONE byte per read, which is what the old
+//     loop did and what correctness demands here — this fn owns no
+//     buffer that outlives the call, so a byte read past `\r\n\r\n`
+//     would be discarded and the next frame would desync.  Same
+//     syscall count as before, no regression.
+//   * The BODY IoBuf pulls `clen` bytes in a SINGLE read.  The body is
+//     the entire file text on a didChange, and reading it one byte per
+//     syscall is what froze the editor for hundreds of milliseconds —
+//     the same complaint lsp_write_fd's comment records for the write
+//     direction.  Content-Length tells us the exact size, so one read
+//     cannot over-read.
+//
+// Giving the header scan a real chunk size needs a session-lifetime
+// IoBuf threaded through lsp_poll_message / lsp_pump and their ten
+// call sites in main.nv.  That is a follow-on, not a correctness gap.
 fn lsp_read_message(fd: Int) -> Str [io]
-    var hdr = ""
-    var hdone = false
-    while not hdone
-        let b = proc.read_byte(fd)
-        if b < 0
-            return ""
-        hdr = hdr + str.from_char(b)
-        let m = str.len(hdr)
-        if m >= 4 and (str.byte_at(hdr, m - 4) ?? 0) == '\r' and (str.byte_at(hdr, m - 3) ?? 0) == '\n' and (str.byte_at(hdr, m - 2) ?? 0) == '\r' and (str.byte_at(hdr, m - 1) ?? 0) == '\n'
-            hdone = true
-        if m > 4096
-            return ""
-    let clen = lsp_content_length(hdr)
-    var body = ""
-    var k = 0
-    while k < clen
-        let b = proc.read_byte(fd)
-        if b < 0
-            return body
-        body = body + str.from_char(b)
-        k = k + 1
-    body
+    let s = FdStream.new(fd)
+    let hbuf = IoBuf.sized(1, 4096)
+    var out = ""
+    match s.read_until(hbuf, bytes.from_str("\r\n\r\n"))
+        Err(_) =>
+            out = ""
+        Ok(hdr) =>
+            let clen = lsp_content_length(bytes.to_str(hdr))
+            if clen > 0
+                let bbuf = IoBuf.sized(clen, clen)
+                match s.read_exact(bbuf, clen)
+                    Err(_) =>
+                        out = ""
+                    Ok(body) =>
+                        out = bytes.to_str(body)
+                bbuf.drop()
+    hbuf.drop()
+    out
 
 // Poll-gated read: returns "" if nothing arrives within `timeout` ms.
 fn lsp_poll_message(fd: Int, timeout: Int) -> Str [io, time]
