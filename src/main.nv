@@ -6903,52 +6903,54 @@ fn run_lsp_diag(path: Str) [io, time]
         let _ = proc.kill(pid, 15)
         proc.close(pid)
 
+// The command-line surface, declared once.  `std.cli` parses argv from
+// this declaration and generates the usage text from the same records,
+// so the two cannot drift (docs/stdlib/cli.md).
+//
+// The file list is a variadic positional: the first file is the active
+// buffer and the rest open as additional buffers, which is why it is
+// `<file>...` and not a fixed pair.
+fn novim_cli() -> Cli
+    Cli.new("novim", "modal terminal editor")
+        .str_flag("config", "", "config file to read instead of the default", "")
+        .value_name("toml")
+        .str_flag("batch", "", "headless: feed these keys through the real input handler, then dump the buffer", "")
+        .value_name("keys")
+        .str_flag("fuzzy-rank", "", "rank the file's lines against this query and print the scores", "")
+        .value_name("query")
+        .bool_flag("lsp-diag", "", "language-server smoke test: open the file and print its diagnostics")
+        .bool_flag("lsp-resolve", "", "print the language server novim would spawn for the file")
+        .bool_flag("dump-keymaps", "", "print the keymaps parsed from the nvim config and exit")
+        .rest_arg("file", "files to open; the first is the active buffer")
+
 @intent("""CLI entry point.  Parse argv and dispatch: `--batch <keys> <file>`
 (headless scripted edit), `--lsp-diag <file>` (language-server smoke test),
 `--config <path>` to override the config file, or one-or-more file paths →
 interactive mode (first file active, the rest opened as buffers).""")
 fn main() [io, time]
-    let argv = env.args()
-    let n = list.len(argv)
-    var is_batch = false
-    var batch_keys = ""
-    var file = ""                        // first file (the initial buffer)
-    var extra = ""                        // remaining files, newline-joined → extra buffers
-    var cfg = ""
-    var lsp_diag = false
-    var lsp_resolve = false
-    var dump_keymaps = false
-    var fuzzy_rank = false
-    var fuzzy_query = ""
-    let mut i = 1
-    while i < n
-        let a = argv[i]
-        if a == "--batch" and i + 1 < n
-            is_batch = true
-            batch_keys = argv[i + 1]
-            i = i + 2
-        elif a == "--config" and i + 1 < n
-            cfg = argv[i + 1]
-            i = i + 2
-        elif a == "--lsp-diag"
-            lsp_diag = true
-            i = i + 1
-        elif a == "--lsp-resolve"
-            lsp_resolve = true
-            i = i + 1
-        elif a == "--dump-keymaps"
-            dump_keymaps = true
-            i = i + 1
-        elif a == "--fuzzy-rank" and i + 1 < n
-            fuzzy_query = argv[i + 1]
-            fuzzy_rank = true
-            i = i + 2
-        elif file == ""
-            file = a
-            i = i + 1
-        else
-            extra = if str.len(extra) == 0 then a else extra + str.from_char('\n') + a
-            i = i + 1
+    // parse_or_exit answers --help / -h from the declaration and exits 2
+    // on a mistyped flag or a missing flag value.  Both used to be data:
+    // `novim --help` opened a file called `--help`, and `--batch` with
+    // no following token opened one called `--batch`.
+    let m = novim_cli().parse_env_or_exit()
+    let batch_keys   = m.get_str("batch")
+    let fuzzy_query  = m.get_str("fuzzy-rank")
+    let cfg          = m.get_str("config")
+    // `given`, not `!= ""`: `--batch ""` (load the file, feed no keys,
+    // dump it) and `--fuzzy-rank ""` (keep the producer's order) are
+    // both real invocations, and both carry an empty value.
+    let is_batch     = m.given("batch")
+    let fuzzy_rank   = m.given("fuzzy-rank")
+    let lsp_diag     = m.get_bool("lsp-diag")
+    let lsp_resolve  = m.get_bool("lsp-resolve")
+    let dump_keymaps = m.get_bool("dump-keymaps")
+    let file = m.arg(0)                  // first file (the initial buffer)
+    var extra = ""                       // remaining files, newline-joined → extra buffers
+    var i = 1
+    while i < list.len(m.args)
+        let f = m.args[i]
+        extra = if str.len(extra) == 0 then f else extra + str.from_char('\n') + f
+        i = i + 1
     let cfg_path = if cfg != "" then cfg else default_config_path()
     if dump_keymaps
         run_dump_keymaps()
@@ -6958,7 +6960,7 @@ fn main() [io, time]
         // These modes operate ON a file; without one there is nothing to
         // do, so they still refuse.  Plain interactive does not — it
         // opens an empty unnamed buffer, like vim.
-        println("usage: novim [--config <toml>] [--batch <keys>] [--lsp-diag] [--lsp-resolve] [--dump-keymaps] [--fuzzy-rank <q>] <file>...")
+        print(novim_cli().help())
     elif lsp_resolve
         run_lsp_resolve(cfg_path, file)
     elif lsp_diag
