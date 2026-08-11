@@ -8,7 +8,7 @@
 // Cross-module note: callers in main.nv build a Rect via `window.rect(...)`
 // (Novo has no qualified struct-literal form `window.Rect { ... }`) and a
 // single-window layout via `window.LWin(id)` (qualified enum construction
-// works).  See features/language/qualified-struct-literal-cross-module.md.
+// works).  That asymmetry is why `rect` exists as a constructor fn at all.
 
 @intent("""A screen rectangle (1-based-friendly, but stored 0-based): origin
 (x, y) and size (w, h) in terminal cells.  A window draws into one of these.""")

@@ -33,26 +33,22 @@ fn lsp_content_length(hdr: Str) -> Int
 // Read one framed message body (blocking; the server sends complete frames).
 // Returns "" on EOF/error.
 //
-// V1-WAVE3 §S1: the two hand-rolled accumulate loops that used to be
-// here are now `Read.read_until` / `Read.read_exact` — trait defaults
-// in compiler/stdlib/io_traits.nv, reached through
-// `impl Read[io] for FdStream`.  The identical loop also existed in
-// orbit/orbit-registry-backend, orbit/ml's mlserve and
-// orbit/http-server; this file's copy was the byte-at-a-time one.
+// Framing goes through `Read.read_until` / `Read.read_exact` — trait
+// defaults in compiler/stdlib/io_traits.nv, reached via
+// `impl Read[io] for FdStream`.
 //
 // The two chunk sizes are the interesting part:
 //
-//   * The HEADER IoBuf pulls ONE byte per read, which is what the old
-//     loop did and what correctness demands here — this fn owns no
-//     buffer that outlives the call, so a byte read past `\r\n\r\n`
-//     would be discarded and the next frame would desync.  Same
-//     syscall count as before, no regression.
+//   * The HEADER IoBuf pulls ONE byte per read.  Correctness demands
+//     it: this fn owns no buffer that outlives the call, so a byte
+//     read past `\r\n\r\n` would be discarded and the next frame
+//     would desync.
 //   * The BODY IoBuf pulls `clen` bytes in a SINGLE read.  The body is
-//     the entire file text on a didChange, and reading it one byte per
-//     syscall is what froze the editor for hundreds of milliseconds —
-//     the same complaint lsp_write_fd's comment records for the write
-//     direction.  Content-Length tells us the exact size, so one read
-//     cannot over-read.
+//     the entire file text on a didChange; reading that one byte per
+//     syscall freezes the editor for hundreds of milliseconds — the
+//     same cost lsp_write_fd's comment records for the write
+//     direction.  Content-Length gives the exact size, so a single
+//     read cannot over-read into the next frame.
 //
 // Giving the header scan a real chunk size needs a session-lifetime
 // IoBuf threaded through lsp_poll_message / lsp_pump and their ten
@@ -324,7 +320,6 @@ fn lsp_msg_diags(msg: Str) -> Bool [io]
             // NB: `return lsp_print_diags(doc)` directly miscompiles on LLVM —
             // the match-subject drop is emitted before the call, so `doc` is a
             // freed handle inside the callee.  Bind first, then return.
-            // See bugs/codegen-llvm/llvm-return-call-in-match-arm-drops-subject.md
             let r = lsp_print_diags(doc)
             return r
 

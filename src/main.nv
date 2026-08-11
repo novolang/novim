@@ -2,8 +2,8 @@
 //
 // The buffer is a plain `[Str]` line vector.  The editor loads a file, drives
 // an interactive ANSI TUI, and supports a deterministic `--batch` mode used by
-// the test harness.  See features/orbits/novim/README.md for the feature
-// overview.
+// the test harness.  docs/LSP-DESIGN.md covers the language-server side and
+// docs/LANGUAGES.md the per-filetype table.
 //
 // The interactive TUI uses the host-TTY primitives std.pty exposes (raw mode,
 // host stdin/stdout byte, poll, winsize) — the same surface novomux/novoterm
@@ -464,7 +464,7 @@ fn insert_newline(ed: Editor) -> Editor
     let before = str.slice(line, 0, ed.cx)
     let after = str.slice(line, ed.cx, str.len(line))
     let indent = leading_ws(line)
-    let ilen = str.len(indent)            // snapshot before the concat (see bugs/codegen-llvm)
+    let ilen = str.len(indent)            // snapshot: the concat below can invalidate `indent`
     let newafter = indent + after
     var ls: [Str] = []
     let mut i = 0
@@ -1265,8 +1265,7 @@ fn vdelete_char_lines(ed: Editor, vr: VRange) -> [Str]
 // into a helper that allocates can corrupt the still-live `vr` here under the
 // LLVM backend — `vr.ex` was observed picking up a byte of freed string data
 // (length-16+ lines only; the SSO→heap boundary).  Reading the four fields up
-// front, then rebuilding a fresh VRange per callee, sidesteps it.  See
-// bugs/codegen-llvm.
+// front, then rebuilding a fresh VRange per callee, sidesteps it.
 fn apply_char_vr(ed: Editor, st: InputState, opb: Int, vr: VRange) -> Step
     let vsy = vr.sy
     let vsx = vr.sx
@@ -1862,7 +1861,7 @@ fn feed_visual(ed: Editor, st: InputState, b: Int) -> Step
         return Step { ed: ed, st: InputState { count: st.count * 10, pending: 0, mode: st.mode, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
     // Blockwise visual (mode 5) operators: delete/fill act on the column
     // rectangle, not a charwise run.  Block insert/append/change (I/A/c) and
-    // yank/paste are a follow-on slice; ignore (stay selected) for now.  Motions
+    // yank/paste are not implemented; they ignore the key and stay selected.  Motions
     // and the Esc/v/V/o/count handlers above fall through to the shared code.
     if st.mode == 5
         if b == 'd' or b == 'x'                 // delete the block
@@ -4906,7 +4905,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var buflist = false                  // `:ls` — show the buffer-list overlay until the next key
     // ── Picker overlay (picker-and-pins): modal prompt + fuzzy-ranked list ──
     var picker_active = false
-    var picker_src = 0                   // 0 = :bufs (files/grep/pins are later slices)
+    var picker_src = 0                   // 0 = :bufs; no other source is wired
     var picker_query = ""
     var picker_sel = 0                   // selection index into the ranked view
     var picker_cands: [Str] = []         // scored + displayed rows
@@ -6620,8 +6619,8 @@ fn files_candidates(cap: Int) -> [Str] [io, time]
                     out = list.push(out, raw[i])
                 i = i + 1
             // let-bound, NOT a tail if/else: a statement-tail if returning a
-            // push-rebound var reads its pre-push value under --llvm — see
-            // bugs/codegen-llvm/stmt-tail-if-value-stale-after-push-rebind.md
+            // push-rebound var reads its pre-push value under --llvm, so the
+            // loop's appends to `out` would be invisible to the caller.
             let r = if list.len(out) == 0 then walk_files(".", "", 0, [], cap) else out
             r
 
