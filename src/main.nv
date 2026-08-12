@@ -2765,7 +2765,13 @@ fn buf_to_str(lines: [Str]) -> Str
     s
 
 fn save_buf(path: Str, lines: [Str]) [io]
-    fs.write(path, buf_to_str(lines))
+    // The write's success flag is deliberately discarded, so a failed
+    // `:w` — read-only file, full disk, vanished parent directory —
+    // still prints the ordinary `"path" NL, NB written` confirmation.
+    // Reporting it means returning Bool from here and from
+    // save_buf_text, and showing E212 in the status line instead of
+    // wrote_msg at each of the five call sites.
+    let _ = fs.write(path, buf_to_str(lines))
 
 // Save a buffer held as newline-joined text (a stored, non-active buffer) —
 // splits to lines so the on-disk form matches `:w` (one trailing newline/line).
