@@ -20,6 +20,7 @@ use disp
 use excmd
 use nvmap
 use fuzzy
+use throttle
 
 // Editor state.  The cursor is 0-based (line, col); the buffer is a line vector.
 struct Editor
@@ -4015,6 +4016,15 @@ fn run_batch(keys: Str, cfg_path: Str, fpath: Str) [io, time]
     var picker_cands: [Str] = []
     var picker_marks: [Str] = []
     var picker_meta: [Str] = []
+    // The repaint decision, run headlessly.  --batch draws nothing, but it feeds
+    // its keys with no gaps between them — which is exactly the condition that
+    // starves a queue-emptiness redraw loop — so running throttle.should_render
+    // over the same key stream reports how many frames the interactive driver
+    // would have presented for it.  `frames=` is printed with the picker state.
+    let bbudget = frame_budget()
+    var bframes = 0
+    var blast = now_ms()
+    var bmoved = false
     let decoded = decode_escapes(keys)
     var cmd_mode = false
     var cmd_buf = ""
@@ -4052,16 +4062,20 @@ fn run_batch(keys: Str, cfg_path: Str, fpath: Str) [io, time]
                 let pcnt = fuzzy.match_count(picker_query, picker_cands)
                 if picker_sel + 1 < pcnt
                     picker_sel = picker_sel + 1
+                bmoved = true
             elif b == '\x0a' or b == '\x0e'      // Ctrl-J / Ctrl-N — toward better ranks
                 if picker_sel > 0
                     picker_sel = picker_sel - 1
+                bmoved = true
             elif b == '\x7f' or b == '\b'        // Backspace — shrink the query
                 if str.len(picker_query) > 0
                     picker_query = str.slice(picker_query, 0, str.len(picker_query) - 1)
                     picker_sel = 0
+                bmoved = true
             elif b >= ' ' and b < '\x7f'         // type — extend the query, re-rank
                 picker_query = picker_query + str.from_char(b)
                 picker_sel = 0
+                bmoved = true
         elif cmd_mode
             if b == '\r' or b == '\n'            // Enter — run the command
                 if excmd.is_substitute(cmd_buf)
@@ -4239,6 +4253,12 @@ fn run_batch(keys: Str, cfg_path: Str, fpath: Str) [io, time]
             ed = estep.ed
             st = estep.st
             es = estep.es
+        // Ask the throttle the same question the interactive drain asks: with
+        // more keys still queued and the picker moved, has the budget run out?
+        if picker_active and throttle.should_render(now_ms(), blast, bbudget, i + 1 < n, bmoved)
+            bframes = bframes + 1
+            blast = now_ms()
+            bmoved = false
         i = i + 1
     let mut li = 0
     let nl = list.len(ed.lines)
@@ -4265,6 +4285,7 @@ fn run_batch(keys: Str, cfg_path: Str, fpath: Str) [io, time]
         while bri < list.len(bwin)
             println((if bri + boff == bsel then "> " else "  ") + picker_marks[bwin[bri]] + picker_cands[bwin[bri]])
             bri = bri + 1
+        println("frames=" + str.from_int(bframes))
     if str.len(pnote) > 0
         println("note=" + pnote)
 
@@ -4355,6 +4376,22 @@ fn frame_end() [io]
     emit("?25h")
     csi()
     emit("?2026l")
+
+// Milliseconds off the monotonic clock.  The frame budget is a duration, and a
+// duration may only be measured against a clock that cannot step — see the
+// stdlib `time` module on why `Instant` differences are not durations.
+fn now_ms() -> Int [time]
+    time.ticks_us() / 1000
+
+// The repaint budget in force, in milliseconds.  `NOVIM_FRAME_BUDGET_MS`
+// overrides throttle.frame_budget_ms so a driver can pin the cadence instead of
+// racing the clock: 0 paints on every pending move, a very large value never
+// interrupts a drain.  A value that is not an integer falls back to the default.
+fn frame_budget() -> Int [io]
+    let e = process.env("NOVIM_FRAME_BUDGET_MS") ?? ""
+    if str.len(e) == 0
+        return throttle.frame_budget_ms()
+    str.to_int(e) ?? throttle.frame_budget_ms()
 
 // Enter the editor's terminal mode: the alternate screen buffer (so the
 // editor has no scrollback for the mouse wheel to bleed into, and the
@@ -5212,6 +5249,20 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var picker_cands: [Str] = []         // scored + displayed rows
     var picker_marks: [Str] = []         // per-row display prefix ("% " current, "# " alternate)
     var picker_meta: [Str] = []          // per-row action payload (bufs: the buffer path)
+    // The WHOLE ranking of picker_cands for picker_query, best first, memoised.
+    // Ranking is O(candidates) and moving the selection does not change it, so
+    // recomputing it per repaint made the cost of one keystroke scale with the
+    // size of the list — at ten thousand candidates a frame cost ~200 ms, which
+    // is what turned a held arrow key into a slideshow.  It is invalidated by
+    // the two things that DO change it: the query, and the candidate list
+    // (`:grep` grows its list under an open picker).  `picker_rank` doubles as
+    // the match count — fuzzy.rank excludes non-matches, so its length is
+    // exactly what fuzzy.match_count would return.
+    var picker_rank: [Int] = []
+    var picker_rank_ok = false
+    // The picker moved since the last frame reached the terminal — the "is
+    // there anything to show" input of the repaint decision.
+    var picker_moved = false
     // ── :grep live source: an rg --vimgrep child streams into the picker ──
     var grep_pid = 0 - 1                 // running rg (-1 = none)
     var grep_fd = 0 - 1
@@ -5248,9 +5299,15 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
         ts_lasttext = buf_text(ed)
         ts_spans_cache = ts.ts_spans(ts_grammar, ts_symbol, ts_queries, ts_lasttext)
     history_init()                       // ensure the history dir + compact the file
+    let fbudget = frame_budget()         // how long a moving selection may go unpainted
     frame_begin()
     paint_frame(ed, lay, awin, cols, rows, win_cy, win_cx, win_top, win_left, win_buf, win_ww, win_hw, cur_buf, bufs_text, bufs_path, curpath, top, left, st, cs, opts, diag_li, diag_msgs, lsp_info, modified, ts_spans_cache, yflash)
     frame_end()
+    // Stamped when a frame has REACHED the terminal, so the budget measures the
+    // gap between presented frames.  Stamping before the paint would charge the
+    // paint's own cost to the next budget and make a slow frame demand another
+    // one the instant it finished.
+    var last_render = now_ms()
     var running = true
     while running
         // Short stdin poll keeps the editor responsive while leaving slack to
@@ -5280,7 +5337,9 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                     picker_marks = []
                     picker_meta = []
                     picker_sel = 0
+                    picker_rank_ok = false
                     changed = true
+                    picker_moved = true
                     if str.len(picker_query) > 0
                         // explicit "." path: with a piped stdin and NO path,
                         // rg searches stdin and produces nothing for the tree.
@@ -5314,6 +5373,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                     picker_cands = list.push(picker_cands, grow2)
                                     picker_marks = list.push(picker_marks, "")
                                     picker_meta = list.push(picker_meta, grow2)
+                                    picker_rank_ok = false     // the list grew — re-rank
                             grep_buf = ""
                             changed = true
                         else
@@ -5337,6 +5397,13 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                     esc_pushback = 0 - 99
                 else
                     b = novo_pty_stdin_read_byte_h()
+                // Rank once, ahead of the dispatch, so every handler below reads
+                // the same memo: both the arrow keys (resolved inside the escape
+                // branch) and the modal picker branch need the ranking, and
+                // neither may pay for it per keystroke.
+                if picker_active and not picker_rank_ok
+                    picker_rank = fuzzy.rank(picker_query, picker_cands, list.len(picker_cands))
+                    picker_rank_ok = true
                 // Resolve terminal escape sequences (CSI `ESC [`, SS3 `ESC O`)
                 // before dispatch so their final letters aren't read as editor
                 // commands.  Arrow / Home / End move the cursor; everything else
@@ -5403,14 +5470,16 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                             if packed >= 0 and picker_active
                                 let kfin = packed % 256
                                 if kfin == 'A'
-                                    let kcnt = fuzzy.match_count(picker_query, picker_cands)
+                                    let kcnt = list.len(picker_rank)
                                     if picker_sel + 1 < kcnt
                                         picker_sel = picker_sel + 1
                                     changed = true
+                                    picker_moved = true
                                 elif kfin == 'B'
                                     if picker_sel > 0
                                         picker_sel = picker_sel - 1
                                     changed = true
+                                    picker_moved = true
                             if packed >= 0 and not cmd_mode and not search_mode and not picker_active
                                 let fin = packed % 256
                                 let prm = packed / 256
@@ -5555,11 +5624,10 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                     running = false
                 elif picker_active                       // modal picker input
                     if b == '\r'                         // Enter ('\r' only — Ctrl-J is 0x0a)
-                        // Rank only as deep as the selection: the acted-on row
-                        // is the LAST of that prefix, whatever the window shows.
-                        let ptop = fuzzy.rank(picker_query, picker_cands, picker_sel + 1)
-                        if picker_sel < list.len(ptop)
-                            let ridx = ptop[picker_sel]
+                        // The selection is a rank over the WHOLE match set, so
+                        // the acted-on row is that rank, not the window's copy.
+                        if picker_sel < list.len(picker_rank)
+                            let ridx = picker_rank[picker_sel]
                             if picker_src == 3               // :grep — jump to file:line:col
                                 let grow = picker_meta[ridx]
                                 let g1 = util.index_of_byte(grow, ':')
@@ -5604,29 +5672,35 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                         // moving up on screen means a HIGHER rank index.  The
                         // bound is every match, not the windowful on screen —
                         // the window follows the selection, not the reverse.
-                        let pcnt = fuzzy.match_count(picker_query, picker_cands)
+                        let pcnt = list.len(picker_rank)
                         if picker_sel + 1 < pcnt
                             picker_sel = picker_sel + 1
                         changed = true
+                        picker_moved = true
                     elif b == '\x0a' or b == '\x0e'      // Ctrl-J / Ctrl-N — visually DOWN
                         if picker_sel > 0
                             picker_sel = picker_sel - 1
                         changed = true
+                        picker_moved = true
                     elif b == '\x7f' or b == '\b'        // Backspace — shrink the query
                         if str.len(picker_query) > 0
                             picker_query = str.slice(picker_query, 0, str.len(picker_query) - 1)
                             picker_sel = 0
+                            picker_rank_ok = false
                             if picker_src == 3           // :grep re-runs rg for the new prompt
                                 grep_pending = true
                                 grep_debounce = 2        // ~100ms at the 50ms poll cadence
                         changed = true
+                        picker_moved = true
                     elif b >= ' ' and b < '\x7f'         // type — extend the query, re-rank
                         picker_query = picker_query + str.from_char(b)
                         picker_sel = 0
+                        picker_rank_ok = false
                         if picker_src == 3
                             grep_pending = true
                             grep_debounce = 2
                         changed = true
+                        picker_moved = true
                 elif cmd_mode
                     if b == '\r' or b == '\n'            // Enter — run command
                         if excmd.is_substitute(cmd_buf)
@@ -5848,6 +5922,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                             picker_src = 0
                             picker_query = ""
                             picker_sel = 0
+                            picker_rank_ok = false
                             picker_cands = []
                             picker_marks = []
                             picker_meta = []
@@ -5862,6 +5937,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                             picker_src = 1
                             picker_query = excmd.files_query(cmd_buf)
                             picker_sel = 0
+                            picker_rank_ok = false
                             picker_cands = files_candidates(10000)
                             picker_marks = []
                             picker_meta = []
@@ -5884,6 +5960,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                 picker_src = 3
                                 picker_query = excmd.files_query(cmd_buf)
                                 picker_sel = 0
+                                picker_rank_ok = false
                                 picker_cands = []
                                 picker_marks = []
                                 picker_meta = []
@@ -5898,6 +5975,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                             picker_src = 2
                             picker_query = ""
                             picker_sel = 0
+                            picker_rank_ok = false
                             picker_cands = []
                             picker_marks = []
                             picker_meta = []
@@ -6403,6 +6481,20 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                     if wasjump and ed.cy != jy
                         jback = list.push(jback, jentry(curpath, jy, jx))
                         jfwd = []
+                // Bound the coalescing by TIME.  This drain otherwise ends only
+                // when stdin runs dry, which under key auto-repeat can be "when
+                // the user lets go" — the terminal refills the queue as fast as
+                // the loop empties it.  Leaving the drain early hands control to
+                // the repaint below and the next poll returns immediately with
+                // the still-queued input, so nothing is lost, only presented.
+                //
+                // Only stdin counts as pending: a buffered remap RHS or an ESC
+                // pushback lives in this loop's own state, and the outer poll
+                // will not wake for it, so leaving with either armed would
+                // strand those bytes until the next real keystroke.
+                if not done and str.len(map_replay) == 0 and esc_pushback == 0 - 99
+                    if throttle.should_render(now_ms(), last_render, fbudget, novo_pty_poll_h(0, 0) % 2 == 1, picker_moved)
+                        done = true
             changed = true
         // ── Deferred window + buffer commands ───────────────────────────────
         // Order matters: window split/close/focus run FIRST and may set
@@ -6688,12 +6780,15 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
             if buflist
                 draw_buflist(bufs_path, cur_buf, rows)
             if picker_active
+                if not picker_rank_ok
+                    picker_rank = fuzzy.rank(picker_query, picker_cands, list.len(picker_cands))
+                    picker_rank_ok = true
                 let dmaxh = picker_maxh(rows)
-                let dmatch = fuzzy.match_count(picker_query, picker_cands)
+                let dmatch = list.len(picker_rank)
                 if picker_sel >= dmatch
                     picker_sel = if dmatch > 0 then dmatch - 1 else 0
                 let doff = picker_off(picker_sel, dmaxh)
-                let dtop = picker_window(fuzzy.rank(picker_query, picker_cands, doff + dmaxh), doff, dmaxh)
+                let dtop = picker_window(picker_rank, doff, dmaxh)
                 let dtitle = if picker_src == 0 then "Buffers" elif picker_src == 1 then "Find Files" elif picker_src == 2 then "Pins" else "Live Grep"
                 // :grep counter = rows received from rg (honest when the stored
                 // list is capped); other sources count fuzzy matches.
@@ -6701,6 +6796,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 let dtot = if picker_src == 3 then grep_total else list.len(picker_cands)
                 draw_picker(picker_cands, picker_marks, dtop, picker_sel - doff, picker_query, dnm, dtot, dtitle, rows, cols)
             frame_end()
+            last_render = now_ms()
+            picker_moved = false
         if novo_pty_winsize_changed_h() == 1
             rows = term_rows()
             cols = term_cols()
@@ -6710,6 +6807,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
             clear_screen()   // dimensions changed — clear stale content once
             paint_frame(ed, lay, awin, cols, rows, win_cy, win_cx, win_top, win_left, win_buf, win_ww, win_hw, cur_buf, bufs_text, bufs_path, curpath, top, left, st, cs, opts, diag_li, diag_msgs, lsp_info, modified, ts_spans_cache, yflash)
             frame_end()
+            last_render = now_ms()
     if lsp_pid >= 0                       // tear the language server down
         let _ = proc.kill(lsp_pid, 15)
         proc.close(lsp_pid)

@@ -1,6 +1,6 @@
 [package]
 name        = "novim"
-version     = "0.1.1"
+version     = "0.1.2"
 description = "novim — modal terminal editor written in Novo.  v1: a [Str] line-vector buffer, Vim motions/operators, an ANSI TUI, a deterministic --batch test mode, and TOML-driven keymaps + colorschemes.  See features/orbits/novim/README.md for the v1 scope + slice plan (piece-tree / novols LSP / novo-treesitter / plugins are v2)."
 main        = "src/main.nv"
 

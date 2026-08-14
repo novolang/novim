@@ -1,0 +1,48 @@
+// throttle.nv — when a coalescing redraw loop owes the screen a frame.
+//
+// Reading every byte of pending input before painting is the standard anti-lag
+// shape for a terminal editor, and it is correct only for as long as the input
+// queue actually drains.  Under key auto-repeat it need not: the terminal can
+// refill stdin as fast as the loop empties it, and then "paint once the queue
+// is empty" degrades into "paint once the user lets go" — a held arrow scrolls
+// a list invisibly and the display jumps to the final position on release.
+//
+// So coalescing is bounded by TIME instead of by queue-emptiness: sustained
+// input still gets frames, at display cadence rather than one per key.
+//
+// Pure.  No [io], no clock read — both timestamps are supplied by the caller,
+// which is what makes the whole decision table assertable without a terminal.
+
+// One frame at 30 Hz, in milliseconds: the longest a moved selection may stay
+// unpainted while input is still queued.
+//
+// The usable band is about 16 ms (60 Hz) to 33 ms (30 Hz).  Below it the loop
+// produces frames faster than any display presents them, spending on redraw the
+// time it should spend on input.  Above it a held key stops reading as motion
+// and starts reading as a jump.  33 ms is the slow end of that band on purpose:
+// it is the cheapest cadence that still reads as continuous, so it buys the
+// smoothness for the least repaint work per second of held key.
+fn frame_budget_ms() -> Int
+    33
+
+@intent("""Whether a coalescing input loop must interrupt its drain and paint.
+
+Three inputs decide it.  `selection_moved` is the only reason to paint at all —
+a loop that has consumed input without changing what the screen would show has
+nothing to present.  `input_pending` separates the two ways a drain ends: with
+the queue empty the loop is about to fall out of the drain and paint anyway, so
+the budget is irrelevant and the answer is false; with input still queued the
+loop would otherwise keep coalescing, and the budget is the only thing that
+stops it doing so for as long as the key repeats.  The elapsed time is measured
+from the END of the previous frame, so a loop that is already keeping up (one
+frame per drained batch) is never asked to paint more often than it already
+does — the budget can only add frames a starved loop was not going to produce.
+
+`now_ms` and `last_render_ms` must come from the same monotonic clock;
+a wall-clock difference is not a duration.""")
+fn should_render(now_ms: Int, last_render_ms: Int, budget_ms: Int, input_pending: Bool, selection_moved: Bool) -> Bool
+    if not selection_moved
+        return false
+    if not input_pending
+        return false
+    now_ms - last_render_ms >= budget_ms
