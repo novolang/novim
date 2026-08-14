@@ -137,17 +137,30 @@ fn history_init() [io]
 fn history_append(prefix: Str, entry: Str) [io]
     let _ = fs.append(history_file(), prefix + entry + str.from_char('\n'))
 
-// ── Pins (harpoon slots, picker-and-pins) ───────────────────────────────────
+// ── Pins (harpoon slots) ────────────────────────────────────────────────────
 // Slot i holds a file path + the cursor at pin time; per-project, persisted
 // under the state dir keyed by the project root, written on change.
 
-// The project root: the nearest ancestor of the cwd containing `.git` or
-// `novo.toml`, else the cwd itself.
-fn project_root() -> Str [io]
-    var d = path.absolute(".")
+// The absolute cwd.  `path.absolute(".")` spells it with a trailing "/." which
+// has to come off — but only when something is left underneath: at the
+// filesystem root the whole string is "/.", and stripping blindly yields the
+// empty string, which is not a directory any more and collapses every caller
+// keyed on it onto one key.
+fn cwd_abs() -> Str [io]
+    let d = path.absolute(".")
     let dn = str.len(d)
-    if dn >= 2 and str.slice(d, dn - 2, dn) == "/."
-        d = str.slice(d, 0, dn - 2)          // path.absolute(".") ends in "/."
+    if dn > 2 and str.slice(d, dn - 2, dn) == "/."
+        str.slice(d, 0, dn - 2)
+    elif dn == 2 and str.slice(d, 0, 2) == "/."
+        "/"
+    else
+        d
+
+// The project root: the nearest ancestor of the cwd containing `.git` or
+// `novo.toml`, else the absolute cwd itself.  Never empty — an empty root would
+// key every rootless directory onto a single shared state file.
+fn project_root() -> Str [io]
+    let d = cwd_abs()
     var probe = d
     var found = ""
     var scanning = true
@@ -162,6 +175,24 @@ fn project_root() -> Str [io]
             else
                 probe = parent
     if str.len(found) > 0 then found else d
+
+// Resolve a possibly-relative path against the cwd.  Pins are stored absolute:
+// the pin file is keyed by the PROJECT ROOT, so the same list is read from
+// every directory of the project, and a path relative to whichever directory
+// did the pinning names a different file (usually no file) from any other.
+fn abs_of(p: Str) -> Str [io]
+    if str.len(p) == 0 or (str.byte_at(p, 0) ?? 0) == '/' then p else path.absolute(p)
+
+// The short spelling of an absolute path for display and for opening: relative
+// to the cwd when it sits underneath, else absolute.  Both spellings open the
+// same file; this only keeps the status line and the picker rows readable.
+fn rel_of(p: Str) -> Str [io]
+    let c = cwd_abs()
+    let cn = str.len(c)
+    if cn > 0 and str.len(p) > cn + 1 and str.slice(p, 0, cn) == c and (str.byte_at(p, cn) ?? 0) == '/'
+        str.slice(p, cn + 1, str.len(p))
+    else
+        p
 
 // Encode a root path into a filename component (slashes → '%').
 fn pins_key(root: Str) -> Str
@@ -192,6 +223,84 @@ fn pins_save(root: Str, pp: [Str], py: [Int], px: [Int]) [io]
         out = out + str.from_char('\n')
         i = i + 1
     let _ = fs.write(f, out)
+
+// The slot table: parallel lists, slot i free when `p[i]` is empty.
+struct Pins
+    p: [Str]
+    y: [Int]
+    x: [Int]
+
+@intent("""Read the slot table for `root`.  A stored path that is not absolute
+predates the absolute-path rule and is resolved against the root — the closest
+guess available, since the directory it was written from is not recorded.""")
+fn pins_load(root: Str) -> Pins [io]
+    var pp: [Str] = []
+    var py: [Int] = []
+    var px: [Int] = []
+    let raw = fs.read(pins_file(root)) ?? ""
+    if str.len(raw) > 0
+        let plines = str.split_lines(raw)
+        var pli = 0
+        while pli < list.len(plines)
+            let pln = plines[pli]
+            let pt1 = util.index_of_byte(pln, '\t')
+            var slot = ""
+            var sy = 0
+            var sx = 0
+            if pt1 > 0
+                let pt2 = util.index_of_byte_from(pln, '\t', pt1 + 1)
+                if pt2 > pt1
+                    let stored = str.slice(pln, 0, pt1)
+                    slot = if (str.byte_at(stored, 0) ?? 0) == '/' then stored else path.join(root, stored)
+                    sy = str.to_int(str.slice(pln, pt1 + 1, pt2)) ?? 0
+                    sx = str.to_int(str.slice(pln, pt2 + 1, str.len(pln))) ?? 0
+            pp = list.push(pp, slot)
+            py = list.push(py, sy)
+            px = list.push(px, sx)
+            pli = pli + 1
+    Pins { p: pp, y: py, x: px }
+
+// The slot holding `p`, or -1.  A path pins once, so there is at most one —
+// but the scan reports the LAST match so that a table which somehow holds
+// duplicates still converges on one slot instead of alternating.
+fn pins_slot_of(pp: [Str], p: Str) -> Int
+    var i = 0
+    var found = 0 - 1
+    while i < list.len(pp)
+        if pp[i] == p
+            found = i
+        i = i + 1
+    found
+
+// The lowest free slot, or one past the end when every slot is taken.
+fn pins_free_slot(pp: [Str]) -> Int
+    var i = 0
+    var slot = 0 - 1
+    while i < list.len(pp) and slot < 0
+        if str.len(pp[i]) == 0
+            slot = i
+        i = i + 1
+    if slot >= 0 then slot else list.len(pp)
+
+@intent("""Write `p` and its cursor into `slot`, growing the table with free
+slots as needed, and clearing any OTHER slot already holding `p` — a path pins
+once, so an explicit `:pin N` on an already-pinned file moves it rather than
+leaving the same file reachable from two slots.""")
+fn pins_put(pn: Pins, slot: Int, p: Str, y: Int, x: Int) -> Pins
+    var pp = pn.p
+    var py = pn.y
+    var px = pn.x
+    let prev = pins_slot_of(pp, p)
+    if prev >= 0 and prev != slot
+        pp = util.set_str_at(pp, prev, "")
+    while list.len(pp) <= slot
+        pp = list.push(pp, "")
+        py = list.push(py, 0)
+        px = list.push(px, 0)
+    pp = util.set_str_at(pp, slot, p)
+    py = util.set_int_at(py, slot, y)
+    px = util.set_int_at(px, slot, x)
+    Pins { p: pp, y: py, x: px }
 
 @intent("""Clamp the cursor into the buffer bounds, following the vim
 normal-mode rule: cx sits on the last glyph (len-1), or col 0 on an empty
@@ -2332,14 +2441,35 @@ fn picker_maxh(rows: Int) -> Int
     let oh = if rows - 4 < 20 then rows - 4 else 20
     if oh - 5 > 0 then oh - 5 else 1
 
-@intent("""Draw the interactive picker overlay (picker-and-pins), telescope
-style: a bordered Results box (title centered in the top border) with the
-fuzzy-ranked rows drawn BOTTOM-UP — rank 0 (best) sits on the bottom interior
-row, adjacent to the prompt — and the selection in reverse video with a `>`
-marker; below it a bordered 3-row prompt box carrying the source title, the
-`> query` line, and a right-aligned `nmatch / total` counter.  Parks the
-terminal cursor at the prompt insertion point.  Modal: the driver routes all
-input here while active.""")
+// The rank sitting on the window's far edge, so the drawn rows are ranks
+// [off, off+maxh) and the selection is always one of them.  Derived from the
+// selection rather than carried as state: a source may grow its candidate list
+// while the picker is open (`:grep` streams rows in as rg produces them), and a
+// stored offset would then point into a list that has re-ranked underneath it.
+fn picker_off(sel: Int, maxh: Int) -> Int
+    if sel >= maxh then sel - maxh + 1 else 0
+
+// Ranks [off, off+maxh) of `ranked` — exactly the rows the overlay draws.
+fn picker_window(ranked: [Int], off: Int, maxh: Int) -> [Int]
+    var out: [Int] = []
+    var i = if off > 0 then off else 0
+    let hi = off + maxh
+    while i < list.len(ranked) and i < hi
+        out = list.push(out, ranked[i])
+        i = i + 1
+    out
+
+@intent("""Draw the interactive picker overlay, telescope style: a bordered
+Results box (title centered in the top border) with the fuzzy-ranked rows drawn
+BOTTOM-UP — the best of them sits on the bottom interior row, adjacent to the
+prompt — and the selection in reverse video with a `>` marker; below it a
+bordered 3-row prompt box carrying the source title, the `> query` line, and a
+right-aligned `nmatch / total` counter.  Parks the terminal cursor at the prompt
+insertion point.  Modal: the driver routes all input here while active.
+
+`top_idx` is the VISIBLE window of ranked candidate indices (picker_window), not
+the whole ranking, and `sel` indexes into that window — so the list scrolls past
+a screenful while every drawn row stays a real candidate.""")
 fn draw_picker(cands: [Str], marks: [Str], top_idx: [Int], sel: Int, query: Str, nmatch: Int, total: Int, title: Str, rows: Int, cols: Int) [io]
     let h = list.len(top_idx)
     let maxh = picker_maxh(rows)
@@ -3854,14 +3984,37 @@ fn feed_edit(ed: Editor, st: InputState, km: Keymap, es: EditState, b: Int) -> E
 @intent("""`--batch <keys> <file>` entry point: load the file, feed each decoded
 key through the same edit pipeline as interactive mode (no TUI, no LSP), and
 print the resulting buffer + cursor.  Deterministic — the test harness drives
-editor behaviour through this path.""")
-fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
-    var ed = Editor { lines: buf_load(path), cy: 0, cx: 0 }
+editor behaviour through this path.
+
+The picker and the pins live here too, driven through the same widget functions
+the TUI uses (files_candidates / fuzzy.rank / picker_off / picker_window /
+pins_put), because their behaviour is otherwise only observable through a pty
+and therefore only assertable against wall-clock timing.  A picker still open
+when the keys run out prints its window after the buffer; a pin command prints
+the note it would have put on the status line.  The parameter is `fpath`, not
+`path`: a parameter named `path` shadows the stdlib module of that name, and
+the pin code needs `path.join`.""")
+fn run_batch(keys: Str, cfg_path: Str, fpath: Str) [io, time]
+    var ed = Editor { lines: buf_load(fpath), cy: 0, cx: 0 }
+    var curpath = fpath
     var st = ist_new()
     var es = edit_new()
     let km = load_keymaps(cfg_path)
     var opts = load_options(cfg_path)    // tabstop/expandtab drive edits, not just render
     let batch_rows = term_rows()         // 24 off-tty — makes paging deterministic
+    let pins_root = project_root()
+    let pins0 = pins_load(pins_root)
+    var pins_p = pins0.p
+    var pins_y = pins0.y
+    var pins_x = pins0.x
+    var pnote = ""                       // what a pin command would show in the status line
+    var picker_active = false
+    var picker_src = 0                   // 0 :bufs · 1 :files · 2 :pins
+    var picker_query = ""
+    var picker_sel = 0
+    var picker_cands: [Str] = []
+    var picker_marks: [Str] = []
+    var picker_meta: [Str] = []
     let decoded = decode_escapes(keys)
     var cmd_mode = false
     var cmd_buf = ""
@@ -3876,7 +4029,40 @@ fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
     let mut i = 0
     while i < n and not quit
         let b = str.byte_at(decoded, i) ?? 0
-        if cmd_mode
+        if picker_active                         // modal picker input, as in the TUI
+            if b == '\r'                         // Enter — act on the selection
+                // Rank only as deep as the selection: the acted-on row is the
+                // LAST of that prefix, whatever the window shows.
+                let ptop = fuzzy.rank(picker_query, picker_cands, picker_sel + 1)
+                if picker_sel < list.len(ptop)
+                    let target = picker_meta[ptop[picker_sel]]
+                    if target != curpath
+                        curpath = target
+                        ed = Editor { lines: buf_load(target), cy: 0, cx: 0 }
+                    if picker_src == 2           // pins restore the pinned cursor
+                        var pjs = 0
+                        while pjs < list.len(pins_p)
+                            if rel_of(pins_p[pjs]) == target
+                                ed = clamp(Editor { lines: ed.lines, cy: pins_y[pjs], cx: pins_x[pjs] })
+                            pjs = pjs + 1
+                picker_active = false
+            elif b == '\e'                       // Esc — dismiss
+                picker_active = false
+            elif b == '\x0b' or b == '\x10'      // Ctrl-K / Ctrl-P — toward worse ranks
+                let pcnt = fuzzy.match_count(picker_query, picker_cands)
+                if picker_sel + 1 < pcnt
+                    picker_sel = picker_sel + 1
+            elif b == '\x0a' or b == '\x0e'      // Ctrl-J / Ctrl-N — toward better ranks
+                if picker_sel > 0
+                    picker_sel = picker_sel - 1
+            elif b == '\x7f' or b == '\b'        // Backspace — shrink the query
+                if str.len(picker_query) > 0
+                    picker_query = str.slice(picker_query, 0, str.len(picker_query) - 1)
+                    picker_sel = 0
+            elif b >= ' ' and b < '\x7f'         // type — extend the query, re-rank
+                picker_query = picker_query + str.from_char(b)
+                picker_sel = 0
+        elif cmd_mode
             if b == '\r' or b == '\n'            // Enter — run the command
                 if excmd.is_substitute(cmd_buf)
                     es = edit_push_undo(es, ed)
@@ -3912,10 +4098,80 @@ fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
                     opts = apply_set(opts, cmd_buf)   // tabstop/expandtab affect edits in batch too
                 elif excmd.is_goto(cmd_buf)
                     ed = ex_goto(ed, cmd_buf)
+                elif excmd.is_files(cmd_buf)         // :files [query] — the file picker
+                    picker_active = true
+                    picker_src = 1
+                    picker_query = excmd.files_query(cmd_buf)
+                    picker_sel = 0
+                    picker_cands = files_candidates(10000)
+                    picker_marks = []
+                    picker_meta = []
+                    var pfi = 0
+                    while pfi < list.len(picker_cands)
+                        picker_marks = list.push(picker_marks, "  ")
+                        picker_meta = list.push(picker_meta, picker_cands[pfi])
+                        pfi = pfi + 1
+                elif excmd.is_bufs(cmd_buf)          // :bufs — batch holds one buffer
+                    picker_active = true
+                    picker_src = 0
+                    picker_query = ""
+                    picker_sel = 0
+                    picker_cands = [curpath]
+                    picker_marks = ["% "]
+                    picker_meta = [curpath]
+                elif excmd.is_pins(cmd_buf)          // :pins — the pin picker
+                    picker_active = true
+                    picker_src = 2
+                    picker_query = ""
+                    picker_sel = 0
+                    picker_cands = []
+                    picker_marks = []
+                    picker_meta = []
+                    var ppi = 0
+                    while ppi < list.len(pins_p)
+                        if str.len(pins_p[ppi]) > 0
+                            picker_cands = list.push(picker_cands, rel_of(pins_p[ppi]))
+                            picker_marks = list.push(picker_marks, str.from_int(ppi + 1) + " ")
+                            picker_meta = list.push(picker_meta, rel_of(pins_p[ppi]))
+                        ppi = ppi + 1
+                elif excmd.is_pinjump(cmd_buf)       // :pinjump N — jump to slot N
+                    let jsl = excmd.pin_slot_arg(cmd_buf)
+                    if jsl >= 1 and jsl <= list.len(pins_p) and str.len(pins_p[jsl - 1]) > 0
+                        let jp = rel_of(pins_p[jsl - 1])
+                        if pins_p[jsl - 1] != abs_of(curpath)
+                            curpath = jp
+                            ed = Editor { lines: buf_load(jp), cy: 0, cx: 0 }
+                        ed = clamp(Editor { lines: ed.lines, cy: pins_y[jsl - 1], cx: pins_x[jsl - 1] })
+                        pnote = "pin [" + str.from_int(jsl) + "] " + util.basename_of(jp)
+                    else
+                        pnote = "pin [" + str.from_int(jsl) + "]: empty"
+                elif excmd.is_unpin(cmd_buf)         // :unpin [N] — remove a pin
+                    let usl = excmd.pin_slot_arg(cmd_buf)
+                    let utgt = if usl >= 1 then usl - 1 else pins_slot_of(pins_p, abs_of(curpath))
+                    if utgt >= 0 and utgt < list.len(pins_p) and str.len(pins_p[utgt]) > 0
+                        pins_p = util.set_str_at(pins_p, utgt, "")
+                        pins_save(pins_root, pins_p, pins_y, pins_x)
+                        pnote = "unpinned [" + str.from_int(utgt + 1) + "]"
+                    else
+                        pnote = "unpin: no pin"
+                elif excmd.is_pin(cmd_buf)           // :pin [N] — pin the current file
+                    let psl = excmd.pin_slot_arg(cmd_buf)
+                    let pabs = abs_of(curpath)
+                    let phave = pins_slot_of(pins_p, pabs)
+                    if psl == 0 and phave >= 0
+                        pnote = "already pinned [" + str.from_int(phave + 1) + "]"
+                    else
+                        let pslot = if psl >= 1 then psl - 1 else pins_free_slot(pins_p)
+                        let pnew = pins_put(Pins { p: pins_p, y: pins_y, x: pins_x }, pslot, pabs, ed.cy, ed.cx)
+                        pins_p = pnew.p
+                        pins_y = pnew.y
+                        pins_x = pnew.x
+                        pins_save(pins_root, pins_p, pins_y, pins_x)
+                        pnote = "pinned [" + str.from_int(pslot + 1) + "] " + util.basename_of(curpath)
                 else
                     let r = excmd.exec_ex(cmd_buf)
                     if r.save
-                        save_buf(path, ed.lines)
+                        save_buf(curpath, ed.lines)
                     if r.quit
                         quit = true
                 cmd_mode = false
@@ -3990,6 +4246,27 @@ fn run_batch(keys: Str, cfg_path: Str, path: Str) [io]
         println(ed.lines[li])
         li = li + 1
     println("cursor=" + str.from_int(ed.cy) + ":" + str.from_int(ed.cx))
+    // Everything below is emitted only by a run that used one of these
+    // surfaces, so the buffer + `cursor=` dump keeps its exact old shape for
+    // every other run.  Rows are listed best-rank-first (the overlay draws the
+    // same window bottom-up); `>` marks the selection, which is in the window
+    // by construction.
+    if picker_active
+        let bmaxh = picker_maxh(batch_rows)
+        let bmatch = fuzzy.match_count(picker_query, picker_cands)
+        var bsel = picker_sel
+        if bsel >= bmatch
+            bsel = if bmatch > 0 then bmatch - 1 else 0
+        let boff = picker_off(bsel, bmaxh)
+        let bwin = picker_window(fuzzy.rank(picker_query, picker_cands, boff + bmaxh), boff, bmaxh)
+        let btitle = if picker_src == 0 then "Buffers" elif picker_src == 1 then "Find Files" else "Pins"
+        println("picker=" + btitle + " sel=" + str.from_int(bsel) + " off=" + str.from_int(boff) + " n=" + str.from_int(bmatch) + " maxh=" + str.from_int(bmaxh))
+        var bri = 0
+        while bri < list.len(bwin)
+            println((if bri + boff == bsel then "> " else "  ") + picker_marks[bwin[bri]] + picker_cands[bwin[bri]])
+            bri = bri + 1
+    if str.len(pnote) > 0
+        println("note=" + pnote)
 
 // ── Interactive TUI ─────────────────────────────────────────────
 
@@ -4056,6 +4333,28 @@ fn cursor_shape(mode: Int) [io]
 fn clear_screen() [io]
     csi()
     emit("2J")
+
+// Open a frame.  Every byte of a redraw — buffer, command line, list overlay,
+// picker — must sit between frame_begin and frame_end, because a redraw is a
+// STACK of layers and the terminal will happily present the lower ones on their
+// own: each layer is written as it is computed, so an overlay drawn after the
+// buffer arrives one presentation late and the buffer shows through it.  DEC
+// private mode 2026 (synchronized output) makes the terminal hold everything
+// until the frame closes and then swap it in as one image; the cursor is hidden
+// for the whole frame so it cannot be seen parked in a lower layer either.
+// Terminals without mode 2026 ignore both sequences and lose only the atomicity.
+fn frame_begin() [io]
+    csi()
+    emit("?2026h")
+    csi()
+    emit("?25l")
+
+// Close the frame: restore the cursor, then let the terminal present.
+fn frame_end() [io]
+    csi()
+    emit("?25h")
+    csi()
+    emit("?2026l")
 
 // Enter the editor's terminal mode: the alternate screen buffer (so the
 // editor has no scrollback for the mouse wheel to bleed into, and the
@@ -4431,13 +4730,9 @@ fn place_cursor(ed: Editor, win: window.Rect, top: Int, left: Int, opts: Options
 cursor, restore it.  Byte-identical to the pre-split render — the interactive
 driver calls this whenever there is exactly one window.""")
 fn render(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: colorscheme.Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, ts_spans: [Int], flash: Flash) [io]
-    csi()
-    emit("?25l")         // hide cursor while we repaint
     draw_window(ed, win, path, top, left, mode, avy, avx, search, cs, opts, diag_li, diag_msgs, info, modified, false, true, ts_spans, flash)
     place_cursor(ed, win, top, left, opts)
     cursor_shape(mode)   // block in normal/visual, bar in insert, underline in replace
-    csi()
-    emit("?25h")         // show the cursor at its new home
 
 // Split joined buffer text into lines, guaranteeing at least one (empty) line
 // so an empty buffer still renders a cursor row.
@@ -4445,8 +4740,8 @@ fn lines_of(text: Str) -> [Str]
     let bl = str.split_lines(text)
     if list.len(bl) == 0 then [""] else bl
 
-@intent("""Multi-window frame: hide the cursor once, draw every window in the
-layout into its computed rect, then home the cursor in the active window.  Each
+@intent("""Multi-window frame: draw every window in the layout into its computed
+rect, then home the cursor in the active window.  Each
 window draws its OWN buffer (win_buf): the active window and any pane showing
 the same buffer draw the live `ed.lines`; a pane on a different buffer draws
 that buffer's stored text (bufs_text), with its own path in the status line.
@@ -4455,8 +4750,6 @@ The active window draws from the live ed cursor / top / left and the real mode
 cursor/viewport in plain NORMAL mode.  Diagnostics + the modified flag follow
 the live active buffer only.""")
 fn render_all(ed: Editor, lay: window.Layout, awin: Int, screen: window.Rect, win_cy: [Int], win_cx: [Int], win_top: [Int], win_left: [Int], win_buf: [Int], win_ww: [Int], win_hw: [Int], cur_buf: Int, bufs_text: [Str], bufs_path: [Str], path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: colorscheme.Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, ts_spans: [Int], flash: Flash) [io]
-    csi()
-    emit("?25l")
     let rects = window.layout_rects(lay, screen, win_ww, win_hw, [])
     var i = 0
     while i < list.len(rects)
@@ -4488,12 +4781,14 @@ fn render_all(ed: Editor, lay: window.Layout, awin: Int, screen: window.Rect, wi
         i = i + 5
     place_cursor(ed, window.window_rect(lay, awin, screen, win_ww, win_hw), top, left, opts)
     cursor_shape(mode)
-    csi()
-    emit("?25h")
 
 @intent("""Paint one frame, dispatching on window count: a single window keeps
 the proven byte-identical render path; two or more go through render_all.  (Not
-named `frame` — that is a reserved word in Novo.)""")
+named `frame` — that is a reserved word in Novo.)
+
+This is the BOTTOM layer only.  Callers open the frame (frame_begin) before it
+and close it (frame_end) after every overlay they intend to stack on top, so the
+terminal presents buffer and overlay as one image.""")
 fn paint_frame(ed: Editor, lay: window.Layout, awin: Int, cols: Int, rows: Int, win_cy: [Int], win_cx: [Int], win_top: [Int], win_left: [Int], win_buf: [Int], win_ww: [Int], win_hw: [Int], cur_buf: Int, bufs_text: [Str], bufs_path: [Str], path: Str, top: Int, left: Int, st: InputState, cs: colorscheme.Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, ts_spans: [Int], flash: Flash) [io]
     let screen = window.rect(0, 0, cols, rows)
     if window.layout_count(lay) == 1
@@ -4926,31 +5221,10 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var grep_debounce = 0                // poll ticks until the respawn fires
     // ── Pins (harpoon slots): per-project, persisted, loaded at start ──
     let pins_root = project_root()
-    var pins_p: [Str] = []               // slot i → pinned path ("" = free)
-    var pins_y: [Int] = []
-    var pins_x: [Int] = []
-    let praw = fs.read(pins_file(pins_root)) ?? ""
-    if str.len(praw) > 0
-        let plines = str.split_lines(praw)
-        var pli = 0
-        while pli < list.len(plines)
-            let pln = plines[pli]
-            let pt1 = util.index_of_byte(pln, '\t')
-            if pt1 > 0
-                let pt2 = util.index_of_byte_from(pln, '\t', pt1 + 1)
-                if pt2 > pt1
-                    pins_p = list.push(pins_p, str.slice(pln, 0, pt1))
-                    pins_y = list.push(pins_y, str.to_int(str.slice(pln, pt1 + 1, pt2)) ?? 0)
-                    pins_x = list.push(pins_x, str.to_int(str.slice(pln, pt2 + 1, str.len(pln))) ?? 0)
-                else
-                    pins_p = list.push(pins_p, "")
-                    pins_y = list.push(pins_y, 0)
-                    pins_x = list.push(pins_x, 0)
-            else
-                pins_p = list.push(pins_p, "")
-                pins_y = list.push(pins_y, 0)
-                pins_x = list.push(pins_x, 0)
-            pli = pli + 1
+    let pins_at_start = pins_load(pins_root)
+    var pins_p = pins_at_start.p         // slot i → pinned path, absolute ("" = free)
+    var pins_y = pins_at_start.y
+    var pins_x = pins_at_start.x
     var modified = false                 // active buffer differs from disk → status `[+]`
     var lsp_dirty = false                // buffer changed since the last didChange
     var lsp_idle = 0                      // consecutive idle poll cycles (debounce)
@@ -4974,7 +5248,9 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
         ts_lasttext = buf_text(ed)
         ts_spans_cache = ts.ts_spans(ts_grammar, ts_symbol, ts_queries, ts_lasttext)
     history_init()                       // ensure the history dir + compact the file
+    frame_begin()
     paint_frame(ed, lay, awin, cols, rows, win_cy, win_cx, win_top, win_left, win_buf, win_ww, win_hw, cur_buf, bufs_text, bufs_path, curpath, top, left, st, cs, opts, diag_li, diag_msgs, lsp_info, modified, ts_spans_cache, yflash)
+    frame_end()
     var running = true
     while running
         // Short stdin poll keeps the editor responsive while leaving slack to
@@ -5127,7 +5403,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                             if packed >= 0 and picker_active
                                 let kfin = packed % 256
                                 if kfin == 'A'
-                                    let kcnt = list.len(fuzzy.rank(picker_query, picker_cands, picker_maxh(rows)))
+                                    let kcnt = fuzzy.match_count(picker_query, picker_cands)
                                     if picker_sel + 1 < kcnt
                                         picker_sel = picker_sel + 1
                                     changed = true
@@ -5278,9 +5554,10 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                     done = true
                     running = false
                 elif picker_active                       // modal picker input
-                    let pmaxh = picker_maxh(rows)
                     if b == '\r'                         // Enter ('\r' only — Ctrl-J is 0x0a)
-                        let ptop = fuzzy.rank(picker_query, picker_cands, pmaxh)
+                        // Rank only as deep as the selection: the acted-on row
+                        // is the LAST of that prefix, whatever the window shows.
+                        let ptop = fuzzy.rank(picker_query, picker_cands, picker_sel + 1)
                         if picker_sel < list.len(ptop)
                             let ridx = ptop[picker_sel]
                             if picker_src == 3               // :grep — jump to file:line:col
@@ -5307,7 +5584,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                 if picker_src == 2              // pins restore the pinned cursor
                                     var pjs = 0
                                     while pjs < list.len(pins_p)
-                                        if pins_p[pjs] == picker_meta[ridx]
+                                        if rel_of(pins_p[pjs]) == picker_meta[ridx]
                                             want_y = pins_y[pjs]
                                             want_x = pins_x[pjs]
                                         pjs = pjs + 1
@@ -5324,8 +5601,10 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                         changed = true
                     elif b == '\x0b' or b == '\x10'      // Ctrl-K / Ctrl-P — visually UP
                         // Bottom-up list: rank 0 (best) is the bottom row, so
-                        // moving up on screen means a HIGHER rank index.
-                        let pcnt = list.len(fuzzy.rank(picker_query, picker_cands, pmaxh))
+                        // moving up on screen means a HIGHER rank index.  The
+                        // bound is every match, not the windowful on screen —
+                        // the window follows the selection, not the reverse.
+                        let pcnt = fuzzy.match_count(picker_query, picker_cands)
                         if picker_sel + 1 < pcnt
                             picker_sel = picker_sel + 1
                         changed = true
@@ -5625,15 +5904,15 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                             var ppi = 0
                             while ppi < list.len(pins_p)
                                 if str.len(pins_p[ppi]) > 0
-                                    picker_cands = list.push(picker_cands, pins_p[ppi])
+                                    picker_cands = list.push(picker_cands, rel_of(pins_p[ppi]))
                                     picker_marks = list.push(picker_marks, str.from_int(ppi + 1) + " ")
-                                    picker_meta = list.push(picker_meta, pins_p[ppi])
+                                    picker_meta = list.push(picker_meta, rel_of(pins_p[ppi]))
                                 ppi = ppi + 1
                         elif excmd.is_pinjump(cmd_buf)       // :pinjump N — jump to slot N
                             let jsl = excmd.pin_slot_arg(cmd_buf)
                             if jsl >= 1 and jsl <= list.len(pins_p) and str.len(pins_p[jsl - 1]) > 0
-                                if pins_p[jsl - 1] != curpath
-                                    want_path = pins_p[jsl - 1]
+                                if pins_p[jsl - 1] != abs_of(curpath)
+                                    want_path = rel_of(pins_p[jsl - 1])
                                     want_y = pins_y[jsl - 1]
                                     want_x = pins_x[jsl - 1]
                                 lsp_info = "pin [" + str.from_int(jsl) + "] " + util.basename_of(pins_p[jsl - 1])
@@ -5641,15 +5920,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                 lsp_info = "pin [" + str.from_int(jsl) + "]: empty"
                         elif excmd.is_unpin(cmd_buf)         // :unpin [N] — remove a pin
                             let usl = excmd.pin_slot_arg(cmd_buf)
-                            var utgt = 0 - 1
-                            if usl >= 1
-                                utgt = usl - 1
-                            else
-                                var usi = 0
-                                while usi < list.len(pins_p)
-                                    if pins_p[usi] == curpath
-                                        utgt = usi
-                                    usi = usi + 1
+                            let utgt = if usl >= 1 then usl - 1 else pins_slot_of(pins_p, abs_of(curpath))
                             if utgt >= 0 and utgt < list.len(pins_p) and str.len(pins_p[utgt]) > 0
                                 pins_p = util.set_str_at(pins_p, utgt, "")
                                 pins_save(pins_root, pins_p, pins_y, pins_x)
@@ -5658,35 +5929,16 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                                 lsp_info = "unpin: no pin"
                         elif excmd.is_pin(cmd_buf)           // :pin [N] — pin the current file
                             let psl = excmd.pin_slot_arg(cmd_buf)
-                            var phave = 0 - 1
-                            var phi = 0
-                            while phi < list.len(pins_p)
-                                if pins_p[phi] == curpath
-                                    phave = phi
-                                phi = phi + 1
+                            let pabs = abs_of(curpath)
+                            let phave = pins_slot_of(pins_p, pabs)
                             if psl == 0 and phave >= 0
                                 lsp_info = "already pinned [" + str.from_int(phave + 1) + "]"
                             else
-                                var pslot = 0 - 1
-                                if psl >= 1
-                                    pslot = psl - 1
-                                    if phave >= 0 and phave != pslot
-                                        pins_p = util.set_str_at(pins_p, phave, "")   // a path pins once
-                                else
-                                    var pfi2 = 0
-                                    while pfi2 < list.len(pins_p) and pslot < 0
-                                        if str.len(pins_p[pfi2]) == 0
-                                            pslot = pfi2
-                                        pfi2 = pfi2 + 1
-                                    if pslot < 0
-                                        pslot = list.len(pins_p)
-                                while list.len(pins_p) <= pslot
-                                    pins_p = list.push(pins_p, "")
-                                    pins_y = list.push(pins_y, 0)
-                                    pins_x = list.push(pins_x, 0)
-                                pins_p = util.set_str_at(pins_p, pslot, curpath)
-                                pins_y = util.set_int_at(pins_y, pslot, ed.cy)
-                                pins_x = util.set_int_at(pins_x, pslot, ed.cx)
+                                let pslot = if psl >= 1 then psl - 1 else pins_free_slot(pins_p)
+                                let pnew = pins_put(Pins { p: pins_p, y: pins_y, x: pins_x }, pslot, pabs, ed.cy, ed.cx)
+                                pins_p = pnew.p
+                                pins_y = pnew.y
+                                pins_x = pnew.x
                                 pins_save(pins_root, pins_p, pins_y, pins_x)
                                 lsp_info = "pinned [" + str.from_int(pslot + 1) + "] " + util.basename_of(curpath)
                         elif excmd.is_bufcmd(cmd_buf)
@@ -6416,6 +6668,10 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 ts_spans_cache = ts.ts_spans(ts_grammar, ts_symbol, ts_queries, curtxt)
             // `:noh` renders with the highlight suppressed (search pattern kept).
             let rst = if hl_off then ist_blank_search(st) else st
+            // One frame, every layer: the buffer underneath, then whichever of
+            // the command line / buffer list / picker is up.  Nothing between
+            // frame_begin and frame_end may reach the terminal on its own.
+            frame_begin()
             paint_frame(ed, lay, awin, cols, rows, win_cy, win_cx, win_top, win_left, win_buf, win_ww, win_hw, cur_buf, bufs_text, bufs_path, curpath, top, left, rst, cs, opts, diag_li, diag_msgs, lsp_info, modified, ts_spans_cache, yflash)
             if cmd_mode
                 cup(rows, 1)
@@ -6432,22 +6688,28 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
             if buflist
                 draw_buflist(bufs_path, cur_buf, rows)
             if picker_active
-                let dtop = fuzzy.rank(picker_query, picker_cands, picker_maxh(rows))
-                if picker_sel >= list.len(dtop)
-                    picker_sel = if list.len(dtop) > 0 then list.len(dtop) - 1 else 0
+                let dmaxh = picker_maxh(rows)
+                let dmatch = fuzzy.match_count(picker_query, picker_cands)
+                if picker_sel >= dmatch
+                    picker_sel = if dmatch > 0 then dmatch - 1 else 0
+                let doff = picker_off(picker_sel, dmaxh)
+                let dtop = picker_window(fuzzy.rank(picker_query, picker_cands, doff + dmaxh), doff, dmaxh)
                 let dtitle = if picker_src == 0 then "Buffers" elif picker_src == 1 then "Find Files" elif picker_src == 2 then "Pins" else "Live Grep"
                 // :grep counter = rows received from rg (honest when the stored
                 // list is capped); other sources count fuzzy matches.
-                let dnm = if picker_src == 3 then grep_total else fuzzy.match_count(picker_query, picker_cands)
+                let dnm = if picker_src == 3 then grep_total else dmatch
                 let dtot = if picker_src == 3 then grep_total else list.len(picker_cands)
-                draw_picker(picker_cands, picker_marks, dtop, picker_sel, picker_query, dnm, dtot, dtitle, rows, cols)
+                draw_picker(picker_cands, picker_marks, dtop, picker_sel - doff, picker_query, dnm, dtot, dtitle, rows, cols)
+            frame_end()
         if novo_pty_winsize_changed_h() == 1
             rows = term_rows()
             cols = term_cols()
             top = scroll_to(top, ed.cy, rows - 1)
             left = hscroll_for(left, ed, opts, cols)
+            frame_begin()
             clear_screen()   // dimensions changed — clear stale content once
             paint_frame(ed, lay, awin, cols, rows, win_cy, win_cx, win_top, win_left, win_buf, win_ww, win_hw, cur_buf, bufs_text, bufs_path, curpath, top, left, st, cs, opts, diag_li, diag_msgs, lsp_info, modified, ts_spans_cache, yflash)
+            frame_end()
     if lsp_pid >= 0                       // tear the language server down
         let _ = proc.kill(lsp_pid, 15)
         proc.close(lsp_pid)
@@ -6559,7 +6821,34 @@ fn clip_paste() -> Str [io, time]
             proc.close(pid)
             r
 
-// ── `:files` picker source (picker-and-pins) ────────────────────────────────
+// ── `:files` picker source ──────────────────────────────────────────────────
+
+// Read a child's stdout until `cap` lines have arrived, then kill and reap it.
+// The cap has to bind DURING the read, not after: a producer can emit orders of
+// magnitude more than the picker will ever hold (`rg --files` under a home
+// directory), and reading it all first means the editor is unresponsive for as
+// long as the producer runs, however small the cap is.  Poll-gated, so a child
+// that stops producing without closing stdout cannot wedge the read either.
+fn proc_take_lines(pid: Int, cap: Int) -> [Str] [io, time]
+    let out = proc.stdout_fd(pid)
+    let sb = str.builder_new()
+    var nlines = 0
+    var more = true
+    while more and nlines < cap
+        if proc.poll(out, 800) == 1
+            let b = proc.read_byte(out)
+            if b < 0
+                more = false
+            else
+                str.builder_append_char(sb, b)
+                if b == '\n'
+                    nlines = nlines + 1
+        else
+            more = false                  // 800ms idle → EOF or stalled
+    let text = str.builder_to_str(sb)
+    str.builder_drop(sb)
+    grep_child_kill(pid)                  // kill+reap; an already-exited child just reaps
+    str.split_lines(text)
 
 // Drain a child process's stdout to EOF (poll-gated so a stuck child can't
 // freeze the editor), split into lines.  Reaps the child.
@@ -6611,13 +6900,15 @@ fn grep_child_kill(pid: Int) [io]
 @intent("""Produce the `:files` candidate list: `rg --files` (respects
 .gitignore) when ripgrep is available, else the internal walk.  Relative paths
 either way (both are cwd-relative, matching `:e <rel>`).  Empty lines dropped;
-capped at `cap` entries.""")
+capped at `cap` entries — and the cap bounds the READ as well as the result, so
+opening the picker somewhere enormous costs `cap` lines rather than a full
+traversal.  The walk fallback is bounded the same way, by its own `cap`.""")
 fn files_candidates(cap: Int) -> [Str] [io, time]
     match proc.spawn(["rg", "--files"])
         None =>
             walk_files(".", "", 0, [], cap)
         Some(pid) =>
-            let raw = proc_drain_lines(pid)
+            let raw = proc_take_lines(pid, cap)
             var out: [Str] = []
             var i = 0
             while i < list.len(raw) and list.len(out) < cap

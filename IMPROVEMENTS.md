@@ -19,8 +19,9 @@ Legend: ✅ done · ☐ open.
     `fn ri_init_treesitter`, `fn ri_init_windows`, `fn ri_load_extra_files`.
     Each is already a self-contained comment-delimited block.
   - **Picker key handling (~5300–5700)** → `fn handle_picker_key(...)`. This is
-    the single largest inline block; it is dense with `pins_p` bookkeeping loops
-    (`5304`, `5621`, `5644`, `5658`, `5672`, `5678`) that belong in named helpers.
+    the single largest inline block. Its `pins_p` bookkeeping loops are now
+    named helpers (`pins_load`, `pins_slot_of`, `pins_free_slot`, `pins_put`),
+    shared with the `--batch` driver; the key dispatch itself is still inline.
   - **Ex-line + search-line editing (~5480 "Ex line", ~5520 "Search line")** →
     `fn edit_ex_line(...)` / `fn edit_search_line(...)` (Up/Down history,
     Left/Right/Home/End cursor motion — near-identical shapes worth sharing).

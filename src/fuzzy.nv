@@ -11,8 +11,6 @@
 //       query lists in producer order)
 //   >0  otherwise; higher = better.
 
-use util
-
 // ASCII case-fold.
 fn lower_b(b: Int) -> Int
     if b >= 'A' and b <= 'Z' then b + 32 else b
@@ -62,35 +60,56 @@ fn score(query: Str, cand: Str) -> Int
         ci = ci + 1
     if qi < qn then 0 - 1 else s
 
+// Merge the adjacent runs [lo,mid) and [mid,hi) of `idx` onto `out`, ordered by
+// descending `scores[..]`.  A tie takes from the LEFT run, which is what keeps
+// the whole sort stable — equal scores come out in producer order.
+fn merge_run(out: [Int], idx: [Int], scores: [Int], lo: Int, mid: Int, hi: Int) -> [Int]
+    var o = out
+    var i = lo
+    var j = mid
+    while i < mid or j < hi
+        if i < mid and (j >= hi or scores[idx[i]] >= scores[idx[j]])
+            o = list.push(o, idx[i])
+            i = i + 1
+        else
+            o = list.push(o, idx[j])
+            j = j + 1
+    o
+
 @intent("""Rank `cands` for `query`: indices of the best-scoring candidates,
 best first, at most `limit` of them; non-matches (score -1) are excluded.  Ties
-keep producer order (stable).  O(n * limit) partial selection — the picker only
-shows a screenful, so `limit` is small.""")
+keep producer order (stable).  Bottom-up merge sort: O(n log n) whatever `limit`
+is, so a caller may ask for a deep prefix — the picker's window can sit far down
+the list — without the cost growing with how far down it sits.""")
 fn rank(query: Str, cands: [Str], limit: Int) -> [Int]
     let n = list.len(cands)
     var scores: [Int] = []
+    var idx: [Int] = []
     var i = 0
     while i < n
-        scores = list.push(scores, score(query, cands[i]))
+        let s = score(query, cands[i])
+        scores = list.push(scores, s)
+        if s >= 0
+            idx = list.push(idx, i)          // non-matches never enter the sort
         i = i + 1
+    let m = list.len(idx)
+    var cur = idx
+    var width = 1
+    while width < m
+        var merged: [Int] = []
+        var lo = 0
+        while lo < m
+            let mid = if lo + width < m then lo + width else m
+            let hi = if lo + width + width < m then lo + width + width else m
+            merged = merge_run(merged, cur, scores, lo, mid, hi)
+            lo = lo + width + width
+        cur = merged
+        width = width + width
     var out: [Int] = []
-    var round = 0
-    var more = true
-    while more and round < limit
-        var best = 0 - 1
-        var bs = 0 - 1
-        var j = 0
-        while j < n
-            if scores[j] > bs
-                bs = scores[j]
-                best = j
-            j = j + 1
-        if best >= 0 and bs >= 0
-            out = list.push(out, best)
-            scores = util.set_int_at(scores, best, 0 - 2)   // consumed
-            round = round + 1
-        else
-            more = false
+    var k = 0
+    while k < m and k < limit
+        out = list.push(out, cur[k])
+        k = k + 1
     out
 
 // Total number of candidates that match `query` at all (for the picker's
