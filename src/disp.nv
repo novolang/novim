@@ -158,7 +158,7 @@ fn nv_effect_lead_ok(s: Str, i: Int) -> Bool
 // the whole bracketed run in the bracket colour, then each label in its own,
 // so a later-wins overlay paints brackets and separators teal with the labels
 // standing out inside them.
-fn effect_spans(s: Str) -> [Int]
+fn effect_spans(s: Str, d: Int) -> [Int]
     var out: [Int] = []
     let n = str.len(s)
     var i = 0
@@ -179,7 +179,7 @@ fn effect_spans(s: Str) -> [Int]
                     ok = false
                     done = true
                 else
-                    let c = colorscheme.effect_color(str.slice(s, ws, j))
+                    let c = colorscheme.effect_color(str.slice(s, ws, j), d)
                     if c < 0
                         ok = false
                         done = true
@@ -197,7 +197,7 @@ fn effect_spans(s: Str) -> [Int]
                             ok = false
                             done = true
             if ok and any and j < n and (str.byte_at(s, j) ?? 0) == ']'
-                out = list.append(out, [i, j + 1, colorscheme.effect_bracket_color()])
+                out = list.append(out, [i, j + 1, colorscheme.effect_bracket_color(d)])
                 out = list.append(out, labels)
                 i = j + 1
             else
@@ -210,8 +210,8 @@ fn effect_spans(s: Str) -> [Int]
 // IS the byte index (the native tokenizer's, over a tab-expanded line).
 // Rebuilt rather than mutated, and later spans win — the same shape
 // ts_line_syncols resolves its overlapping tree-sitter spans with.
-fn apply_effect_spans(cols: [Int], s: Str) -> [Int]
-    let sp = effect_spans(s)
+fn apply_effect_spans(cols: [Int], s: Str, d: Int) -> [Int]
+    let sp = effect_spans(s, d)
     if list.len(sp) == 0
         return cols
     var out: [Int] = []
@@ -228,9 +228,11 @@ fn apply_effect_spans(cols: [Int], s: Str) -> [Int]
         i = i + 1
     out
 
-// Per-column 256-colour fg index for a (tab-expanded) Novo line.  0 = default.
+// Per-column fg colour slot for a (tab-expanded) Novo line.  0 = default.
+// A slot is whatever colorscheme.fg_params encodes — a packed truecolor
+// triple or a 256-colour index — so the depth `d` picks the tier.
 // `kw`/`strc`/`cmt`/`num` are the keyword/string/comment/number colours.
-fn syntax_colors(s: Str, kw: Int, strc: Int, cmt: Int, num: Int) -> [Int]
+fn syntax_colors(s: Str, kw: Int, strc: Int, cmt: Int, num: Int, d: Int) -> [Int]
     var col: [Int] = []
     let n = str.len(s)
     var i = 0
@@ -265,11 +267,11 @@ fn syntax_colors(s: Str, kw: Int, strc: Int, cmt: Int, num: Int) -> [Int]
         else
             col = list.append(col, [0])
             i = i + 1
-    apply_effect_spans(col, s)
+    apply_effect_spans(col, s, d)
 
 // ── Tree-sitter capture → colour ─────────────────────────────────────────────
 
-// 256-colour fg for a tree-sitter capture kind (see ts.ts_capture_kind).  The
+// The fg colour slot for a tree-sitter capture kind (see ts.ts_capture_kind).  The
 // keyword/string/comment/number kinds honour the [colorscheme] (so themes drive
 // them, like the native tokenizer); type/function/constant/module use sensible
 // defaults.  -1 = no colour (variables stay default fg).
@@ -293,7 +295,7 @@ fn ts_color_for_kind(kind: Int, cs: colorscheme.Colorscheme) -> Int
     else
         0 - 1
 
-// Per-(expanded-)column 256-colour fg for one line, from tree-sitter capture
+// Per-(expanded-)column fg colour slot for one line, from tree-sitter capture
 // `spans` (flat start/end/kind triples over the whole buffer).  `line_start` is
 // the line's byte offset; tabs expand to `tabstop` columns so the colours line
 // up with emit_line_styled's expanded view.  Later spans override earlier on
@@ -312,7 +314,7 @@ fn ts_line_syncols(spans: [Int], line_start: Int, raw: Str, tabstop: Int, cs: co
     // Rule 4 says an effect carries its colour everywhere; a tree-sitter
     // grammar has no effect capture to carry it with, so the lexical scan
     // supplies it on this path too.
-    ls = list.append(ls, effect_spans(raw))
+    ls = list.append(ls, effect_spans(raw, cs.depth))
     var cols: [Int] = []
     var b = 0
     var vc = 0

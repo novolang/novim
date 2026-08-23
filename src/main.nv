@@ -4528,7 +4528,7 @@ fn emit_line_styled(expanded: Str, left: Int, width: Int, vlo: Int, vhi: Int, sr
             elif want == 2
                 sgr(scol)
             elif want >= 1000
-                sgr("38;5;" + str.from_int(want - 1000))
+                sgr(colorscheme.fg_params(want - 1000))
             cur = want
         emit_byte(str.byte_at(expanded, c) ?? ' ')
         c = c + 1
@@ -4682,7 +4682,7 @@ fn draw_window(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mod
                     vlo = disp.vis_col(raw, fblo, opts.tabstop)
                     vhi = disp.vis_col(raw, fbhi, opts.tabstop)
             let srng = if dohl then search_vis_ranges(satoms, raw, opts.tabstop) else []
-            let syncols = if dots then disp.ts_line_syncols(ts_spans, line_byte, raw, opts.tabstop, cs) elif dosyn then disp.syntax_colors(expanded, synkw, synstr, syncmt, synnum) else []
+            let syncols = if dots then disp.ts_line_syncols(ts_spans, line_byte, raw, opts.tabstop, cs) elif dosyn then disp.syntax_colors(expanded, synkw, synstr, syncmt, synnum, cs.depth) else []
             let segs = if opts.wrap and vlen > width then (vlen + width - 1) / width else 1
             var seg = 0
             while seg < segs and r < body
@@ -4715,7 +4715,7 @@ fn draw_window(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mod
                         let gcol = if dsev == 1 then gerr elif dsev >= 2 then gwarn elif iscur then gcur else 0 - 1
                         var gpar = if iscur then "1" else ""
                         if gcol >= 0
-                            gpar = gpar + (if str.len(gpar) > 0 then ";" else "") + "38;5;" + str.from_int(gcol)
+                            gpar = gpar + (if str.len(gpar) > 0 then ";" else "") + colorscheme.fg_params(gcol)
                         if str.len(gpar) > 0
                             sgr(gpar)
                             emit(numtxt)
@@ -4740,7 +4740,7 @@ fn draw_window(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mod
         else
             cup(ry + r + 1, rx + 1)
             if cs.tilde_fg >= 0
-                sgr("38;5;" + str.from_int(cs.tilde_fg))
+                sgr(colorscheme.fg_params(cs.tilde_fg))
                 emit("~")
                 sgr("0")
             else
@@ -4786,7 +4786,7 @@ fn draw_window(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mod
         let cut = util.index_of_str(statusln, modestr)
         if cut >= 0
             emit(str.slice(statusln, 0, cut))
-            sgr("38;5;" + str.from_int(colorscheme.pal_amber()))
+            sgr(colorscheme.fg_params(colorscheme.pal_amber(cs.depth)))
             emit(modestr)
             sgr(barsgr)
             emit(str.slice(statusln, cut + str.len(modestr), str.len(statusln)))
@@ -5137,7 +5137,10 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
     var map_replay = ""                           // RHS / flushed bytes to re-feed through the driver
     // var: `:colorscheme <name>` switches it live — and still does under
     // --no-color, because typing the command IS asking for those colours.
-    var cs = if want_color then colorscheme.load_colorscheme(cfg_path) else colorscheme.colorscheme_plain()
+    // Colour depth, detected once here and carried in `cs.depth` from then
+    // on — COLORTERM/TERM are read at startup and never again.
+    let cdepth = colorscheme.detect_depth()
+    var cs = if want_color then colorscheme.load_colorscheme(cfg_path, cdepth) else colorscheme.colorscheme_plain(cdepth)
     let opts_cfg = load_options(cfg_path)
     var opts = if want_color then opts_cfg else options_no_syntax(opts_cfg)
     var rows = term_rows()
@@ -6140,7 +6143,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                         elif excmd.is_only(cmd_buf)            // :only — keep just the active window
                             pending_wcmd = 5
                         elif excmd.is_colorscheme(cmd_buf)     // :colorscheme <name> — live theme switch
-                            cs = colorscheme.colorscheme_named(excmd.colorscheme_arg(cmd_buf))
+                            cs = colorscheme.colorscheme_named(excmd.colorscheme_arg(cmd_buf), cdepth)
                             lsp_info = "colorscheme " + excmd.colorscheme_arg(cmd_buf)
                         else
                             let r = excmd.exec_ex(cmd_buf)

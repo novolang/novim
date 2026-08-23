@@ -3,9 +3,12 @@
 //
 // `[colorscheme]` sets 256-colour SGR indices for chrome + syntax token
 // classes; -1 = terminal/built-in default.  A `name = "<theme>"` selects a
-// built-in base that individual keys layer over.  Colorscheme is built only
-// inside this module (the loaders), so callers reference the type opaquely
-// (`colorscheme.Colorscheme`) and read its fields.
+// built-in base that individual keys layer over.  The built-in novo themes
+// resolve to TRUECOLOR on a terminal that says it can take it (see "Colour
+// depth"); an explicit index in the config always stays an index.
+// Colorscheme is built only inside this module (the loaders), so callers
+// reference the type opaquely (`colorscheme.Colorscheme`) and read its
+// fields.
 //
 // Every colour novim paints resolves here.  The renderer holds no literal
 // SGR index of its own: a highlight slot (selection, `hlsearch` match, yank
@@ -17,11 +20,25 @@ use util
 
 // ── The novo-lang palette ───────────────────────────────────────────────
 //
-// docs/design/palette.md is canon; these are its dark tokens folded onto
-// the xterm-256 cube, because novim emits 256-colour SGR and nothing else.
-// The fold is nearest-neighbour except for `panel`, which is pushed one
-// step darker than its nearest grey so it stays BELOW `ground` — the
-// ordering is what the eye reads, not the exact grey.
+// docs/design/palette.md is canon and its HEX VALUES are the contract, so
+// the palette is emitted as truecolor wherever the host will take it.  A
+// 256-cube index fails that contract twice over: it is an approximation
+// (index 43 is #00d7af, not the canonical #2dd4bf, so novim did not match
+// the website), and — the defect that forced this — an index is resolved
+// through the HOSTING terminal's palette, so a themed terminal renders the
+// teal chrome in whatever it happens to have put at slot 43.  A truecolor
+// triple IS the colour rather than a reference to one.
+//
+// A colour slot stays a single Int carrying three encodings:
+//
+//   -1             say nothing about this half
+//   0 .. 255       a 256-colour palette index   → `38;5;N` / `48;5;N`
+//   >= tc_base()   a packed 24-bit RGB triple   → `38;2;R;G;B` / `48;2;…`
+//
+// which is what lets `[colorscheme] keyword = 167` go on meaning an index —
+// and lets the third-party presets below stay the 256-colour
+// approximations their upstreams publish — while the novo themes mean
+// colours, with one emit path (hl_sgr) serving both.
 //
 // The two rules that outrank the hues, and that this file has to keep:
 //
@@ -30,38 +47,167 @@ use util
 //      taking keystrokes.  It is in NO token-class slot below.
 //   2. teal is the language's voice, which is why keywords and module
 //      paths carry it and the status line sits on it.
-fn pal_ground() -> Int
-    233        // #0b1416
-fn pal_surface() -> Int
-    234        // #101d20
-fn pal_edge() -> Int
-    236        // #1d3237
-fn pal_ink() -> Int
-    255        // #e8f4f2
-fn pal_dim() -> Int
-    116        // #7da8a3
-fn pal_teal() -> Int
-    43         // #2dd4bf
-fn pal_teal_deep() -> Int
-    37         // #14b8a6
-fn pal_amber() -> Int
-    214        // #fbbf24 — THE AGENT (rule 1)
-fn pal_ok() -> Int
-    78         // #4ade80
-fn pal_err() -> Int
-    203        // #f87171
-fn pal_info() -> Int
-    75         // #60a5fa
-fn pal_spec() -> Int
-    141        // #c084fc
+fn tc_base() -> Int
+    16777216        // 2^24 — the first value above every 256-colour index
 
-// The palette's own 8/16-colour fallback (palette.md "Terminal mapping"):
-// teal→cyan, amber→yellow, err→red, info→blue, spec→magenta, ok→green,
-// dim→bright-black.  Indices 0-15 of the 256-colour space ARE the ANSI 16,
-// so `novo-16` is still emitted as `38;5;N` and needs no second code path.
-// Selected by name; novim does not sniff TERM, because every terminal it
-// is developed against reports 256 colours and guessing wrong is worse
-// than the one-line config that says so.
+// Pack a canonical hex triple into a colour slot.
+fn rgb(r: Int, g: Int, b: Int) -> Int
+    tc_base() + r * 65536 + g * 256 + b
+
+// ── Colour depth ────────────────────────────────────────────────────────
+//
+// Detected ONCE, at startup, and carried in Colorscheme.depth — the render
+// path never re-reads the environment.  Detection is the FLOOR, not the
+// ceiling: `:colorscheme novo-16`, `[colorscheme] name = "novo-16"`,
+// `--no-color` and any per-key index override all outrank it, because
+// asking for a look has to give you that look.
+fn depth_16() -> Int
+    1
+fn depth_256() -> Int
+    2
+fn depth_true() -> Int
+    3
+
+// The rule, kept pure so it is testable without a terminal.  COLORTERM is
+// the only positive statement a terminal makes about 24-bit support, so it
+// is believed first; TERM's `256color` is the long-standing mid-tier claim;
+// anything else gets the ANSI 16, which every terminal has had for decades.
+//
+// This replaces novim's previous position ("does not sniff TERM, because
+// every terminal it is developed against reports 256 colours"): the reason
+// that held was that guessing colour DEPTH wrong is worse than a config
+// line, and COLORTERM is not a guess — it is the terminal answering.
+fn depth_of_env(colorterm: Str, term: Str) -> Int
+    let ct = str.lower(str.trim(colorterm))
+    if ct == "truecolor" or ct == "24bit"
+        depth_true()
+    elif str.contains(str.lower(term), "256color")
+        depth_256()
+    else
+        depth_16()
+
+fn detect_depth() -> Int [io]
+    depth_of_env(process.env("COLORTERM") ?? "", process.env("TERM") ?? "")
+
+// The three tiers of one palette, in one place.  `d` picks the row:
+// the canon (palette.md "Dark") at truecolor, its nearest-neighbour fold
+// onto the xterm-256 cube below that, and palette.md's own "Terminal
+// mapping" (teal→cyan, amber→yellow, err→red, info→blue, spec→magenta,
+// ok→green, dim→bright-black) at the bottom.  The 16-colour row lives
+// here rather than only inside the novo-16 theme because the effect
+// labels (rule 4) resolve a palette token at RENDER time and would
+// otherwise stay 256-colour on a 16-colour terminal.
+//
+// The 256 fold is nearest-neighbour, and approximate by construction —
+// which is exactly what the truecolor row exists to stop being.
+fn pal_ground(d: Int) -> Int
+    if d >= depth_true()
+        rgb(0x0b, 0x14, 0x16)
+    elif d >= depth_256()
+        233
+    else
+        0        // black
+fn pal_surface(d: Int) -> Int
+    if d >= depth_true()
+        rgb(0x10, 0x1d, 0x20)
+    elif d >= depth_256()
+        234
+    else
+        0        // black
+fn pal_edge(d: Int) -> Int
+    if d >= depth_true()
+        rgb(0x1d, 0x32, 0x37)
+    elif d >= depth_256()
+        236
+    else
+        8        // bright-black
+fn pal_ink(d: Int) -> Int
+    if d >= depth_true()
+        rgb(0xe8, 0xf4, 0xf2)
+    elif d >= depth_256()
+        255
+    else
+        15        // bright-white
+fn pal_dim(d: Int) -> Int
+    if d >= depth_true()
+        rgb(0x7d, 0xa8, 0xa3)
+    elif d >= depth_256()
+        116
+    else
+        8        // bright-black
+fn pal_teal(d: Int) -> Int
+    if d >= depth_true()
+        rgb(0x2d, 0xd4, 0xbf)
+    elif d >= depth_256()
+        43
+    else
+        6        // cyan
+fn pal_teal_deep(d: Int) -> Int
+    if d >= depth_true()
+        rgb(0x14, 0xb8, 0xa6)
+    elif d >= depth_256()
+        37
+    else
+        6        // cyan
+fn pal_amber(d: Int) -> Int
+    if d >= depth_true()
+        rgb(0xfb, 0xbf, 0x24)    // THE AGENT (rule 1)
+    elif d >= depth_256()
+        214
+    else
+        3        // yellow
+fn pal_ok(d: Int) -> Int
+    if d >= depth_true()
+        rgb(0x4a, 0xde, 0x80)
+    elif d >= depth_256()
+        78
+    else
+        2        // green
+fn pal_err(d: Int) -> Int
+    if d >= depth_true()
+        rgb(0xf8, 0x71, 0x71)
+    elif d >= depth_256()
+        203
+    else
+        1        // red
+fn pal_info(d: Int) -> Int
+    if d >= depth_true()
+        rgb(0x60, 0xa5, 0xfa)
+    elif d >= depth_256()
+        75
+    else
+        4        // blue
+fn pal_spec(d: Int) -> Int
+    if d >= depth_true()
+        rgb(0xc0, 0x84, 0xfc)
+    elif d >= depth_256()
+        141
+    else
+        5        // magenta
+
+// The light table (palette.md "Light"), same treatment: canon on a
+// truecolor terminal, its 256-cube fold below that.  Light has no
+// `teal-deep`, so the function class shares plain teal.
+fn pall_ground(d: Int) -> Int
+    if d >= depth_true() then rgb(0xee, 0xf4, 0xf3) else 255
+fn pall_surface(d: Int) -> Int
+    if d >= depth_true() then rgb(0xff, 0xff, 0xff) else 231
+fn pall_edge(d: Int) -> Int
+    if d >= depth_true() then rgb(0xcf, 0xe0, 0xdd) else 252
+fn pall_ink(d: Int) -> Int
+    if d >= depth_true() then rgb(0x12, 0x31, 0x2d) else 235
+fn pall_dim(d: Int) -> Int
+    if d >= depth_true() then rgb(0x4a, 0x7a, 0x72) else 66
+fn pall_teal(d: Int) -> Int
+    if d >= depth_true() then rgb(0x0d, 0x94, 0x88) else 30
+fn pall_ok(d: Int) -> Int
+    if d >= depth_true() then rgb(0x15, 0x80, 0x3d) else 29
+fn pall_err(d: Int) -> Int
+    if d >= depth_true() then rgb(0xdc, 0x26, 0x26) else 160
+fn pall_info(d: Int) -> Int
+    if d >= depth_true() then rgb(0x25, 0x63, 0xeb) else 27
+fn pall_spec(d: Int) -> Int
+    if d >= depth_true() then rgb(0x93, 0x33, 0xea) else 99
 
 // ── Effect-label colours (palette.md rule 4) ────────────────────────────
 //
@@ -79,30 +225,30 @@ fn pal_spec() -> Int
 // `[expect_invariant]`) fall back to the bracket colour rather than to
 // dim: dim is an assignment the table makes on purpose — "[rand] /
 // [alloc] / [mutate] are the boring ones" — not a default.
-fn effect_bracket_color() -> Int
-    pal_teal()
+fn effect_bracket_color(d: Int) -> Int
+    pal_teal(d)
 
-fn effect_color(w: Str) -> Int
+fn effect_color(w: Str, d: Int) -> Int
     if w == "io"
-        pal_teal()
+        pal_teal(d)
     elif w == "net"
-        pal_info()
+        pal_info(d)
     elif w == "ai"
-        pal_amber()
+        pal_amber(d)
     elif w == "hw"
-        pal_err()
+        pal_err(d)
     elif w == "time"
-        pal_spec()
+        pal_spec(d)
     elif w == "mcp"
-        pal_amber()
+        pal_amber(d)
     elif w == "async"
-        pal_teal_deep()
+        pal_teal_deep(d)
     elif w == "gpu"
-        pal_spec()
+        pal_spec(d)
     elif w == "rand" or w == "alloc" or w == "mutate"
-        pal_dim()
+        pal_dim(d)
     elif w == "ipc" or w == "expect_invariant"
-        effect_bracket_color()
+        effect_bracket_color(d)
     else
         0 - 1      // not an effect name
 
@@ -151,13 +297,18 @@ struct Colorscheme
     fn_fg:     Int      // syntax: function (tree-sitter)
     const_fg:  Int      // syntax: constant (tree-sitter)
     mod_fg:    Int      // syntax: module (tree-sitter)
+    // The colour depth this scheme was resolved at.  Carried so the two
+    // render-time palette lookups that are NOT theme fields — the amber
+    // mode indicator (rule 1) and disp.nv's effect labels (rule 4) —
+    // resolve at the same depth as everything around them.
+    depth:     Int
     hl:        Highlights   // chrome: selection / search / flash / diagnostics
 
 // Say nothing about any colour: the terminal's own palette, reverse video
 // where a slot must still be visible.  Reachable as `--no-color`,
 // `NO_COLOR`, and `:colorscheme none`.
-fn colorscheme_plain() -> Colorscheme
-    Colorscheme { status_fg: 0 - 1, status_bg: 0 - 1, tilde_fg: 0 - 1, kw_fg: 0 - 1, str_fg: 0 - 1, cmt_fg: 0 - 1, num_fg: 0 - 1, type_fg: 0 - 1, fn_fg: 0 - 1, const_fg: 0 - 1, mod_fg: 0 - 1, hl: highlights_plain() }
+fn colorscheme_plain(d: Int) -> Colorscheme
+    Colorscheme { status_fg: 0 - 1, status_bg: 0 - 1, tilde_fg: 0 - 1, kw_fg: 0 - 1, str_fg: 0 - 1, cmt_fg: 0 - 1, num_fg: 0 - 1, type_fg: 0 - 1, fn_fg: 0 - 1, const_fg: 0 - 1, mod_fg: 0 - 1, depth: d, hl: highlights_plain() }
 
 // The novo-lang palette — novim's default.
 //
@@ -180,24 +331,27 @@ fn colorscheme_plain() -> Colorscheme
 // amber appears in NONE of them.  Rule 1 spends it on the cursor and on
 // the mode indicator while the buffer is taking keystrokes, and a
 // keyword class would drown both.
-fn colorscheme_novo() -> Colorscheme
+fn colorscheme_novo(d: Int) -> Colorscheme
+    if d <= depth_16()
+        return colorscheme_novo_16()
     Colorscheme {
-        status_fg: pal_teal(), status_bg: pal_surface(), tilde_fg: pal_edge(),
-        kw_fg: pal_teal(), str_fg: pal_ok(), cmt_fg: pal_dim(), num_fg: pal_spec(),
-        type_fg: pal_info(), fn_fg: pal_teal_deep(), const_fg: pal_spec(), mod_fg: pal_teal(),
+        status_fg: pal_teal(d), status_bg: pal_surface(d), tilde_fg: pal_edge(d),
+        kw_fg: pal_teal(d), str_fg: pal_ok(d), cmt_fg: pal_dim(d), num_fg: pal_spec(d),
+        type_fg: pal_info(d), fn_fg: pal_teal_deep(d), const_fg: pal_spec(d), mod_fg: pal_teal(d),
+        depth: d,
         hl: Highlights {
             // A selection must not out-shout the text it selects, so it is
             // an edge-coloured well with ink on it rather than a teal block.
-            sel_fg: pal_ink(), sel_bg: pal_edge(),
+            sel_fg: pal_ink(d), sel_bg: pal_edge(d),
             // Search was black-on-yellow and the yank flash black-on-amber;
             // both are rule-1 violations (nothing is acting).  A match is a
             // hint (info); a completed yank is a success (ok).
-            search_fg: pal_ground(), search_bg: pal_info(),
-            flash_fg: pal_ground(), flash_bg: pal_ok(),
+            search_fg: pal_ground(d), search_bg: pal_info(d),
+            flash_fg: pal_ground(d), flash_bg: pal_ok(d),
             // novim's gutter splits diagnostics two ways, so severity >= 2
             // is literally "warning, information and hint" — which is the
             // info token's own description.  Amber is not available for it.
-            err_fg: pal_err(), warn_fg: pal_info(), curline_fg: pal_ink()
+            err_fg: pal_err(d), warn_fg: pal_info(d), curline_fg: pal_ink(d)
         }
     }
 
@@ -206,67 +360,73 @@ fn colorscheme_novo() -> Colorscheme
 // greys do not exist, so chrome falls back to bright-black and to the
 // terminal's own ground.
 fn colorscheme_novo_16() -> Colorscheme
+    let d = depth_16()
     Colorscheme {
-        status_fg: 6, status_bg: 0 - 1, tilde_fg: 8,
-        kw_fg: 6, str_fg: 2, cmt_fg: 8, num_fg: 5,
-        type_fg: 4, fn_fg: 6, const_fg: 5, mod_fg: 6,
+        // status_bg and the selection stay unset rather than taking
+        // `surface` / `edge`: the greys do not survive the fold, so the
+        // terminal's own ground and reverse video read better than black.
+        status_fg: pal_teal(d), status_bg: 0 - 1, tilde_fg: pal_edge(d),
+        kw_fg: pal_teal(d), str_fg: pal_ok(d), cmt_fg: pal_dim(d), num_fg: pal_spec(d),
+        type_fg: pal_info(d), fn_fg: pal_teal_deep(d), const_fg: pal_spec(d), mod_fg: pal_teal(d),
+        depth: d,
         hl: Highlights {
             sel_fg: 0 - 1, sel_bg: 0 - 1,
-            search_fg: 0, search_bg: 4,
-            flash_fg: 0, flash_bg: 2,
-            err_fg: 1, warn_fg: 4, curline_fg: 15
+            search_fg: pal_ground(d), search_bg: pal_info(d),
+            flash_fg: pal_ground(d), flash_bg: pal_ok(d),
+            err_fg: pal_err(d), warn_fg: pal_info(d), curline_fg: pal_ink(d)
         }
     }
 
 // The light table, for a light terminal.  Same tokens, same rules.
-fn colorscheme_novo_light() -> Colorscheme
+fn colorscheme_novo_light(d: Int) -> Colorscheme
     Colorscheme {
-        status_fg: 30, status_bg: 231, tilde_fg: 252,
-        kw_fg: 30, str_fg: 29, cmt_fg: 66, num_fg: 99,
-        type_fg: 27, fn_fg: 30, const_fg: 99, mod_fg: 30,
+        status_fg: pall_teal(d), status_bg: pall_surface(d), tilde_fg: pall_edge(d),
+        kw_fg: pall_teal(d), str_fg: pall_ok(d), cmt_fg: pall_dim(d), num_fg: pall_spec(d),
+        type_fg: pall_info(d), fn_fg: pall_teal(d), const_fg: pall_spec(d), mod_fg: pall_teal(d),
+        depth: d,
         hl: Highlights {
-            sel_fg: 235, sel_bg: 252,
-            search_fg: 231, search_bg: 27,
-            flash_fg: 231, flash_bg: 29,
-            err_fg: 160, warn_fg: 27, curline_fg: 235
+            sel_fg: pall_ink(d), sel_bg: pall_edge(d),
+            search_fg: pall_surface(d), search_bg: pall_info(d),
+            flash_fg: pall_surface(d), flash_bg: pall_ok(d),
+            err_fg: pall_err(d), warn_fg: pall_info(d), curline_fg: pall_ink(d)
         }
     }
 
 // The default IS the palette: novim ships novo-lang's colours, and a
 // terminal-default look is now something you ask for by name.
-fn colorscheme_default() -> Colorscheme
-    colorscheme_novo()
+fn colorscheme_default(d: Int) -> Colorscheme
+    colorscheme_novo(d)
 
 // Built-in named colorschemes.  `[colorscheme] name = "gruvbox"` (or
 // `:colorscheme gruvbox`) selects one as the base; individual [colorscheme]
 // keys still override it.  Unknown names fall back to the terminal default.
-fn colorscheme_named(name: Str) -> Colorscheme
+fn colorscheme_named(name: Str, d: Int) -> Colorscheme
     if name == "novo" or name == "novo-dark"
-        colorscheme_novo()
+        colorscheme_novo(d)
     elif name == "novo-light"
-        colorscheme_novo_light()
+        colorscheme_novo_light(d)
     elif name == "novo-16" or name == "novo-ansi"
         colorscheme_novo_16()
     elif name == "none" or name == "plain" or name == "terminal"
-        colorscheme_plain()
+        colorscheme_plain(d)
     elif name == "gruvbox" or name == "gruvbox-dark"
         // gruvbox dark — 256-colour approximations of the retro-groove palette:
         // fg 223, bg1 237, gray 245, red 167, green 142, yellow 214, purple 175,
         // aqua 108.  keywords red, strings/functions green, types yellow,
         // numbers/constants purple, modules aqua.
-        Colorscheme { status_fg: 223, status_bg: 237, tilde_fg: 245, kw_fg: 167, str_fg: 142, cmt_fg: 245, num_fg: 175, type_fg: 214, fn_fg: 142, const_fg: 175, mod_fg: 108, hl: highlights_default() }
+        Colorscheme { status_fg: 223, status_bg: 237, tilde_fg: 245, kw_fg: 167, str_fg: 142, cmt_fg: 245, num_fg: 175, type_fg: 214, fn_fg: 142, const_fg: 175, mod_fg: 108, depth: d, hl: highlights_default() }
     elif name == "gruvbox-light"
         // gruvbox light — dark fg 237 on a light status bar (bg 223).
-        Colorscheme { status_fg: 237, status_bg: 223, tilde_fg: 245, kw_fg: 124, str_fg: 106, cmt_fg: 245, num_fg: 132, type_fg: 172, fn_fg: 106, const_fg: 132, mod_fg: 66, hl: highlights_default() }
+        Colorscheme { status_fg: 237, status_bg: 223, tilde_fg: 245, kw_fg: 124, str_fg: 106, cmt_fg: 245, num_fg: 132, type_fg: 172, fn_fg: 106, const_fg: 132, mod_fg: 66, depth: d, hl: highlights_default() }
     elif name == "solarized_dark" or name == "solarized-dark" or name == "solarized"
         // Solarized dark — ported from novoterm's `solarized_dark` theme, using
         // the canonical Solarized 256-colour approximations and the Solarized
         // syntax mapping: base01 240, green 64, cyan 37, yellow 136, blue 33,
         // magenta 125, orange 166, base2 254.
-        Colorscheme { status_fg: 254, status_bg: 240, tilde_fg: 240, kw_fg: 64, str_fg: 37, cmt_fg: 240, num_fg: 37, type_fg: 136, fn_fg: 33, const_fg: 125, mod_fg: 166, hl: highlights_default() }
+        Colorscheme { status_fg: 254, status_bg: 240, tilde_fg: 240, kw_fg: 64, str_fg: 37, cmt_fg: 240, num_fg: 37, type_fg: 136, fn_fg: 33, const_fg: 125, mod_fg: 166, depth: d, hl: highlights_default() }
     elif name == "solarized_light" or name == "solarized-light"
         // Solarized light — same hues, dark fg on a light (base2 254) status bar.
-        Colorscheme { status_fg: 241, status_bg: 254, tilde_fg: 245, kw_fg: 64, str_fg: 37, cmt_fg: 245, num_fg: 37, type_fg: 136, fn_fg: 33, const_fg: 125, mod_fg: 166, hl: highlights_default() }
+        Colorscheme { status_fg: 241, status_bg: 254, tilde_fg: 245, kw_fg: 64, str_fg: 37, cmt_fg: 245, num_fg: 37, type_fg: 136, fn_fg: 33, const_fg: 125, mod_fg: 166, depth: d, hl: highlights_default() }
     elif name == "solarized_osaka" or name == "solarized-osaka" or name == "osaka"
         // Solarized Osaka — the Solarized palette with solarized-osaka.nvim's
         // tokyonight-style token assignment (which is what distinguishes it from
@@ -275,13 +435,13 @@ fn colorscheme_named(name: Str) -> Colorscheme
         // (166), types cyan (37), modules magenta (125), comments base01 (240).
         // Osaka's signature dark-teal chrome → status bar on deep teal (23),
         // bright base2 (254) text.  256-colour approximation (novim is 256-col).
-        Colorscheme { status_fg: 254, status_bg: 23, tilde_fg: 240, kw_fg: 61, str_fg: 64, cmt_fg: 240, num_fg: 166, type_fg: 37, fn_fg: 33, const_fg: 166, mod_fg: 125, hl: highlights_default() }
+        Colorscheme { status_fg: 254, status_bg: 23, tilde_fg: 240, kw_fg: 61, str_fg: 64, cmt_fg: 240, num_fg: 166, type_fg: 37, fn_fg: 33, const_fg: 166, mod_fg: 125, depth: d, hl: highlights_default() }
     else
-        colorscheme_default()
+        colorscheme_default(d)
 
-fn load_colorscheme(cfg_path: Str) -> Colorscheme [io]
+fn load_colorscheme(cfg_path: Str, d: Int) -> Colorscheme [io]
     match fs.read(cfg_path)
-        None => colorscheme_default()
+        None => colorscheme_default(d)
         Some(content) =>
             var sfg = 0 - 1
             var sbg = 0 - 1
@@ -366,7 +526,7 @@ fn load_colorscheme(cfg_path: Str) -> Colorscheme [io]
                 i = i + 1
             // Layer explicit keys (>= 0) over the named-preset base (or the
             // terminal-default base when no `name` is set).
-            let base = colorscheme_named(name_str)
+            let base = colorscheme_named(name_str, d)
             Colorscheme {
                 status_fg: if sfg   >= 0 then sfg   else base.status_fg,
                 status_bg: if sbg   >= 0 then sbg   else base.status_bg,
@@ -379,6 +539,10 @@ fn load_colorscheme(cfg_path: Str) -> Colorscheme [io]
                 fn_fg:     if fnf   >= 0 then fnf   else base.fn_fg,
                 const_fg:  if constf >= 0 then constf else base.const_fg,
                 mod_fg:    if modf  >= 0 then modf  else base.mod_fg,
+                // The base's depth, not `d`: a `name = "novo-16"` base was
+                // resolved at depth 16 whatever the terminal claims, and the
+                // amber mode indicator has to agree with the bar under it.
+                depth:     base.depth,
                 hl: Highlights {
                     sel_fg:     if selfg >= 0 then selfg else base.hl.sel_fg,
                     sel_bg:     if selbg >= 0 then selbg else base.hl.sel_bg,
@@ -392,19 +556,37 @@ fn load_colorscheme(cfg_path: Str) -> Colorscheme [io]
                 }
             }
 
-// SGR parameter string for one highlight slot: the 256-colour fg and/or bg
-// the theme set, or reverse video (`7`) when it set neither.  Reverse video
-// is the honest fallback rather than a guess — it inverts whatever the
-// terminal's own colours are, so a slot with no theme opinion stays legible
-// on a palette novim knows nothing about.
+// SGR parameters selecting one colour, in whichever encoding the slot
+// carries: `38;2;R;G;B` for a packed triple, `38;5;N` for an index.  The
+// ONE place either spelling is written, so a slot's encoding never has to
+// be known by the code that paints with it.
+fn color_params(c: Int, is_bg: Bool) -> Str
+    let lead = if is_bg then "48" else "38"
+    if c >= tc_base()
+        let v = c - tc_base()
+        lead + ";2;" + str.from_int(v / 65536) + ";" + str.from_int((v / 256) % 256) + ";" + str.from_int(v % 256)
+    else
+        lead + ";5;" + str.from_int(c)
+
+fn fg_params(c: Int) -> Str
+    color_params(c, false)
+
+fn bg_params(c: Int) -> Str
+    color_params(c, true)
+
+// SGR parameter string for one highlight slot: the fg and/or bg the theme
+// set, or reverse video (`7`) when it set neither.  Reverse video is the
+// honest fallback rather than a guess — it inverts whatever the terminal's
+// own colours are, so a slot with no theme opinion stays legible on a
+// palette novim knows nothing about.
 fn hl_sgr(fg: Int, bg: Int) -> Str
     var codes = ""
     if fg >= 0
-        codes = codes + "38;5;" + str.from_int(fg)
+        codes = codes + fg_params(fg)
     if bg >= 0
         if str.len(codes) > 0
             codes = codes + ";"
-        codes = codes + "48;5;" + str.from_int(bg)
+        codes = codes + bg_params(bg)
     if str.len(codes) == 0
         "7"
     else
