@@ -6,8 +6,138 @@
 // built-in base that individual keys layer over.  Colorscheme is built only
 // inside this module (the loaders), so callers reference the type opaquely
 // (`colorscheme.Colorscheme`) and read its fields.
+//
+// Every colour novim paints resolves here.  The renderer holds no literal
+// SGR index of its own: a highlight slot (selection, `hlsearch` match, yank
+// flash) asks `hl_sgr` for its parameter string and a gutter colour reads
+// `Highlights`, so switching theme switches ALL of the chrome rather than
+// the eight token classes the syntax table used to cover on its own.
 
 use util
+
+// ── The novo-lang palette ───────────────────────────────────────────────
+//
+// docs/design/palette.md is canon; these are its dark tokens folded onto
+// the xterm-256 cube, because novim emits 256-colour SGR and nothing else.
+// The fold is nearest-neighbour except for `panel`, which is pushed one
+// step darker than its nearest grey so it stays BELOW `ground` — the
+// ordering is what the eye reads, not the exact grey.
+//
+// The two rules that outrank the hues, and that this file has to keep:
+//
+//   1. amber is the agent.  It appears twice in novim — the cursor
+//      (main.nv's term_enter) and the mode indicator while the buffer is
+//      taking keystrokes.  It is in NO token-class slot below.
+//   2. teal is the language's voice, which is why keywords and module
+//      paths carry it and the status line sits on it.
+fn pal_ground() -> Int
+    233        // #0b1416
+fn pal_surface() -> Int
+    234        // #101d20
+fn pal_edge() -> Int
+    236        // #1d3237
+fn pal_ink() -> Int
+    255        // #e8f4f2
+fn pal_dim() -> Int
+    116        // #7da8a3
+fn pal_teal() -> Int
+    43         // #2dd4bf
+fn pal_teal_deep() -> Int
+    37         // #14b8a6
+fn pal_amber() -> Int
+    214        // #fbbf24 — THE AGENT (rule 1)
+fn pal_ok() -> Int
+    78         // #4ade80
+fn pal_err() -> Int
+    203        // #f87171
+fn pal_info() -> Int
+    75         // #60a5fa
+fn pal_spec() -> Int
+    141        // #c084fc
+
+// The palette's own 8/16-colour fallback (palette.md "Terminal mapping"):
+// teal→cyan, amber→yellow, err→red, info→blue, spec→magenta, ok→green,
+// dim→bright-black.  Indices 0-15 of the 256-colour space ARE the ANSI 16,
+// so `novo-16` is still emitted as `38;5;N` and needs no second code path.
+// Selected by name; novim does not sniff TERM, because every terminal it
+// is developed against reports 256 colours and guessing wrong is worse
+// than the one-line config that says so.
+
+// ── Effect-label colours (palette.md rule 4) ────────────────────────────
+//
+// These are NOT theme fields.  Rule 4 is that an effect carries the same
+// colour everywhere — docs chips, help output, editor highlighting — so
+// `[ai]` is amber in gruvbox too.  A theme that could recolour them would
+// break the one thing the effect vocabulary is for: recognising at a
+// glance what a function reaches for.
+//
+// `[mcp]` is amber with `[ai]`: rule 1 is "amber is the agent", and an MCP
+// call is an agent surface, not merely a protocol.  `[async]` takes
+// teal-deep and `[gpu]` takes spec.
+//
+// Effects the palette table still does not name (`[ipc]`,
+// `[expect_invariant]`) fall back to the bracket colour rather than to
+// dim: dim is an assignment the table makes on purpose — "[rand] /
+// [alloc] / [mutate] are the boring ones" — not a default.
+fn effect_bracket_color() -> Int
+    pal_teal()
+
+fn effect_color(w: Str) -> Int
+    if w == "io"
+        pal_teal()
+    elif w == "net"
+        pal_info()
+    elif w == "ai"
+        pal_amber()
+    elif w == "hw"
+        pal_err()
+    elif w == "time"
+        pal_spec()
+    elif w == "mcp"
+        pal_amber()
+    elif w == "async"
+        pal_teal_deep()
+    elif w == "gpu"
+        pal_spec()
+    elif w == "rand" or w == "alloc" or w == "mutate"
+        pal_dim()
+    elif w == "ipc" or w == "expect_invariant"
+        effect_bracket_color()
+    else
+        0 - 1      // not an effect name
+
+// Chrome + highlight colours: the slots the renderer paints that are not
+// syntax token classes.  Split from Colorscheme's syntax half so a named
+// theme that only restyles tokens writes one `hl:` field instead of nine
+// more literals.
+//
+// A selection slot with both halves unset (-1) renders as reverse video
+// (SGR 7), which is what novim painted before these were colours at all and
+// what a terminal with an unknown palette still renders correctly.
+struct Highlights
+    sel_fg:     Int      // Visual selection (and the picker's selected row)
+    sel_bg:     Int
+    search_fg:  Int      // `hlsearch` match
+    search_bg:  Int
+    flash_fg:   Int      // yank flash (vim's on_yank highlight)
+    flash_bg:   Int
+    err_fg:     Int      // gutter line number, diagnostic severity 1
+    warn_fg:    Int      // gutter line number, diagnostic severity >= 2
+    curline_fg: Int      // the cursor line's own number
+
+// The pre-theme defaults, kept as data so the terminal-default colorscheme
+// paints exactly what novim painted when these lived inline in the renderer:
+// reverse-video selection, black-on-yellow search and flash, red / yellow
+// diagnostic numbers, bright-white cursor line.
+fn highlights_default() -> Highlights
+    Highlights { sel_fg: 0 - 1, sel_bg: 0 - 1, search_fg: 0, search_bg: 3, flash_fg: 0, flash_bg: 220, err_fg: 9, warn_fg: 11, curline_fg: 15 }
+
+// Every slot unset, so every slot degrades to reverse video or to nothing.
+// This is what `--no-color` / `NO_COLOR` selects: reverse video is an
+// ATTRIBUTE, not a colour, so a status line and a selection stay visible
+// on a terminal that has been told to emit no colour.
+fn highlights_plain() -> Highlights
+    Highlights { sel_fg: 0 - 1, sel_bg: 0 - 1, search_fg: 0 - 1, search_bg: 0 - 1, flash_fg: 0 - 1, flash_bg: 0 - 1, err_fg: 0 - 1, warn_fg: 0 - 1, curline_fg: 0 - 1 }
 
 struct Colorscheme
     status_fg: Int
@@ -21,32 +151,122 @@ struct Colorscheme
     fn_fg:     Int      // syntax: function (tree-sitter)
     const_fg:  Int      // syntax: constant (tree-sitter)
     mod_fg:    Int      // syntax: module (tree-sitter)
+    hl:        Highlights   // chrome: selection / search / flash / diagnostics
 
+// Say nothing about any colour: the terminal's own palette, reverse video
+// where a slot must still be visible.  Reachable as `--no-color`,
+// `NO_COLOR`, and `:colorscheme none`.
+fn colorscheme_plain() -> Colorscheme
+    Colorscheme { status_fg: 0 - 1, status_bg: 0 - 1, tilde_fg: 0 - 1, kw_fg: 0 - 1, str_fg: 0 - 1, cmt_fg: 0 - 1, num_fg: 0 - 1, type_fg: 0 - 1, fn_fg: 0 - 1, const_fg: 0 - 1, mod_fg: 0 - 1, hl: highlights_plain() }
+
+// The novo-lang palette — novim's default.
+//
+// Chrome sits on surface / edge / dim, and the ACTIVE status line takes
+// teal: it is the one bar that speaks for the editor, and teal is the
+// language's voice.  An inactive split's bar stays uncoloured, which is
+// what makes the focused pane obvious without spending amber on it.
+//
+// Token classes, and why each:
+//
+//   keyword  teal       the language's own words (rule 2)
+//   module   teal       a module path is the language's namespace
+//                       vocabulary, the same voice as a keyword
+//   function teal-deep  a call is that voice one step quieter
+//   type     info       the remaining bright accent, distinct from both
+//   string   ok         green literals — a settled value
+//   number   spec       numbers and constants are one class: literals
+//   comment  dim        (rule: comments are secondary text)
+//
+// amber appears in NONE of them.  Rule 1 spends it on the cursor and on
+// the mode indicator while the buffer is taking keystrokes, and a
+// keyword class would drown both.
+fn colorscheme_novo() -> Colorscheme
+    Colorscheme {
+        status_fg: pal_teal(), status_bg: pal_surface(), tilde_fg: pal_edge(),
+        kw_fg: pal_teal(), str_fg: pal_ok(), cmt_fg: pal_dim(), num_fg: pal_spec(),
+        type_fg: pal_info(), fn_fg: pal_teal_deep(), const_fg: pal_spec(), mod_fg: pal_teal(),
+        hl: Highlights {
+            // A selection must not out-shout the text it selects, so it is
+            // an edge-coloured well with ink on it rather than a teal block.
+            sel_fg: pal_ink(), sel_bg: pal_edge(),
+            // Search was black-on-yellow and the yank flash black-on-amber;
+            // both are rule-1 violations (nothing is acting).  A match is a
+            // hint (info); a completed yank is a success (ok).
+            search_fg: pal_ground(), search_bg: pal_info(),
+            flash_fg: pal_ground(), flash_bg: pal_ok(),
+            // novim's gutter splits diagnostics two ways, so severity >= 2
+            // is literally "warning, information and hint" — which is the
+            // info token's own description.  Amber is not available for it.
+            err_fg: pal_err(), warn_fg: pal_info(), curline_fg: pal_ink()
+        }
+    }
+
+// The same palette through its documented 8/16-colour fallback.  The
+// semantic rules survive the fold — yellow stays agent-only — but the
+// greys do not exist, so chrome falls back to bright-black and to the
+// terminal's own ground.
+fn colorscheme_novo_16() -> Colorscheme
+    Colorscheme {
+        status_fg: 6, status_bg: 0 - 1, tilde_fg: 8,
+        kw_fg: 6, str_fg: 2, cmt_fg: 8, num_fg: 5,
+        type_fg: 4, fn_fg: 6, const_fg: 5, mod_fg: 6,
+        hl: Highlights {
+            sel_fg: 0 - 1, sel_bg: 0 - 1,
+            search_fg: 0, search_bg: 4,
+            flash_fg: 0, flash_bg: 2,
+            err_fg: 1, warn_fg: 4, curline_fg: 15
+        }
+    }
+
+// The light table, for a light terminal.  Same tokens, same rules.
+fn colorscheme_novo_light() -> Colorscheme
+    Colorscheme {
+        status_fg: 30, status_bg: 231, tilde_fg: 252,
+        kw_fg: 30, str_fg: 29, cmt_fg: 66, num_fg: 99,
+        type_fg: 27, fn_fg: 30, const_fg: 99, mod_fg: 30,
+        hl: Highlights {
+            sel_fg: 235, sel_bg: 252,
+            search_fg: 231, search_bg: 27,
+            flash_fg: 231, flash_bg: 29,
+            err_fg: 160, warn_fg: 27, curline_fg: 235
+        }
+    }
+
+// The default IS the palette: novim ships novo-lang's colours, and a
+// terminal-default look is now something you ask for by name.
 fn colorscheme_default() -> Colorscheme
-    Colorscheme { status_fg: 0 - 1, status_bg: 0 - 1, tilde_fg: 0 - 1, kw_fg: 0 - 1, str_fg: 0 - 1, cmt_fg: 0 - 1, num_fg: 0 - 1, type_fg: 0 - 1, fn_fg: 0 - 1, const_fg: 0 - 1, mod_fg: 0 - 1 }
+    colorscheme_novo()
 
 // Built-in named colorschemes.  `[colorscheme] name = "gruvbox"` (or
 // `:colorscheme gruvbox`) selects one as the base; individual [colorscheme]
 // keys still override it.  Unknown names fall back to the terminal default.
 fn colorscheme_named(name: Str) -> Colorscheme
-    if name == "gruvbox" or name == "gruvbox-dark"
+    if name == "novo" or name == "novo-dark"
+        colorscheme_novo()
+    elif name == "novo-light"
+        colorscheme_novo_light()
+    elif name == "novo-16" or name == "novo-ansi"
+        colorscheme_novo_16()
+    elif name == "none" or name == "plain" or name == "terminal"
+        colorscheme_plain()
+    elif name == "gruvbox" or name == "gruvbox-dark"
         // gruvbox dark — 256-colour approximations of the retro-groove palette:
         // fg 223, bg1 237, gray 245, red 167, green 142, yellow 214, purple 175,
         // aqua 108.  keywords red, strings/functions green, types yellow,
         // numbers/constants purple, modules aqua.
-        Colorscheme { status_fg: 223, status_bg: 237, tilde_fg: 245, kw_fg: 167, str_fg: 142, cmt_fg: 245, num_fg: 175, type_fg: 214, fn_fg: 142, const_fg: 175, mod_fg: 108 }
+        Colorscheme { status_fg: 223, status_bg: 237, tilde_fg: 245, kw_fg: 167, str_fg: 142, cmt_fg: 245, num_fg: 175, type_fg: 214, fn_fg: 142, const_fg: 175, mod_fg: 108, hl: highlights_default() }
     elif name == "gruvbox-light"
         // gruvbox light — dark fg 237 on a light status bar (bg 223).
-        Colorscheme { status_fg: 237, status_bg: 223, tilde_fg: 245, kw_fg: 124, str_fg: 106, cmt_fg: 245, num_fg: 132, type_fg: 172, fn_fg: 106, const_fg: 132, mod_fg: 66 }
+        Colorscheme { status_fg: 237, status_bg: 223, tilde_fg: 245, kw_fg: 124, str_fg: 106, cmt_fg: 245, num_fg: 132, type_fg: 172, fn_fg: 106, const_fg: 132, mod_fg: 66, hl: highlights_default() }
     elif name == "solarized_dark" or name == "solarized-dark" or name == "solarized"
         // Solarized dark — ported from novoterm's `solarized_dark` theme, using
         // the canonical Solarized 256-colour approximations and the Solarized
         // syntax mapping: base01 240, green 64, cyan 37, yellow 136, blue 33,
         // magenta 125, orange 166, base2 254.
-        Colorscheme { status_fg: 254, status_bg: 240, tilde_fg: 240, kw_fg: 64, str_fg: 37, cmt_fg: 240, num_fg: 37, type_fg: 136, fn_fg: 33, const_fg: 125, mod_fg: 166 }
+        Colorscheme { status_fg: 254, status_bg: 240, tilde_fg: 240, kw_fg: 64, str_fg: 37, cmt_fg: 240, num_fg: 37, type_fg: 136, fn_fg: 33, const_fg: 125, mod_fg: 166, hl: highlights_default() }
     elif name == "solarized_light" or name == "solarized-light"
         // Solarized light — same hues, dark fg on a light (base2 254) status bar.
-        Colorscheme { status_fg: 241, status_bg: 254, tilde_fg: 245, kw_fg: 64, str_fg: 37, cmt_fg: 245, num_fg: 37, type_fg: 136, fn_fg: 33, const_fg: 125, mod_fg: 166 }
+        Colorscheme { status_fg: 241, status_bg: 254, tilde_fg: 245, kw_fg: 64, str_fg: 37, cmt_fg: 245, num_fg: 37, type_fg: 136, fn_fg: 33, const_fg: 125, mod_fg: 166, hl: highlights_default() }
     elif name == "solarized_osaka" or name == "solarized-osaka" or name == "osaka"
         // Solarized Osaka — the Solarized palette with solarized-osaka.nvim's
         // tokyonight-style token assignment (which is what distinguishes it from
@@ -55,7 +275,7 @@ fn colorscheme_named(name: Str) -> Colorscheme
         // (166), types cyan (37), modules magenta (125), comments base01 (240).
         // Osaka's signature dark-teal chrome → status bar on deep teal (23),
         // bright base2 (254) text.  256-colour approximation (novim is 256-col).
-        Colorscheme { status_fg: 254, status_bg: 23, tilde_fg: 240, kw_fg: 61, str_fg: 64, cmt_fg: 240, num_fg: 166, type_fg: 37, fn_fg: 33, const_fg: 166, mod_fg: 125 }
+        Colorscheme { status_fg: 254, status_bg: 23, tilde_fg: 240, kw_fg: 61, str_fg: 64, cmt_fg: 240, num_fg: 166, type_fg: 37, fn_fg: 33, const_fg: 166, mod_fg: 125, hl: highlights_default() }
     else
         colorscheme_default()
 
@@ -74,6 +294,17 @@ fn load_colorscheme(cfg_path: Str) -> Colorscheme [io]
             var fnf = 0 - 1
             var constf = 0 - 1
             var modf = 0 - 1
+            // Chrome slots (Highlights).  Same -1 = "leave the base alone"
+            // convention as the syntax keys above.
+            var selfg = 0 - 1
+            var selbg = 0 - 1
+            var schfg = 0 - 1
+            var schbg = 0 - 1
+            var flsfg = 0 - 1
+            var flsbg = 0 - 1
+            var errf = 0 - 1
+            var warnf = 0 - 1
+            var curf = 0 - 1
             var name_str = ""
             let lines = str.split_lines(content)
             var in_cs = false
@@ -111,6 +342,24 @@ fn load_colorscheme(cfg_path: Str) -> Colorscheme [io]
                                 constf = cv
                             elif key == "module"
                                 modf = cv
+                            elif key == "selection_fg"
+                                selfg = cv
+                            elif key == "selection_bg"
+                                selbg = cv
+                            elif key == "search_fg"
+                                schfg = cv
+                            elif key == "search_bg"
+                                schbg = cv
+                            elif key == "flash_fg"
+                                flsfg = cv
+                            elif key == "flash_bg"
+                                flsbg = cv
+                            elif key == "error_fg"
+                                errf = cv
+                            elif key == "warning_fg"
+                                warnf = cv
+                            elif key == "curline_fg"
+                                curf = cv
                             elif key == "name"
                                 let nv = str.trim(util.strip_inline_comment(str.slice(raw, eq + 1, str.len(raw))))
                                 name_str = if str.len(nv) >= 2 and (str.byte_at(nv, 0) ?? 0) == '"' then str.slice(nv, 1, str.len(nv) - 1) else nv
@@ -129,20 +378,48 @@ fn load_colorscheme(cfg_path: Str) -> Colorscheme [io]
                 type_fg:   if typef >= 0 then typef else base.type_fg,
                 fn_fg:     if fnf   >= 0 then fnf   else base.fn_fg,
                 const_fg:  if constf >= 0 then constf else base.const_fg,
-                mod_fg:    if modf  >= 0 then modf  else base.mod_fg
+                mod_fg:    if modf  >= 0 then modf  else base.mod_fg,
+                hl: Highlights {
+                    sel_fg:     if selfg >= 0 then selfg else base.hl.sel_fg,
+                    sel_bg:     if selbg >= 0 then selbg else base.hl.sel_bg,
+                    search_fg:  if schfg >= 0 then schfg else base.hl.search_fg,
+                    search_bg:  if schbg >= 0 then schbg else base.hl.search_bg,
+                    flash_fg:   if flsfg >= 0 then flsfg else base.hl.flash_fg,
+                    flash_bg:   if flsbg >= 0 then flsbg else base.hl.flash_bg,
+                    err_fg:     if errf  >= 0 then errf  else base.hl.err_fg,
+                    warn_fg:    if warnf >= 0 then warnf else base.hl.warn_fg,
+                    curline_fg: if curf  >= 0 then curf  else base.hl.curline_fg
+                }
             }
 
-// SGR parameter string for the status line: 256-colour fg/bg if set, else
-// reverse-video (`7`).
-fn status_sgr(cs: Colorscheme) -> Str
+// SGR parameter string for one highlight slot: the 256-colour fg and/or bg
+// the theme set, or reverse video (`7`) when it set neither.  Reverse video
+// is the honest fallback rather than a guess — it inverts whatever the
+// terminal's own colours are, so a slot with no theme opinion stays legible
+// on a palette novim knows nothing about.
+fn hl_sgr(fg: Int, bg: Int) -> Str
     var codes = ""
-    if cs.status_fg >= 0
-        codes = codes + "38;5;" + str.from_int(cs.status_fg)
-    if cs.status_bg >= 0
+    if fg >= 0
+        codes = codes + "38;5;" + str.from_int(fg)
+    if bg >= 0
         if str.len(codes) > 0
             codes = codes + ";"
-        codes = codes + "48;5;" + str.from_int(cs.status_bg)
+        codes = codes + "48;5;" + str.from_int(bg)
     if str.len(codes) == 0
         "7"
     else
         codes
+
+// The status line is the same slot shape as the highlights.
+fn status_sgr(cs: Colorscheme) -> Str
+    hl_sgr(cs.status_fg, cs.status_bg)
+
+// The three highlight slots the renderer paints over buffer text.
+fn sel_sgr(cs: Colorscheme) -> Str
+    hl_sgr(cs.hl.sel_fg, cs.hl.sel_bg)
+
+fn search_sgr(cs: Colorscheme) -> Str
+    hl_sgr(cs.hl.search_fg, cs.hl.search_bg)
+
+fn flash_sgr(cs: Colorscheme) -> Str
+    hl_sgr(cs.hl.flash_fg, cs.hl.flash_bg)

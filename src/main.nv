@@ -2471,7 +2471,8 @@ insertion point.  Modal: the driver routes all input here while active.
 `top_idx` is the VISIBLE window of ranked candidate indices (picker_window), not
 the whole ranking, and `sel` indexes into that window — so the list scrolls past
 a screenful while every drawn row stays a real candidate.""")
-fn draw_picker(cands: [Str], marks: [Str], top_idx: [Int], sel: Int, query: Str, nmatch: Int, total: Int, title: Str, rows: Int, cols: Int) [io]
+fn draw_picker(cands: [Str], marks: [Str], top_idx: [Int], sel: Int, query: Str, nmatch: Int, total: Int, title: Str, rows: Int, cols: Int, cs: colorscheme.Colorscheme) [io]
+    let selcol = colorscheme.sel_sgr(cs)   // same slot the buffer's Visual selection uses
     let h = list.len(top_idx)
     let maxh = picker_maxh(rows)
     let boxw = if cols - 8 < 90 then cols - 8 else 90
@@ -2490,7 +2491,7 @@ fn draw_picker(cands: [Str], marks: [Str], top_idx: [Int], sel: Int, query: Str,
         if ri < h
             let row = (if ri == sel then "> " else "  ") + marks[top_idx[ri]] + cands[top_idx[ri]]
             if ri == sel
-                sgr("7")
+                sgr(selcol)
             emit(pad_to(row, iw))
             if ri == sel
                 sgr("0")
@@ -3133,6 +3134,16 @@ struct Options
 
 fn options_default() -> Options
     Options { number: false, relativenumber: false, hlsearch: true, wrap: false, syntax: true, tabstop: 8, expandtab: false }
+
+// `o` with syntax highlighting off.  --no-color / NO_COLOR go through here
+// as well as through the colorscheme: the token classes fall back to the
+// tokenizer's own indices when a scheme sets none, and effect labels carry
+// FIXED colours by palette rule 4 — so a colourless scheme alone would
+// still paint the buffer.  Turning the highlighter off is what actually
+// makes "no colour" true.  `:syntax on` still works afterwards: the flag
+// picks the startup state, it does not lock it.
+fn options_no_syntax(o: Options) -> Options
+    Options { number: o.number, relativenumber: o.relativenumber, hlsearch: o.hlsearch, wrap: o.wrap, syntax: false, tabstop: o.tabstop, expandtab: o.expandtab }
 
 fn parse_bool_val(s: Str) -> Bool
     str.trim(util.strip_quotes(str.trim(s))) == "true"
@@ -4398,17 +4409,36 @@ fn frame_budget() -> Int [io]
 // shell's screen is restored on exit) + SGR mouse reporting (so the scroll
 // wheel is delivered to novim as `ESC[<64;…M` / `ESC[<65;…M` rather than
 // scrolling the terminal).
-fn term_enter() [io]
+// OSC 12 sets the terminal's cursor colour; OSC 112 puts it back.  The
+// palette names the cursor block as amber's own (rule 1: amber is where
+// something is acting, and in an editor the cursor IS the actor).  A
+// terminal that does not implement OSC 12 ignores the sequence, so this
+// degrades to whatever cursor colour the user already had.
+fn cursor_color_set() [io]
+    emit_byte(27)
+    emit("]12;#fbbf24")
+    emit_byte(7)
+
+fn cursor_color_reset() [io]
+    emit_byte(27)
+    emit("]112")
+    emit_byte(7)
+
+fn term_enter(want_color: Bool) [io]
     csi()
     emit("?1049h")        // alternate screen buffer
     csi()
     emit("?1000h")        // mouse button tracking (covers the wheel)
     csi()
     emit("?1006h")        // SGR extended mouse coordinates
+    if want_color
+        cursor_color_set()
 
 // Restore the terminal: disable mouse reporting and leave the alternate
 // screen (bringing back whatever the shell was showing before novim ran).
-fn term_leave() [io]
+fn term_leave(want_color: Bool) [io]
+    if want_color
+        cursor_color_reset()
     csi()
     emit("?1000l")
     csi()
@@ -4471,10 +4501,12 @@ fn search_vis_ranges(atoms: [nvregex.ReAtom], raw: Str, ts: Int) -> [Int]
 // helpers).
 
 // Paint a line: syntax colours (`syncols`, per-column fg index) as the base,
-// search matches (`sr`/`scol`) over them, and the [vlo,vhi) highlight on top —
-// reverse video for a Visual selection, or black-on-yellow when `flash_hl`
-// (a yank flash, which never coexists with a selection).
-fn emit_line_styled(expanded: Str, left: Int, width: Int, vlo: Int, vhi: Int, sr: [Int], scol: Str, syncols: [Int], flash_hl: Bool) [io]
+// search matches (`sr`/`scol`) over them, and the [vlo,vhi) highlight on top.
+// `hlcol` is that top slot's SGR — the caller resolved it from the theme as
+// the Visual-selection colour or the yank-flash colour, the two never
+// coexisting.  Both `scol` and `hlcol` are SGR parameter strings, not colour
+// indices, because a slot may be a fg/bg pair or plain reverse video.
+fn emit_line_styled(expanded: Str, left: Int, width: Int, vlo: Int, vhi: Int, sr: [Int], scol: Str, syncols: [Int], hlcol: Str) [io]
     let elen = str.len(expanded)
     let endc = if left + width < elen then left + width else elen
     let sn = list.len(syncols)
@@ -4492,7 +4524,7 @@ fn emit_line_styled(expanded: Str, left: Int, width: Int, vlo: Int, vhi: Int, sr
         if want != cur
             sgr("0")
             if want == 1
-                sgr(if flash_hl then "30;48;5;220" else "7")   // yank flash = black on yellow
+                sgr(hlcol)
             elif want == 2
                 sgr(scol)
             elif want >= 1000
@@ -4587,6 +4619,13 @@ fn draw_window(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mod
     let synstr = util.cs_or(cs.str_fg, 150)
     let syncmt = util.cs_or(cs.cmt_fg, 245)
     let synnum = util.cs_or(cs.num_fg, 215)
+    // Chrome slots, resolved once per window rather than per painted cell.
+    let selcol = colorscheme.sel_sgr(cs)          // Visual selection
+    let searchcol = colorscheme.search_sgr(cs)    // `hlsearch` match
+    let flashcol = colorscheme.flash_sgr(cs)      // yank flash
+    let gerr = cs.hl.err_fg                       // gutter: diagnostic severity 1
+    let gwarn = cs.hl.warn_fg                     // gutter: severity >= 2
+    let gcur = cs.hl.curline_fg                   // gutter: the cursor line
     let numbered = opts.number or opts.relativenumber
     // Gutter width tracks the largest line number (min 3 digits) so the text
     // column stays put when the cursor crosses a digit boundary on a 1000+
@@ -4669,18 +4708,16 @@ fn draw_window(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mod
                             disp.pad_num_l(gnum, numw)
                         else
                             disp.pad_num(gnum, numw)
-                        if dsev == 1
-                            sgr(if iscur then "1;38;5;9" else "38;5;9")
-                            emit(numtxt)
-                            sgr("0")
-                            emit(" ")
-                        elif dsev >= 2
-                            sgr(if iscur then "1;38;5;11" else "38;5;11")
-                            emit(numtxt)
-                            sgr("0")
-                            emit(" ")
-                        elif iscur
-                            sgr("1;38;5;15")           // active line number — bold bright white
+                        // Diagnostic severity outranks the cursor line, which
+                        // outranks nothing.  Bold marks the cursor line
+                        // whatever colours it — an attribute, so it survives
+                        // a theme that sets no colours at all (--no-color).
+                        let gcol = if dsev == 1 then gerr elif dsev >= 2 then gwarn elif iscur then gcur else 0 - 1
+                        var gpar = if iscur then "1" else ""
+                        if gcol >= 0
+                            gpar = gpar + (if str.len(gpar) > 0 then ";" else "") + "38;5;" + str.from_int(gcol)
+                        if str.len(gpar) > 0
+                            sgr(gpar)
                             emit(numtxt)
                             sgr("0")
                             emit(" ")
@@ -4689,7 +4726,10 @@ fn draw_window(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mod
                     else
                         emit(disp.nspaces(numw + 1))   // blank gutter on continuation rows
                 let segleft = if opts.wrap then seg * width else left
-                emit_line_styled(expanded, segleft, width, vlo, vhi, srng, "30;43", syncols, (not vis) and flash.active)
+                // Selection and yank flash share one render slot (they never
+                // coexist), so the caller picks which colour that slot carries.
+                let hlcol = if (not vis) and flash.active then flashcol else selcol
+                emit_line_styled(expanded, segleft, width, vlo, vhi, srng, searchcol, syncols, hlcol)
                 // chars emitted by emit_line_styled = clamp(vlen - segleft, 0, width)
                 let shown = if vlen - segleft < 0 then 0 elif vlen - segleft > width then width else vlen - segleft
                 eol(clip, width - shown)
@@ -4711,7 +4751,8 @@ fn draw_window(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mod
     cup(ry + rows, rx + 1)
     // The focused window keeps the full status styling (reverse / colourscheme
     // colours); inactive panes draw a plain status bar so the focus is obvious.
-    sgr(if active then colorscheme.status_sgr(cs) else "0")
+    let barsgr = if active then colorscheme.status_sgr(cs) else "0"
+    sgr(barsgr)
     let modestr = if mode == 1 then "-- INSERT -- " elif mode == 2 then "-- VISUAL -- " elif mode == 3 then "-- VISUAL LINE -- " elif mode == 4 then "-- REPLACE -- " elif mode == 5 then "-- VISUAL BLOCK -- " else "-- NORMAL -- "
     // Diagnostics summary (E:n W:m) plus, when the cursor sits on a diagnostic
     // line, that diagnostic's message — the low-effort surface before any popup.
@@ -4732,7 +4773,27 @@ fn draw_window(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mod
     if str.len(showmsg) > 0 and room > 6
         let mm = if str.len(showmsg) > room - 2 then str.slice(showmsg, 0, room - 2) else showmsg
         statusln = statusln + "  " + mm
-    emit(statusln)
+    // Amber marks the mode that is putting keystrokes INTO the buffer —
+    // the palette's rule 1 (amber is where something acts) read for an
+    // editor, where the actor is whoever is typing.  Spent here and on the
+    // cursor, and nowhere else: NORMAL and the VISUAL modes are selection
+    // and navigation, so they keep the bar's own teal.
+    //
+    // Only the focused window gets it.  An inactive split draws a plain bar
+    // precisely so it does not claim to be where the keys are going.
+    let acting = active and (mode == 1 or mode == 4)
+    if acting and colorscheme.status_sgr(cs) != "7"
+        let cut = util.index_of_str(statusln, modestr)
+        if cut >= 0
+            emit(str.slice(statusln, 0, cut))
+            sgr("38;5;" + str.from_int(colorscheme.pal_amber()))
+            emit(modestr)
+            sgr(barsgr)
+            emit(str.slice(statusln, cut + str.len(modestr), str.len(statusln)))
+        else
+            emit(statusln)
+    else
+        emit(statusln)
     eol(clip, cols - str.len(statusln))   // fill the rest of the status bar with the status bg
     sgr("0")
 
@@ -5060,9 +5121,9 @@ list and per-buffer view/undo/marks/diagnostics, registers, the jumplist, the
 LSP connection, and the screen.  `path` is the first file; `extra` carries the
 rest (a Str, not [Str] — a [Str] param here reproducibly corrupted the
 buffer-switch codegen; see the bug filed in features/orbits/novim).""")
-fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
+fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, time]
     let _ = novo_pty_set_raw_mode_h()
-    term_enter()                          // alternate screen + mouse wheel capture
+    term_enter(want_color)                // alternate screen + mouse wheel capture + cursor colour
     var curpath = path                   // the open file; `:e` switches it
     var ed = Editor { lines: buf_load(path), cy: 0, cx: 0 }
     var disk_text = buf_text(ed)         // last-saved/loaded text, for the :e dirty guard
@@ -5074,8 +5135,11 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     let km_active = list.len(km.lhs) > 0          // any maps → run the prefix matcher
     var map_pending = ""                          // buffered multi-key LHS prefix
     var map_replay = ""                           // RHS / flushed bytes to re-feed through the driver
-    var cs = colorscheme.load_colorscheme(cfg_path)   // var: `:colorscheme <name>` switches it live
-    var opts = load_options(cfg_path)
+    // var: `:colorscheme <name>` switches it live — and still does under
+    // --no-color, because typing the command IS asking for those colours.
+    var cs = if want_color then colorscheme.load_colorscheme(cfg_path) else colorscheme.colorscheme_plain()
+    let opts_cfg = load_options(cfg_path)
+    var opts = if want_color then opts_cfg else options_no_syntax(opts_cfg)
     var rows = term_rows()
     var cols = term_cols()
     var top = 0
@@ -5130,7 +5194,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     var ts_lasttext = "\x00"             // sentinel ≠ any buffer → first frame parses
     // Opt-in (config `[options] treesitter = true` or `:set treesitter`); when
     // off, ts_spans_cache stays empty and the renderer uses the native tokenizer.
-    var ts_enabled = util.index_of_str(file_to_text(cfg_path), "treesitter = true") >= 0
+    var ts_enabled = want_color and util.index_of_str(file_to_text(cfg_path), "treesitter = true") >= 0
     // `[options] clipboard = "unnamedplus"` (or "unnamed") → sync the unnamed
     // register with the OS clipboard, like Neovim's unnamedplus.
     let clip_on = clipboard_enabled(cfg_path)
@@ -6794,7 +6858,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
                 // list is capped); other sources count fuzzy matches.
                 let dnm = if picker_src == 3 then grep_total else dmatch
                 let dtot = if picker_src == 3 then grep_total else list.len(picker_cands)
-                draw_picker(picker_cands, picker_marks, dtop, picker_sel - doff, picker_query, dnm, dtot, dtitle, rows, cols)
+                draw_picker(picker_cands, picker_marks, dtop, picker_sel - doff, picker_query, dnm, dtot, dtitle, rows, cols, cs)
             frame_end()
             last_render = now_ms()
             picker_moved = false
@@ -6814,7 +6878,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str) [io, time]
     novo_pty_restore_mode_h()
     csi()
     emit("0 q")          // restore the terminal's default cursor shape
-    term_leave()         // disable mouse + leave the alternate screen (restores the shell's screen)
+    term_leave(want_color)   // restore cursor colour, disable mouse, leave the alternate screen
 
 // ── Entry ───────────────────────────────────────────────────────
 
@@ -7315,6 +7379,7 @@ fn novim_cli() -> Cli
         .bool_flag("lsp-diag", "", "language-server smoke test: open the file and print its diagnostics")
         .bool_flag("lsp-resolve", "", "print the language server novim would spawn for the file")
         .bool_flag("dump-keymaps", "", "print the keymaps parsed from the nvim config and exit")
+        .bool_flag("no-color", "", "draw in the terminal's own colours (also honours NO_COLOR)")
         .rest_arg("file", "files to open; the first is the active buffer")
 
 @intent("""CLI entry point.  Parse argv and dispatch: `--batch <keys> <file>`
@@ -7338,6 +7403,10 @@ fn main() [io, time]
     let lsp_diag     = m.get_bool("lsp-diag")
     let lsp_resolve  = m.get_bool("lsp-resolve")
     let dump_keymaps = m.get_bool("dump-keymaps")
+    // NO_COLOR is honoured alongside the flag: it is the convention for
+    // "this terminal has been told not to use colour", and a colour scheme
+    // that ignores it is not a colour scheme anyone can turn off.
+    let want_color = not m.get_bool("no-color") and env.get_or("NO_COLOR", "") == ""
     let file = m.arg(0)                  // first file (the initial buffer)
     var extra = ""                       // remaining files, newline-joined → extra buffers
     var i = 1
@@ -7362,4 +7431,4 @@ fn main() [io, time]
     elif is_batch
         run_batch(batch_keys, cfg_path, file)
     else
-        run_interactive(cfg_path, file, extra)
+        run_interactive(cfg_path, file, extra, want_color)
