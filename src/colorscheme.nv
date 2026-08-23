@@ -135,6 +135,16 @@ fn pal_dim(d: Int) -> Int
         116
     else
         8        // bright-black
+fn pal_comment(d: Int) -> Int
+    // Comments step DOWN from dim so keywords can wear the dim voice
+    // (the site TOC's resting colour) without the two classes merging.
+    // 4.84:1 on ground — AA for the italic secondary text it paints.
+    if d >= depth_true()
+        rgb(0x5f, 0x8a, 0x82)
+    elif d >= depth_256()
+        66
+    else
+        8        // bright-black
 fn pal_teal(d: Int) -> Int
     if d >= depth_true()
         rgb(0x2d, 0xd4, 0xbf)
@@ -198,6 +208,8 @@ fn pall_ink(d: Int) -> Int
     if d >= depth_true() then rgb(0x12, 0x31, 0x2d) else 235
 fn pall_dim(d: Int) -> Int
     if d >= depth_true() then rgb(0x4a, 0x7a, 0x72) else 66
+fn pall_comment(d: Int) -> Int
+    if d >= depth_true() then rgb(0x5c, 0x6e, 0x6a) else 242
 fn pall_teal(d: Int) -> Int
     if d >= depth_true() then rgb(0x0d, 0x94, 0x88) else 30
 fn pall_ok(d: Int) -> Int
@@ -319,14 +331,18 @@ fn colorscheme_plain(d: Int) -> Colorscheme
 //
 // Token classes, and why each:
 //
-//   keyword  teal       the language's own words (rule 2)
+//   keyword  dim        the site TOC's resting voice (owner call
+//                       2026-08-24): keywords are structure, and the
+//                       muted sage keeps them from shouting; teal
+//                       stays on chrome, modules and the active line
 //   module   teal       a module path is the language's namespace
 //                       vocabulary, the same voice as a keyword
 //   function teal-deep  a call is that voice one step quieter
 //   type     info       the remaining bright accent, distinct from both
 //   string   ok         green literals — a settled value
 //   number   spec       numbers and constants are one class: literals
-//   comment  dim        (rule: comments are secondary text)
+//   comment  comment-gray  a step below dim, so comments and the
+//                       dim-voiced keywords never merge
 //
 // amber appears in NONE of them.  Rule 1 spends it on the cursor and on
 // the mode indicator while the buffer is taking keystrokes, and a
@@ -336,7 +352,7 @@ fn colorscheme_novo(d: Int) -> Colorscheme
         return colorscheme_novo_16()
     Colorscheme {
         status_fg: pal_teal(d), status_bg: pal_surface(d), tilde_fg: pal_edge(d),
-        kw_fg: pal_teal(d), str_fg: pal_ok(d), cmt_fg: pal_dim(d), num_fg: pal_spec(d),
+        kw_fg: pal_dim(d), str_fg: pal_ok(d), cmt_fg: pal_comment(d), num_fg: pal_spec(d),
         type_fg: pal_info(d), fn_fg: pal_teal_deep(d), const_fg: pal_spec(d), mod_fg: pal_teal(d),
         depth: d,
         hl: Highlights {
@@ -381,7 +397,7 @@ fn colorscheme_novo_16() -> Colorscheme
 fn colorscheme_novo_light(d: Int) -> Colorscheme
     Colorscheme {
         status_fg: pall_teal(d), status_bg: pall_surface(d), tilde_fg: pall_edge(d),
-        kw_fg: pall_teal(d), str_fg: pall_ok(d), cmt_fg: pall_dim(d), num_fg: pall_spec(d),
+        kw_fg: pall_dim(d), str_fg: pall_ok(d), cmt_fg: pall_comment(d), num_fg: pall_spec(d),
         type_fg: pall_info(d), fn_fg: pall_teal(d), const_fg: pall_spec(d), mod_fg: pall_teal(d),
         depth: d,
         hl: Highlights {
