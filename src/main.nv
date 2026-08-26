@@ -132,7 +132,7 @@ fn history_init() [io]
     let cur = fs.read(f) ?? ""
     if str.len(cur) > 0
         let kept = hist_cap(str.split_lines(cur), 1000)
-        let _ = fs.write(f, str.join(str.from_char('\n'), kept) + str.from_char('\n'))
+        let _ = fs.write(f, str.join(kept, str.from_char('\n')) + str.from_char('\n'))
 
 // Append one executed entry (best-effort; failures are ignored).
 fn history_append(prefix: Str, entry: Str) [io]
@@ -3383,7 +3383,7 @@ fn feed_mapped(ed: Editor, st: InputState, km: Keymap, b: Int) -> Step
 // made insert mode crawl on large files.
 @intent("Serialize the buffer's lines to a single newline-joined string.")
 fn buf_text(ed: Editor) -> Str
-    str.join(str.from_char('\n'), ed.lines)
+    str.join(ed.lines, str.from_char('\n'))
 
 // Counts are included (a leading digit may precede an edit, e.g. `3x`).  Yank
 // (`y`) is excluded: it changes no buffer text, so `.` never repeats it.
@@ -3491,7 +3491,7 @@ fn snap_of(ed: Editor) -> Snapshot
 // Serialize one snapshot as "cy,cx,LEN:TEXT" (TEXT = lines joined by \n; the
 // LEN prefix makes each record self-delimiting whatever TEXT contains).
 fn snap_ser(s: Snapshot) -> Str
-    let text = str.join(str.from_char('\n'), s.lines)
+    let text = str.join(s.lines, str.from_char('\n'))
     str.from_int(s.cy) + "," + str.from_int(s.cx) + "," + str.from_int(str.len(text)) + ":" + text
 
 // Serialize a snapshot stack as the concatenation of its records.
@@ -3588,7 +3588,7 @@ fn str_split_b1(s: Str) -> [Str]
 // NUL separator, then the messages joined by '\x01'.  Per-buffer diagnostics let
 // every open document keep its own diagnostics live across switches.
 fn diag_ser(li: [Int], msgs: [Str]) -> Str
-    ints_ser(li) + str.from_char(0) + str.join(str.from_char(1), msgs)
+    ints_ser(li) + str.from_char(0) + str.join(msgs, str.from_char(1))
 
 fn diag_de_li(s: Str) -> [Int]
     let z = util.index_of_byte(s, 0)
@@ -3635,7 +3635,7 @@ fn buf_index_of(paths: [Str], p: Str) -> Int
 
 // Load a file from disk as one newline-joined string (a buffer's stored text).
 fn file_to_text(path: Str) -> Str [io]
-    str.join(str.from_char('\n'), buf_load(path))
+    str.join(buf_load(path), str.from_char('\n'))
 
 // 26 unset marks (a-z), value -1.
 fn marks_empty() -> [Int]
