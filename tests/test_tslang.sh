@@ -41,7 +41,7 @@ cat > "$PKG_DIR/src/_tslang_probe.nv" <<'EOF'
 use tslang
 use util
 
-fn main() [io]
+fn main() [io, fs]
     let cfg = ""
     for f in ["a.nv", "b.md", "c.c", "d.h", "e.toml", "f.py", "g.ll", "h.xyz"]
         let lang = tslang.ts_lang_of(f)

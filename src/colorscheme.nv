@@ -455,7 +455,7 @@ fn colorscheme_named(name: Str, d: Int) -> Colorscheme
     else
         colorscheme_default(d)
 
-fn load_colorscheme(cfg_path: Str, d: Int) -> Colorscheme [io]
+fn load_colorscheme(cfg_path: Str, d: Int) -> Colorscheme [fs]
     match fs.read(cfg_path)
         None => colorscheme_default(d)
         Some(content) =>

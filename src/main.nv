@@ -80,7 +80,7 @@ fn ist_set_search(st: InputState, pat: Str) -> InputState
 @intent("""Load `path` into a line vector.  A missing/unreadable file, or an
 empty file, yields a single empty line — a fresh scratch buffer — so the cursor
 always has somewhere to sit.""")
-fn buf_load(path: Str) -> [Str] [io]
+fn buf_load(path: Str) -> [Str] [fs]
     match fs.read(path)
         None    => [""]
         Some(s) =>
@@ -122,11 +122,11 @@ fn hist_parse(text: Str, kind: Int) -> [Str]
     hist_cap(out, 500)
 
 // Load persisted history of one kind at startup.
-fn history_load(kind: Int) -> [Str] [io]
+fn history_load(kind: Int) -> [Str] [io, fs]
     hist_parse(fs.read(history_file()) ?? "", kind)
 
 // Ensure the history dir exists and compact the file to its last 1000 lines.
-fn history_init() [io]
+fn history_init() [io, fs]
     let f = history_file()
     let _ = fs.mkdir_all(path.dirname(f))
     let cur = fs.read(f) ?? ""
@@ -135,7 +135,7 @@ fn history_init() [io]
         let _ = fs.write(f, str.join(kept, str.from_char('\n')) + str.from_char('\n'))
 
 // Append one executed entry (best-effort; failures are ignored).
-fn history_append(prefix: Str, entry: Str) [io]
+fn history_append(prefix: Str, entry: Str) [io, fs]
     let _ = fs.append(history_file(), prefix + entry + str.from_char('\n'))
 
 // ── Pins (harpoon slots) ────────────────────────────────────────────────────
@@ -147,7 +147,7 @@ fn history_append(prefix: Str, entry: Str) [io]
 // filesystem root the whole string is "/.", and stripping blindly yields the
 // empty string, which is not a directory any more and collapses every caller
 // keyed on it onto one key.
-fn cwd_abs() -> Str [io]
+fn cwd_abs() -> Str [fs]
     let d = path.absolute(".")
     let dn = str.len(d)
     if dn > 2 and str.slice(d, dn - 2, dn) == "/."
@@ -160,7 +160,7 @@ fn cwd_abs() -> Str [io]
 // The project root: the nearest ancestor of the cwd containing `.git` or
 // `novo.toml`, else the absolute cwd itself.  Never empty — an empty root would
 // key every rootless directory onto a single shared state file.
-fn project_root() -> Str [io]
+fn project_root() -> Str [fs]
     let d = cwd_abs()
     var probe = d
     var found = ""
@@ -181,13 +181,13 @@ fn project_root() -> Str [io]
 // the pin file is keyed by the PROJECT ROOT, so the same list is read from
 // every directory of the project, and a path relative to whichever directory
 // did the pinning names a different file (usually no file) from any other.
-fn abs_of(p: Str) -> Str [io]
+fn abs_of(p: Str) -> Str [fs]
     if str.len(p) == 0 or (str.byte_at(p, 0) ?? 0) == '/' then p else path.absolute(p)
 
 // The short spelling of an absolute path for display and for opening: relative
 // to the cwd when it sits underneath, else absolute.  Both spellings open the
 // same file; this only keeps the status line and the picker rows readable.
-fn rel_of(p: Str) -> Str [io]
+fn rel_of(p: Str) -> Str [fs]
     let c = cwd_abs()
     let cn = str.len(c)
     if cn > 0 and str.len(p) > cn + 1 and str.slice(p, 0, cn) == c and (str.byte_at(p, cn) ?? 0) == '/'
@@ -212,7 +212,7 @@ fn pins_file(root: Str) -> Str [io]
     path.join(path.join(base, "novim"), "pins-" + pins_key(root))
 
 // One line per slot: `path<TAB>y<TAB>x`; an empty line is a free slot.
-fn pins_save(root: Str, pp: [Str], py: [Int], px: [Int]) [io]
+fn pins_save(root: Str, pp: [Str], py: [Int], px: [Int]) [io, fs]
     let f = pins_file(root)
     let _ = fs.mkdir_all(path.dirname(f))
     var out = ""
@@ -234,7 +234,7 @@ struct Pins
 @intent("""Read the slot table for `root`.  A stored path that is not absolute
 predates the absolute-path rule and is resolved against the root — the closest
 guess available, since the directory it was written from is not recorded.""")
-fn pins_load(root: Str) -> Pins [io]
+fn pins_load(root: Str) -> Pins [io, fs]
     var pp: [Str] = []
     var py: [Int] = []
     var px: [Int] = []
@@ -2368,7 +2368,7 @@ fn buffers_modified(bt: [Str], bd: [Str], cur: Int, atext: Str, adisk: Str) -> B
 // Write every modified buffer to disk; returns the count written.  The active
 // buffer's live copy is `ed` (vs `adisk`); stored buffers compare their joined
 // text to their saved text.
-fn write_all_bufs(paths: [Str], texts: [Str], disks: [Str], cur: Int, ed: Editor, adisk: Str) -> Int [io]
+fn write_all_bufs(paths: [Str], texts: [Str], disks: [Str], cur: Int, ed: Editor, adisk: Str) -> Int [fs]
     var wrote = 0
     var i = 0
     let nb = list.len(paths)
@@ -2896,7 +2896,7 @@ fn buf_to_str(lines: [Str]) -> Str
         i = i + 1
     s
 
-fn save_buf(path: Str, lines: [Str]) [io]
+fn save_buf(path: Str, lines: [Str]) [fs]
     // The write's success flag is deliberately discarded, so a failed
     // `:w` — read-only file, full disk, vanished parent directory —
     // still prints the ordinary `"path" NL, NB written` confirmation.
@@ -2907,7 +2907,7 @@ fn save_buf(path: Str, lines: [Str]) [io]
 
 // Save a buffer held as newline-joined text (a stored, non-active buffer) —
 // splits to lines so the on-disk form matches `:w` (one trailing newline/line).
-fn save_buf_text(path: Str, text: Str) [io]
+fn save_buf_text(path: Str, text: Str) [fs]
     save_buf(path, str.split_lines(text))
 
 // vim-style write confirmation for the status line: `"path" NL, NB written`.
@@ -3019,7 +3019,7 @@ fn keymap_is_prefix(km: Keymap, s: Str, mclass: Int) -> Bool
 // Load `[keymaps]` from a config file: lines `lhs = "rhs"` (rhs may use
 // `\e` etc.).  Comments (`#`) and blank lines are skipped; section headers
 // (`[name]`) gate which section we're in.  Missing file → empty keymap.
-fn load_keymaps(cfg_path: Str) -> Keymap [io]
+fn load_keymaps(cfg_path: Str) -> Keymap [fs]
     match fs.read(cfg_path)
         None => keymap_empty()
         Some(content) =>
@@ -3053,7 +3053,7 @@ fn load_keymaps(cfg_path: Str) -> Keymap [io]
 
 // True when the config opts into Neovim keymap import (`[keymaps] import_nvim =
 // true`).  Reuses the same flat section reader as the other loaders.
-fn keymaps_import_nvim(cfg_path: Str) -> Bool [io]
+fn keymaps_import_nvim(cfg_path: Str) -> Bool [fs]
     match fs.read(cfg_path)
         None => false
         Some(content) =>
@@ -3077,7 +3077,7 @@ fn keymaps_import_nvim(cfg_path: Str) -> Bool [io]
 // Assemble a Keymap from the nvim config dir: find the leader (default `\`), then
 // scrape the Normal-mode maps (kmode 0) and the Visual-mode `v`/`x` maps
 // (kmode 1), appended onto `base` (the TOML-loaded keymaps).
-fn import_nvim_keymaps(dir: Str, base: Keymap) -> Keymap [io]
+fn import_nvim_keymaps(dir: Str, base: Keymap) -> Keymap [fs]
     let text = collect_lua(dir, 0)
     let ml = nvmap.find_mapleader(text)
     let leader = if str.len(ml) > 0 then ml else str.from_char('\\')
@@ -3148,7 +3148,7 @@ fn options_no_syntax(o: Options) -> Options
 fn parse_bool_val(s: Str) -> Bool
     str.trim(util.strip_quotes(str.trim(s))) == "true"
 
-fn load_options(cfg_path: Str) -> Options [io]
+fn load_options(cfg_path: Str) -> Options [fs]
     match fs.read(cfg_path)
         None => options_default()
         Some(content) =>
@@ -3634,7 +3634,7 @@ fn buf_index_of(paths: [Str], p: Str) -> Int
     0 - 1
 
 // Load a file from disk as one newline-joined string (a buffer's stored text).
-fn file_to_text(path: Str) -> Str [io]
+fn file_to_text(path: Str) -> Str [fs]
     str.join(buf_load(path), str.from_char('\n'))
 
 // 26 unset marks (a-z), value -1.
@@ -4006,7 +4006,7 @@ when the keys run out prints its window after the buffer; a pin command prints
 the note it would have put on the status line.  The parameter is `fpath`, not
 `path`: a parameter named `path` shadows the stdlib module of that name, and
 the pin code needs `path.join`.""")
-fn run_batch(keys: Str, cfg_path: Str, fpath: Str) [io, time]
+fn run_batch(keys: Str, cfg_path: Str, fpath: Str) [io, fs, time]
     var ed = Editor { lines: buf_load(fpath), cy: 0, cx: 0 }
     var curpath = fpath
     var st = ist_new()
@@ -5121,7 +5121,7 @@ list and per-buffer view/undo/marks/diagnostics, registers, the jumplist, the
 LSP connection, and the screen.  `path` is the first file; `extra` carries the
 rest (a Str, not [Str] — a [Str] param here reproducibly corrupted the
 buffer-switch codegen; see the bug filed in features/orbits/novim).""")
-fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, time]
+fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, fs, time, ffi]
     let _ = novo_pty_set_raw_mode_h()
     term_enter(want_color)                // alternate screen + mouse wheel capture + cursor colour
     var curpath = path                   // the open file; `:e` switches it
@@ -6926,7 +6926,7 @@ fn clip_ends_nl(s: Str) -> Bool
 // True when `[options] clipboard = "unnamed[plus]"` is set — a proper section
 // parse (whitespace / alignment / inline-comment tolerant), not a brittle
 // fixed-spacing substring match.
-fn clipboard_enabled(cfg_path: Str) -> Bool [io]
+fn clipboard_enabled(cfg_path: Str) -> Bool [fs]
     match fs.read(cfg_path)
         None => false
         Some(content) =>
@@ -7037,7 +7037,7 @@ fn proc_drain_lines(pid: Int) -> [Str] [io, time]
 
 // Internal recursive file walk (the no-ripgrep fallback for `:files`) —
 // relative paths, skipping VCS/build dirs, bounded depth + count.
-fn walk_files(dir: Str, prefix: Str, depth: Int, acc: [Str], cap: Int) -> [Str] [io]
+fn walk_files(dir: Str, prefix: Str, depth: Int, acc: [Str], cap: Int) -> [Str] [fs]
     if depth > 12 or list.len(acc) >= cap
         return acc
     var a = acc
@@ -7068,7 +7068,7 @@ either way (both are cwd-relative, matching `:e <rel>`).  Empty lines dropped;
 capped at `cap` entries — and the cap bounds the READ as well as the result, so
 opening the picker somewhere enormous costs `cap` lines rather than a full
 traversal.  The walk fallback is bounded the same way, by its own `cap`.""")
-fn files_candidates(cap: Int) -> [Str] [io, time]
+fn files_candidates(cap: Int) -> [Str] [io, fs, time]
     match proc.spawn(["rg", "--files"])
         None =>
             walk_files(".", "", 0, [], cap)
@@ -7089,7 +7089,7 @@ fn files_candidates(cap: Int) -> [Str] [io, time]
 // Recursively concatenate every `*.lua` under `dir` (newline-separated) into one
 // buffer — scraping the combined text means a leader set in one file applies to
 // maps declared in another.  Skips the `.git` dir; bounded depth guards loops.
-fn collect_lua(dir: Str, depth: Int) -> Str [io]
+fn collect_lua(dir: Str, depth: Int) -> Str [fs]
     if depth > 16
         return ""
     var acc = ""
@@ -7141,7 +7141,7 @@ shown printably — no TUI.  The headless test hook for the importer.""")
 // `--fuzzy-rank <query> <file>` debug command: rank the file's lines as picker
 // candidates and print `score<TAB>candidate`, best first (top 10) — the
 // headless test hook for the fuzzy scorer (like --dump-keymaps for keymaps).
-fn run_fuzzy_rank(query: Str, path: Str) [io]
+fn run_fuzzy_rank(query: Str, path: Str) [io, fs]
     let cands = buf_load(path)
     let top = fuzzy.rank(query, cands, 10)
     let m = list.len(top)
@@ -7152,7 +7152,7 @@ fn run_fuzzy_rank(query: Str, path: Str) [io]
         i = i + 1
     println("matches: " + str.from_int(fuzzy.match_count(query, cands)) + "/" + str.from_int(list.len(cands)))
 
-fn run_dump_keymaps() [io]
+fn run_dump_keymaps() [io, fs]
     let dir = default_nvim_dir()
     let text = collect_lua(dir, 0)
     let ml = nvmap.find_mapleader(text)
@@ -7318,7 +7318,7 @@ novim would drive for a file — its languageId, the resolved command (built-in
 default, or a `[lsp]` config override), and the workspace rootUri — WITHOUT
 spawning anything.  Lets users verify their `[lsp]` config and gives the
 multi-language resolver a deterministic, dependency-free headless test.""")
-fn run_lsp_resolve(cfg_path: Str, path: Str) [io]
+fn run_lsp_resolve(cfg_path: Str, path: Str) [io, fs]
     let lang = lsp.lsp_lang_of(path)
     if str.len(lang) == 0
         println("language: (none)")
@@ -7335,7 +7335,7 @@ fn run_lsp_resolve(cfg_path: Str, path: Str) [io]
 @intent("""`--lsp-diag <file>` entry point: spawn the resolved server, run the
 full initialize/didOpen handshake, wait for publishDiagnostics, and print them.
 A deterministic, headless smoke test of the language-server transport (no TUI).""")
-fn run_lsp_diag(path: Str) [io, time]
+fn run_lsp_diag(path: Str) [io, fs, time]
     // Use the free `proc.*` surface (pid-keyed) rather than the Subprocess
     // methods: the method-return slot-type inference is fragile (an fd binder
     // gets a ptr slot for the i64 return) and breaks the build as unrelated
@@ -7389,7 +7389,7 @@ fn novim_cli() -> Cli
 (headless scripted edit), `--lsp-diag <file>` (language-server smoke test),
 `--config <path>` to override the config file, or one-or-more file paths →
 interactive mode (first file active, the rest opened as buffers).""")
-fn main() [io, time]
+fn main() [io, fs, time, ffi]
     // parse_or_exit answers --help / -h from the declaration and exits 2
     // on a mistyped flag or a missing flag value.  Both used to be data:
     // `novim --help` opened a file called `--help`, and `--batch` with

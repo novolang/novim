@@ -214,7 +214,7 @@ fn lsp_cmd_for(p: Str, cfg: Str) -> Str
 // Walk up from `path`'s directory; the first ancestor that contains any of the
 // space-separated `markers` is the project root.  Falls back to the file's own
 // directory when no marker is found.
-fn lsp_find_root(p: Str, markers: Str) -> Str [io]
+fn lsp_find_root(p: Str, markers: Str) -> Str [fs]
     let ms = str.split(markers, " ")
     var dir = path.dirname(p)
     var depth = 0
@@ -234,7 +234,7 @@ fn lsp_find_root(p: Str, markers: Str) -> Str [io]
 
 // The workspace rootUri (`file://…`) for `path`, or "" (→ rootUri:null) when
 // the filetype declares no root markers (novo).
-fn lsp_root_uri_for(p: Str) -> Str [io]
+fn lsp_root_uri_for(p: Str) -> Str [fs]
     let spec = lsp_default_for(lsp_ext_of(p))
     if str.len(spec.roots) == 0
         return ""

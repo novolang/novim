@@ -13,33 +13,33 @@
 
 // ── libtree-sitter (system) ──────────────────────────────────────────────
 @ffi(library = "tree_sitter", symbol = "ts_parser_new")
-fn ts_parser_new() -> Int []
+fn ts_parser_new() -> Int [ffi]
 @ffi(library = "tree_sitter", symbol = "ts_parser_delete")
-fn ts_parser_delete(parser: Int) []
+fn ts_parser_delete(parser: Int) [ffi]
 @ffi(library = "tree_sitter", symbol = "ts_parser_set_language")
-fn ts_parser_set_language(parser: Int, lang: Int) -> Int []
+fn ts_parser_set_language(parser: Int, lang: Int) -> Int [ffi]
 @ffi(library = "tree_sitter", symbol = "ts_parser_parse_string")
-fn ts_parser_parse_string(parser: Int, old_tree: Int, source: Str, length: Int) -> Int []
+fn ts_parser_parse_string(parser: Int, old_tree: Int, source: Str, length: Int) -> Int [ffi]
 @ffi(library = "tree_sitter", symbol = "ts_tree_delete")
-fn ts_tree_delete(tree: Int) []
+fn ts_tree_delete(tree: Int) [ffi]
 
 // ── novo_treesitter_shim (TSNode-by-value wrappers + query API) ───────────
 @ffi(library = "novo_treesitter_shim", symbol = "novo_ts_load_grammar")
-fn novo_ts_load_grammar(gpath: Str, sym: Str) -> Int [io]
+fn novo_ts_load_grammar(gpath: Str, sym: Str) -> Int [io, ffi]
 @ffi(library = "novo_treesitter_shim", symbol = "novo_ts_tree_root_node")
-fn novo_ts_tree_root_node(tree: Int, out_node_addr: Int) []
+fn novo_ts_tree_root_node(tree: Int, out_node_addr: Int) [ffi]
 @ffi(library = "novo_treesitter_shim", symbol = "novo_ts_query_new")
-fn novo_ts_query_new(lang: Int, source: Str, source_len: Int) -> Int []
+fn novo_ts_query_new(lang: Int, source: Str, source_len: Int) -> Int [ffi]
 @ffi(library = "novo_treesitter_shim", symbol = "novo_ts_query_delete")
-fn novo_ts_query_delete(query: Int) []
+fn novo_ts_query_delete(query: Int) [ffi]
 @ffi(library = "novo_treesitter_shim", symbol = "novo_ts_query_cursor_new")
-fn novo_ts_query_cursor_new() -> Int []
+fn novo_ts_query_cursor_new() -> Int [ffi]
 @ffi(library = "novo_treesitter_shim", symbol = "novo_ts_query_cursor_delete")
-fn novo_ts_query_cursor_delete(cursor: Int) []
+fn novo_ts_query_cursor_delete(cursor: Int) [ffi]
 @ffi(library = "novo_treesitter_shim", symbol = "novo_ts_query_cursor_exec")
-fn novo_ts_query_cursor_exec(cursor: Int, query: Int, node_addr: Int) []
+fn novo_ts_query_cursor_exec(cursor: Int, query: Int, node_addr: Int) [ffi]
 @ffi(library = "novo_treesitter_shim", symbol = "novo_ts_next_capture")
-fn novo_ts_next_capture(cursor: Int, query: Int, out_name_addr_ptr: Int, out_start_ptr: Int, out_end_ptr: Int) -> Int []
+fn novo_ts_next_capture(cursor: Int, query: Int, out_name_addr_ptr: Int, out_start_ptr: Int, out_end_ptr: Int) -> Int [ffi]
 
 // Capture-name → colour kind.  Matches the leading dotted family so the whole
 // @keyword.* / @string.* / @function.* groups collapse to one kind.  -1 means
@@ -108,7 +108,7 @@ fn ts_capture_kind(name: Str) -> Int
 // `symbol` used to be hardcoded to "tree_sitter_novo", which made the
 // grammar_path parameter a fiction: any other grammar loaded and then failed
 // at dlsym.  Callers pass ts_symbol_of(ts_lang_of(path)).
-fn ts_spans(grammar_path: Str, symbol: Str, queries: Str, source: Str) -> [Int] [io]
+fn ts_spans(grammar_path: Str, symbol: Str, queries: Str, source: Str) -> [Int] [io, ffi]
     let lang = novo_ts_load_grammar(grammar_path, symbol)
     if lang == 0
         return []

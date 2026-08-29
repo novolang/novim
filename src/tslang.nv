@@ -82,7 +82,7 @@ fn ts_expand_home(p: Str, home: Str) -> Str
         p
 
 // First existing file among `cands`, or "".
-fn ts_first_existing(cands: [Str]) -> Str [io]
+fn ts_first_existing(cands: [Str]) -> Str [fs]
     var out = ""
     var i = 0
     let n = list.len(cands)
@@ -95,7 +95,7 @@ fn ts_first_existing(cands: [Str]) -> Str [io]
 // Locate the grammar .so for `lang`.  nvim-treesitter names them `<lang>.so`;
 // novo-treesitter installs `tree-sitter-<lang>.so`.  A per-language config
 // override wins over both:  [treesitter.llvm] grammar = "/path/llvm.so"
-fn ts_grammar_path(cfg: Str, lang: Str) -> Str [io]
+fn ts_grammar_path(cfg: Str, lang: Str) -> Str [io, fs]
     if str.len(lang) == 0
         return ""
     let home = process.env("HOME") ?? ""
@@ -116,7 +116,7 @@ fn ts_grammar_path(cfg: Str, lang: Str) -> Str [io]
 //   <dir>/<lang>-highlights.scm          novo-treesitter install layout
 //   <dir>/../queries/<lang>/highlights.scm   nvim-treesitter layout
 // plus a [treesitter.<lang>] queries = "..." override.
-fn ts_queries_path(cfg: Str, lang: Str) -> Str [io]
+fn ts_queries_path(cfg: Str, lang: Str) -> Str [io, fs]
     if str.len(lang) == 0
         return ""
     let home = process.env("HOME") ?? ""
