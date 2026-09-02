@@ -196,12 +196,15 @@ fn pal_spec(d: Int) -> Int
         5        // magenta
 
 // The light table (palette.md "Light"), same treatment: canon on a
-// truecolor terminal, its 256-cube fold below that.  Light has no
-// `teal-deep`, so the function class shares plain teal.
+// truecolor terminal, its 256-cube fold below that.  `panel` and
+// `teal-deep` joined the light table on 2026-09-02 (the site's CSS had
+// derived them first); the function class takes teal-deep as in dark.
 fn pall_ground(d: Int) -> Int
     if d >= depth_true() then rgb(0xee, 0xf4, 0xf3) else 255
 fn pall_surface(d: Int) -> Int
     if d >= depth_true() then rgb(0xff, 0xff, 0xff) else 231
+fn pall_panel(d: Int) -> Int
+    if d >= depth_true() then rgb(0xe4, 0xed, 0xeb) else 254
 fn pall_edge(d: Int) -> Int
     if d >= depth_true() then rgb(0xcf, 0xe0, 0xdd) else 252
 fn pall_ink(d: Int) -> Int
@@ -212,6 +215,10 @@ fn pall_comment(d: Int) -> Int
     if d >= depth_true() then rgb(0x5c, 0x6e, 0x6a) else 242
 fn pall_teal(d: Int) -> Int
     if d >= depth_true() then rgb(0x0d, 0x94, 0x88) else 30
+// 256 fold picks 23 (#005f5f), the deeper step, so it stays a step
+// apart from teal's 30 rather than colliding with ok's 29.
+fn pall_teal_deep(d: Int) -> Int
+    if d >= depth_true() then rgb(0x0b, 0x7c, 0x72) else 23
 fn pall_ok(d: Int) -> Int
     if d >= depth_true() then rgb(0x15, 0x80, 0x3d) else 29
 fn pall_err(d: Int) -> Int
@@ -398,7 +405,7 @@ fn colorscheme_novo_light(d: Int) -> Colorscheme
     Colorscheme {
         status_fg: pall_teal(d), status_bg: pall_surface(d), tilde_fg: pall_edge(d),
         kw_fg: pall_dim(d), str_fg: pall_ok(d), cmt_fg: pall_comment(d), num_fg: pall_spec(d),
-        type_fg: pall_info(d), fn_fg: pall_teal(d), const_fg: pall_spec(d), mod_fg: pall_teal(d),
+        type_fg: pall_info(d), fn_fg: pall_teal_deep(d), const_fg: pall_spec(d), mod_fg: pall_teal(d),
         depth: d,
         hl: Highlights {
             sel_fg: pall_ink(d), sel_bg: pall_edge(d),
