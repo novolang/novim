@@ -2365,24 +2365,45 @@ fn buffers_modified(bt: [Str], bd: [Str], cur: Int, atext: Str, adisk: Str) -> B
         i = i + 1
     false
 
-// Write every modified buffer to disk; returns the count written.  The active
-// buffer's live copy is `ed` (vs `adisk`); stored buffers compare their joined
-// text to their saved text.
-fn write_all_bufs(paths: [Str], texts: [Str], disks: [Str], cur: Int, ed: Editor, adisk: Str) -> Int [fs]
+// What `:wa` did, separated from what it says.  `wrote` counts writes
+// that LANDED; `failed` counts the ones that did not, and `first_fail`
+// names one of them for the status line.  Counting attempts instead is
+// what let `:wa` report "wrote 3 buffer(s)" for three writes that never
+// reached the disk, and `:wqa` then quit on that count.
+struct WriteAll
+    wrote: Int
+    failed: Int
+    first_fail: Str
+
+// Write every modified buffer to disk.  The active buffer's live copy is
+// `ed` (vs `adisk`); stored buffers compare their joined text to their
+// saved text.
+fn write_all_bufs(paths: [Str], texts: [Str], disks: [Str], cur: Int, ed: Editor, adisk: Str) -> WriteAll [fs]
     var wrote = 0
+    var failed = 0
+    var first_fail = ""
     var i = 0
     let nb = list.len(paths)
     while i < nb
+        var attempted = false
+        var ok = true
         if i == cur
             if buf_text(ed) != adisk
-                save_buf(paths[i], ed.lines)
-                wrote = wrote + 1
+                attempted = true
+                ok = save_buf(paths[i], ed.lines)
         else
             if texts[i] != disks[i]
-                save_buf_text(paths[i], texts[i])
+                attempted = true
+                ok = save_buf_text(paths[i], texts[i])
+        if attempted
+            if ok
                 wrote = wrote + 1
+            else
+                failed = failed + 1
+                if str.len(first_fail) == 0
+                    first_fail = paths[i]
         i = i + 1
-    wrote
+    WriteAll { wrote: wrote, failed: failed, first_fail: first_fail }
 
 // Apply a `:s`/`:%s` substitution to newline-joined buffer text (for `:bufdo`
 // over a stored, non-active buffer).  Editor construction stays in this shallow
@@ -2896,19 +2917,24 @@ fn buf_to_str(lines: [Str]) -> Str
         i = i + 1
     s
 
-fn save_buf(path: Str, lines: [Str]) [fs]
-    // The write's success flag is deliberately discarded, so a failed
-    // `:w` — read-only file, full disk, vanished parent directory —
-    // still prints the ordinary `"path" NL, NB written` confirmation.
-    // Reporting it means returning Bool from here and from
-    // save_buf_text, and showing E212 in the status line instead of
-    // wrote_msg at each of the five call sites.
-    let _ = fs.write(path, buf_to_str(lines))
+// Returns whether the write landed.  An editor that reports a write it
+// did not perform is a data-loss report, not a degradation, so every
+// caller here checks: the status line says E212 instead of the
+// confirmation, the buffer stays marked modified, and a `:wq` / `:wn`
+// that was going to leave the file does not.
+fn save_buf(path: Str, lines: [Str]) -> Bool [fs]
+    fs.write(path, buf_to_str(lines))
 
 // Save a buffer held as newline-joined text (a stored, non-active buffer) —
 // splits to lines so the on-disk form matches `:w` (one trailing newline/line).
-fn save_buf_text(path: Str, text: Str) [fs]
+fn save_buf_text(path: Str, text: Str) -> Bool [fs]
     save_buf(path, str.split_lines(text))
+
+// vim's message for a write that could not be opened.  Same code, same
+// wording, because a novim user reaching for it will search for the
+// vim one.
+fn write_failed_msg(path: Str) -> Str
+    "E212: can't open file for writing: " + path
 
 // vim-style write confirmation for the status line: `"path" NL, NB written`.
 fn wrote_msg(path: Str, lines: [Str]) -> Str
@@ -4196,7 +4222,8 @@ fn run_batch(keys: Str, cfg_path: Str, fpath: Str) [io, fs, time]
                 else
                     let r = excmd.exec_ex(cmd_buf)
                     if r.save
-                        save_buf(curpath, ed.lines)
+                        if not save_buf(curpath, ed.lines)
+                            pnote = write_failed_msg(curpath)
                     if r.quit
                         quit = true
                 cmd_mode = false
@@ -5972,18 +5999,29 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                                 if tgt < 0 or tgt >= na
                                     lsp_info = if tgt < 0 then "at first arg" else "at last arg"
                                 else
-                                    if ak == 6 or ak == 7     // :wn / :wN — write current first
+                                    // :wn / :wN write the current buffer
+                                    // BEFORE leaving it, so a write that
+                                    // fails has to stop the navigation —
+                                    // otherwise the edits are gone with
+                                    // the buffer and the only trace is a
+                                    // status line nobody read.
+                                    var wn_ok = true
+                                    if ak == 6 or ak == 7
                                         // Skip the write for an unnamed
                                         // buffer rather than creating "".
                                         if curpath != ""
-                                            save_buf(curpath, ed.lines)
-                                            disk_text = buf_text(ed)
-                                    arg_idx = tgt
-                                    jback = list.push(jback, jentry(curpath, ed.cy, ed.cx))
-                                    jfwd = []
-                                    want_path = arglist[tgt]
-                                    want_y = 0 - 1
-                                    want_x = 0
+                                            wn_ok = save_buf(curpath, ed.lines)
+                                            if wn_ok
+                                                disk_text = buf_text(ed)
+                                    if not wn_ok
+                                        lsp_info = write_failed_msg(curpath)
+                                    else
+                                        arg_idx = tgt
+                                        jback = list.push(jback, jentry(curpath, ed.cy, ed.cx))
+                                        jfwd = []
+                                        want_path = arglist[tgt]
+                                        want_y = 0 - 1
+                                        want_x = 0
                         elif excmd.is_bufs(cmd_buf)          // :bufs — the interactive buffer picker
                             picker_active = true
                             picker_src = 0
@@ -6123,12 +6161,24 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                                 lsp_info = "no buffer matching " + barg
                         elif excmd.writeall_kind(cmd_buf) > 0   // :wa / :wqa / :xa / :qa
                             let wk = excmd.writeall_kind(cmd_buf)
+                            var wa_failed = false
                             if wk == 1 or wk == 2
-                                let n = write_all_bufs(bufs_path, bufs_text, bufs_disk, cur_buf, ed, disk_text)
-                                disk_text = buf_text(ed)
-                                bufs_disk = mark_all_saved(bufs_text, bufs_disk)
-                                lsp_info = "wrote " + str.from_int(n) + " buffer(s)"
-                            let blocked = wk == 3 and buffers_modified(bufs_text, bufs_disk, cur_buf, buf_text(ed), disk_text)
+                                let w = write_all_bufs(bufs_path, bufs_text, bufs_disk, cur_buf, ed, disk_text)
+                                if w.failed > 0
+                                    // Marking the buffers saved after a
+                                    // failed write is how `:wqa` used to
+                                    // quit over the top of unwritten edits:
+                                    // the count it reported was of ATTEMPTS.
+                                    wa_failed = true
+                                    lsp_info = write_failed_msg(w.first_fail)
+                                          + " (" + str.from_int(w.failed) + " of "
+                                          + str.from_int(w.wrote + w.failed) + " buffer(s))"
+                                else
+                                    disk_text = buf_text(ed)
+                                    bufs_disk = mark_all_saved(bufs_text, bufs_disk)
+                                    lsp_info = "wrote " + str.from_int(w.wrote) + " buffer(s)"
+                            let blocked = wa_failed
+                                       or (wk == 3 and buffers_modified(bufs_text, bufs_disk, cur_buf, buf_text(ed), disk_text))
                             if blocked
                                 lsp_info = "unsaved buffers (:qa! to override)"
                             elif wk == 2 or wk == 3 or wk == 4
@@ -6154,12 +6204,25 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                                 if curpath == ""
                                     lsp_info = "E32: no file name"
                                 else
-                                    save_buf(curpath, ed.lines)
-                                    disk_text = buf_text(ed)
-                                    lsp_info = wrote_msg(curpath, ed.lines)
+                                    if save_buf(curpath, ed.lines)
+                                        disk_text = buf_text(ed)
+                                        lsp_info = wrote_msg(curpath, ed.lines)
+                                    else
+                                        // disk_text is NOT advanced, so the
+                                        // buffer stays modified and the `:wq`
+                                        // guard below sees it.
+                                        lsp_info = write_failed_msg(curpath)
                             if r.quit
-                                if (not r.save) and util.index_of_byte(cmd_buf, '!') < 0 and buffers_modified(bufs_text, bufs_disk, cur_buf, buf_text(ed), disk_text)
-                                    lsp_info = "unsaved buffers (:q! to override)"
+                                // `:wq` used to quit on the strength of having
+                                // ATTEMPTED the write — `not r.save` skipped
+                                // the modified check entirely.  A failed `:w`
+                                // leaves the buffer modified, so the same
+                                // check now answers for both.
+                                if util.index_of_byte(cmd_buf, '!') < 0 and buffers_modified(bufs_text, bufs_disk, cur_buf, buf_text(ed), disk_text)
+                                    lsp_info = if r.save
+                                        write_failed_msg(curpath) + " — not quitting (:q! to override)"
+                                    else
+                                        "unsaved buffers (:q! to override)"
                                 else
                                     running = false
                                     done = true
