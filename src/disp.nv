@@ -124,7 +124,7 @@ fn nv_ident_char(b: Int) -> Bool
     nv_ident_start(b) or (b >= '0' and b <= '9')
 
 fn nv_keyword(w: Str) -> Bool
-    w == "fn" or w == "let" or w == "var" or w == "mut" or w == "if" or w == "elif" or w == "else" or w == "while" or w == "for" or w == "in" or w == "return" or w == "struct" or w == "enum" or w == "trait" or w == "impl" or w == "match" or w == "and" or w == "or" or w == "not" or w == "true" or w == "false" or w == "async" or w == "await" or w == "import" or w == "type" or w == "break" or w == "continue" or w == "then" or w == "pub" or w == "as" or w == "None" or w == "Some"
+    w == "fn" or w == "let" or w == "var" or w == "mut" or w == "if" or w == "elif" or w == "else" or w == "while" or w == "for" or w == "in" or w == "return" or w == "struct" or w == "enum" or w == "trait" or w == "impl" or w == "match" or w == "and" or w == "or" or w == "not" or w == "true" or w == "false" or w == "async" or w == "await" or w == "import" or w == "type" or w == "alias" or w == "break" or w == "continue" or w == "then" or w == "pub" or w == "as" or w == "None" or w == "Some"
 
 // ── Effect clauses ───────────────────────────────────────────────────────────
 //
