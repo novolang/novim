@@ -14,12 +14,12 @@ use util
 // supports `&` (whole match).  Powers `/`, `?`, `n`, `*`, `#`, `:s`, `:g`.
 
 struct ReAtom
-    kind: Int   // 0 lit, 1 any, 2 class, 3 ^, 4 $, 5 (grp, 6 )grp, 7 split, 8 jmp
-    // for kind 7/8, `ch` is a forward offset (relative to this atom's index)
-    ch: Int   // literal byte
-    cls: Str   // class members (raw; `a-z` ranges interpreted at match time)
-    neg: Bool   // negated class
-    quant: Int   // 0 none, 1 * (>=0), 2 + (>=1), 3 ? (0 or 1)
+    kind:  Int      // 0 lit, 1 any, 2 class, 3 ^, 4 $, 5 (grp, 6 )grp, 7 split, 8 jmp
+                    // for kind 7/8, `ch` is a forward offset (relative to this atom's index)
+    ch:    Int      // literal byte
+    cls:   Str      // class members (raw; `a-z` ranges interpreted at match time)
+    neg:   Bool     // negated class
+    quant: Int      // 0 none, 1 * (>=0), 2 + (>=1), 3 ? (0 or 1)
 
 fn re_atom(kind: Int, ch: Int, cls: Str, neg: Bool, quant: Int) -> ReAtom
     ReAtom { kind: kind, ch: ch, cls: cls, neg: neg, quant: quant }
@@ -27,7 +27,7 @@ fn re_atom(kind: Int, ch: Int, cls: Str, neg: Bool, quant: Int) -> ReAtom
 // Match result: `end` is the match end index (-1 on failure); `caps` holds
 // 2 ints per group 0-9 (start, end) — group `g` occupies caps[2g], caps[2g+1].
 struct ReResult
-    end: Int
+    end:  Int
     caps: [Int]
 
 fn re_fail() -> ReResult
@@ -44,12 +44,12 @@ fn caps_empty() -> [Int]
 
 // Class members for a \d \w \s shortcut letter.
 fn re_shortcut_cls(letter: Int) -> Str
-    if letter == 'd' or letter == 'D'   // d / D
+    if letter == 'd' or letter == 'D'              // d / D
         "0-9"
-    else if letter == 'w' or letter == 'W'   // w / W
+    elif letter == 'w' or letter == 'W'            // w / W
         "0-9a-zA-Z_"
-    else   // s / S
-        str.from_char(32) + str.from_char('\t')   // space + tab
+    else                                             // s / S
+        str.from_char(32) + str.from_char('\t')         // space + tab
 
 // Does class string `cls` contain byte `c` (handles `a-z` ranges)?
 fn re_class_has(cls: Str, c: Int) -> Bool
@@ -73,13 +73,10 @@ fn re_atom_matches(a: ReAtom, s: Str, si: Int) -> Bool
     let c = str.byte_at(s, si) ?? 0
     if a.kind == 0
         c == a.ch
-    else if a.kind == 1
+    elif a.kind == 1
         true
-    else if a.kind == 2
-        if a.neg
-            not re_class_has(a.cls, c)
-        else
-            re_class_has(a.cls, c)
+    elif a.kind == 2
+        if a.neg then not re_class_has(a.cls, c) else re_class_has(a.cls, c)
     else
         false
 
@@ -107,30 +104,30 @@ fn re_match_here(atoms: [ReAtom], ai: Int, s: Str, si: Int, caps: [Int]) -> ReRe
     if ai >= list.len(atoms)
         return ReResult { end: si, caps: caps }
     let a = atoms[ai]
-    if a.kind == 3   // ^
+    if a.kind == 3                                   // ^
         if si == 0
             return re_match_here(atoms, ai + 1, s, si, caps)
         return re_fail()
-    if a.kind == 4   // $
+    if a.kind == 4                                   // $
         if si == str.len(s)
             return re_match_here(atoms, ai + 1, s, si, caps)
         return re_fail()
-    if a.kind == 5   // ( group start — zero-width
+    if a.kind == 5                                   // ( group start — zero-width
         return re_match_here(atoms, ai + 1, s, si, util.set_int_at(caps, 2 * a.ch, si))
-    if a.kind == 6   // ) group end — zero-width
+    if a.kind == 6                                   // ) group end — zero-width
         return re_match_here(atoms, ai + 1, s, si, util.set_int_at(caps, 2 * a.ch + 1, si))
-    if a.kind == 7   // split (alternation) — try branch 1, then 2
+    if a.kind == 7                                   // split (alternation) — try branch 1, then 2
         let r = re_match_here(atoms, ai + 1, s, si, caps)
         if r.end >= 0
             return r
         return re_match_here(atoms, ai + a.ch, s, si, caps)
-    if a.kind == '\b'   // jump (skip 2nd alternative)
+    if a.kind == '\b'                                   // jump (skip 2nd alternative)
         return re_match_here(atoms, ai + a.ch, s, si, caps)
-    if a.quant == 1   // *
+    if a.quant == 1                                  // *
         return re_match_star(atoms, ai, s, si, 0, caps)
-    if a.quant == 2   // +
+    if a.quant == 2                                  // +
         return re_match_star(atoms, ai, s, si, 1, caps)
-    if a.quant == 3   // ?
+    if a.quant == 3                                  // ?
         if re_atom_matches(a, s, si)
             let r = re_match_here(atoms, ai + 1, s, si + 1, caps)
             if r.end >= 0
@@ -155,16 +152,16 @@ fn re_compile_one(pat: Str) -> [ReAtom]
         var ch = 0
         var cls = ""
         var neg = false
-        if c == '^' and i == 0   // ^ at start
+        if c == '^' and i == 0                      // ^ at start
             kind = 3
             i = i + 1
-        else if c == '$' and i == n - 1   // $ at end
+        elif c == '$' and i == n - 1                // $ at end
             kind = 4
             i = i + 1
-        else if c == '.'   // .
+        elif c == '.'                               // .
             kind = 1
             i = i + 1
-        else if c == '['   // [ class
+        elif c == '['                               // [ class
             var j = i + 1
             if j < n and (str.byte_at(pat, j) ?? 0) == '^'
                 neg = true
@@ -174,51 +171,42 @@ fn re_compile_one(pat: Str) -> [ReAtom]
                 j = j + 1
             cls = str.slice(pat, cs, j)
             kind = 2
-            i = if j < n
-                j + 1
-            else
-                j
-        else if c == '\\' and i + 1 < n   // backslash escape
+            i = if j < n then j + 1 else j
+        elif c == '\\' and i + 1 < n                 // backslash escape
             let nx = str.byte_at(pat, i + 1) ?? 0
-            if nx == 'd' or nx == 'w' or nx == 's'   // \d \w \s
+            if nx == 'd' or nx == 'w' or nx == 's'        // \d \w \s
                 kind = 2
                 cls = re_shortcut_cls(nx)
-            else if nx == 'D' or nx == 'W' or nx == 'S'   // \D \W \S
+            elif nx == 'D' or nx == 'W' or nx == 'S'      // \D \W \S
                 kind = 2
                 cls = re_shortcut_cls(nx)
                 neg = true
-            else if nx == '('   // \( group start
+            elif nx == '('                                  // \( group start
                 kind = 5
                 groupcount = groupcount + 1
                 ch = groupcount
                 gstack = list.append(gstack, [groupcount])
-            else if nx == ')'   // \) group end
+            elif nx == ')'                                  // \) group end
                 kind = 6
-                ch = if list.len(gstack) > 0
-                    gstack[list.len(gstack) - 1]
-                else
-                    0
-                gstack = if list.len(gstack) > 0
-                    list.slice(gstack, 0, list.len(gstack) - 1)
-                else
-                    gstack
-            else   // \x → literal x
+                ch = if list.len(gstack) > 0 then gstack[list.len(gstack) - 1] else 0
+                gstack = if list.len(gstack) > 0 then list.slice(gstack, 0, list.len(gstack) - 1) else gstack
+            else                                             // \x → literal x
                 kind = 0
                 ch = nx
             i = i + 2
-        else   // literal
+        else                                         // literal
             kind = 0
             ch = c
             i = i + 1
         var quant = 0
-        if kind == 0 or kind == 1 or kind == 2   // quantifier lookahead
+        if kind == 0 or kind == 1 or kind == 2       // quantifier lookahead
             if i < n and (str.byte_at(pat, i) ?? 0) == '*'
                 quant = 1
                 i = i + 1
-            else if i + 1 < n and (str.byte_at(pat, i) ?? 0) == '\\' and (str.byte_at(pat, i + 1) ?? 0) == '+'
+            elif i + 1 < n and (str.byte_at(pat, i) ?? 0) == '\\' and (str.byte_at(pat, i + 1) ?? 0) == '+'
                 quant = 2
                 i = i + 2
-            else if i + 1 < n and (str.byte_at(pat, i) ?? 0) == '\\' and (str.byte_at(pat, i + 1) ?? 0) == '?'
+            elif i + 1 < n and (str.byte_at(pat, i) ?? 0) == '\\' and (str.byte_at(pat, i + 1) ?? 0) == '?'
                 quant = 3
                 i = i + 2
         atoms = list.append(atoms, [re_atom(kind, ch, cls, neg, quant)])
@@ -235,28 +223,25 @@ fn re_split_top(pat: Str) -> [Str]
     var inclass = false
     while i < n
         let c = str.byte_at(pat, i) ?? 0
-        let nx = if i + 1 < n
-            str.byte_at(pat, i + 1) ?? 0
-        else
-            0
+        let nx = if i + 1 < n then str.byte_at(pat, i + 1) ?? 0 else 0
         if inclass
-            if c == ']'   // ]
+            if c == ']'                             // ]
                 inclass = false
             i = i + 1
-        else if c == '['   // [
+        elif c == '['                               // [
             inclass = true
             i = i + 1
-        else if c == '\\' and nx == '('   // \(
+        elif c == '\\' and nx == '('                // \(
             depth = depth + 1
             i = i + 2
-        else if c == '\\' and nx == ')'   // \)
+        elif c == '\\' and nx == ')'                // \)
             depth = depth - 1
             i = i + 2
-        else if c == '\\' and nx == '|' and depth == 0   // top-level \|
+        elif c == '\\' and nx == '|' and depth == 0 // top-level \|
             parts = list.append(parts, [str.slice(pat, start, i)])
             i = i + 2
             start = i
-        else if c == '\\' and i + 1 < n   // other escape — skip both
+        elif c == '\\' and i + 1 < n                 // other escape — skip both
             i = i + 2
         else
             i = i + 1
@@ -284,10 +269,7 @@ fn re_compile(pat: Str) -> [ReAtom]
 
 // First match start at/after `from` (-1 if none).
 fn re_find_in_line(atoms: [ReAtom], line: Str, from: Int) -> Int
-    var i = if from < 0
-        0
-    else
-        from
+    var i = if from < 0 then 0 else from
     let n = str.len(line)
     while i <= n
         if re_match_here(atoms, 0, line, i, caps_empty()).end >= 0
@@ -306,17 +288,14 @@ fn re_match_ranges(atoms: [ReAtom], line: Str) -> [Int]
         if e > i
             out = list.append(out, [i])
             out = list.append(out, [e])
-            i = e   // non-overlapping: skip past this match
+            i = e                    // non-overlapping: skip past this match
         else
             i = i + 1
     out
 
 // Last match start strictly before `before` (before < 0 → whole line).
 fn re_find_last_in_line(atoms: [ReAtom], line: Str, before: Int) -> Int
-    let lim = if before < 0
-        str.len(line) + 1
-    else
-        before
+    let lim = if before < 0 then str.len(line) + 1 else before
     var last = 0 - 1
     var i = 0
     while i < lim
@@ -337,10 +316,10 @@ fn re_expand_repl(repl: Str, matched: Str, caps: [Int], line: Str) -> Str
     var i = 0
     while i < n
         let c = str.byte_at(repl, i) ?? 0
-        if c == '&'   // &
+        if c == '&'                                 // &
             out = out + matched
             i = i + 1
-        else if c == '\\' and i + 1 < n   // \1-\9 backref, else \x
+        elif c == '\\' and i + 1 < n                 // \1-\9 backref, else \x
             let nx = str.byte_at(repl, i + 1) ?? 0
             if nx >= '1' and nx <= '9'
                 let g = nx - '0'
@@ -363,16 +342,13 @@ fn re_replace_line(atoms: [ReAtom], line: Str, repl: Str, global: Bool) -> Str
     var i = 0
     var did = false
     while i < n
-        let r = if global or not did
-            re_match_here(atoms, 0, line, i, caps_empty())
-        else
-            re_fail()
+        let r = if global or not did then re_match_here(atoms, 0, line, i, caps_empty()) else re_fail()
         let e = r.end
-        if e > i   // non-empty match [i, e)
+        if e > i                                      // non-empty match [i, e)
             out = out + re_expand_repl(repl, str.slice(line, i, e), r.caps, line)
             did = true
             i = e
-        else if e == i   // zero-width match
+        elif e == i                                  // zero-width match
             out = out + re_expand_repl(repl, "", r.caps, line)
             did = true
             out = out + str.from_char(str.byte_at(line, i) ?? 0)
