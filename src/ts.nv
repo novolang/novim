@@ -39,7 +39,8 @@ fn novo_ts_query_cursor_delete(cursor: Int) [ffi]
 @ffi(library = "novo_treesitter_shim", symbol = "novo_ts_query_cursor_exec")
 fn novo_ts_query_cursor_exec(cursor: Int, query: Int, node_addr: Int) [ffi]
 @ffi(library = "novo_treesitter_shim", symbol = "novo_ts_next_capture")
-fn novo_ts_next_capture(cursor: Int, query: Int, out_name_addr_ptr: Int, out_start_ptr: Int, out_end_ptr: Int) -> Int [ffi]
+fn novo_ts_next_capture(cursor: Int, query: Int, out_name_addr_ptr: Int, out_start_ptr: Int,
+                        out_end_ptr: Int) -> Int [ffi]
 
 // Capture-name → colour kind.  Matches the leading dotted family so the whole
 // @keyword.* / @string.* / @function.* groups collapse to one kind.  -1 means
@@ -49,21 +50,21 @@ fn novo_ts_next_capture(cursor: Int, query: Int, out_name_addr_ptr: Int, out_sta
 fn ts_capture_kind(name: Str) -> Int
     if str.starts_with(name, "keyword")
         0
-    elif str.starts_with(name, "type")
+    else if str.starts_with(name, "type")
         1
-    elif str.starts_with(name, "string") or str.starts_with(name, "character")
+    else if str.starts_with(name, "string") or str.starts_with(name, "character")
         2
-    elif str.starts_with(name, "comment")
+    else if str.starts_with(name, "comment")
         3
-    elif str.starts_with(name, "function")
+    else if str.starts_with(name, "function")
         4
-    elif str.starts_with(name, "number") or str.starts_with(name, "boolean")
+    else if str.starts_with(name, "number") or str.starts_with(name, "boolean")
         5
-    elif str.starts_with(name, "constant")
+    else if str.starts_with(name, "constant")
         6
-    elif str.starts_with(name, "variable") or str.starts_with(name, "property")
+    else if str.starts_with(name, "variable") or str.starts_with(name, "property")
         7
-    elif str.starts_with(name, "module")
+    else if str.starts_with(name, "module")
         8
     // The @markup.* family is the modern nvim-treesitter vocabulary for prose
     // and documentation grammars.  Without these, markdown resolves a grammar
@@ -71,29 +72,29 @@ fn ts_capture_kind(name: Str) -> Int
     // highlights.scm is almost entirely @markup.* + @label — none of which
     // matched any branch above.  Mapped onto the existing colour kinds rather
     // than growing the colorscheme:
-    elif str.starts_with(name, "markup.heading")
-        0                                   // headings read as keywords
-    elif str.starts_with(name, "markup.raw") or str.starts_with(name, "markup.quote")
-        2                                   // code spans / block quotes as strings
-    elif str.starts_with(name, "markup.link") or str.starts_with(name, "markup.list")
-        6                                   // links + list bullets as constants
-    elif str.starts_with(name, "markup")
-        1                                   // strong / italic / underline as types
+    else if str.starts_with(name, "markup.heading")
+        0   // headings read as keywords
+    else if str.starts_with(name, "markup.raw") or str.starts_with(name, "markup.quote")
+        2   // code spans / block quotes as strings
+    else if str.starts_with(name, "markup.link") or str.starts_with(name, "markup.list")
+        6   // links + list bullets as constants
+    else if str.starts_with(name, "markup")
+        1   // strong / italic / underline as types
     // The legacy @text.* vocabulary that @markup.* replaced.  Still shipped by
     // plenty of grammars — tree-sitter-markdown vendors a copy of the old
     // nvim-treesitter queries, so its highlights.scm is entirely
     // @text.title / @text.literal / @text.uri and coloured nothing until this.
-    elif str.starts_with(name, "text.title")
+    else if str.starts_with(name, "text.title")
         0
-    elif str.starts_with(name, "text.literal")
+    else if str.starts_with(name, "text.literal")
         2
-    elif str.starts_with(name, "text.uri") or str.starts_with(name, "text.reference")
+    else if str.starts_with(name, "text.uri") or str.starts_with(name, "text.reference")
         6
-    elif str.starts_with(name, "text")
+    else if str.starts_with(name, "text")
         1
-    elif str.starts_with(name, "label") or str.starts_with(name, "attribute")
+    else if str.starts_with(name, "label") or str.starts_with(name, "attribute")
         6
-    elif str.starts_with(name, "tag")
+    else if str.starts_with(name, "tag")
         1
     else
         0 - 1
@@ -141,7 +142,10 @@ fn ts_spans(grammar_path: Str, symbol: Str, queries: Str, source: Str) -> [Int] 
             keep = false
         else
             let name_addr = ptr.read_word(name_slot)
-            let name = if name_addr == 0 then "" else ptr.read_str(name_addr)
+            let name = if name_addr == 0
+                ""
+            else
+                ptr.read_str(name_addr)
             let kind = ts_capture_kind(name)
             if kind >= 0
                 spans = list.push(spans, ptr.read_word(start_slot))
