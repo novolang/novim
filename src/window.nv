@@ -9,9 +9,8 @@
 // (Novo has no qualified struct-literal form `window.Rect { ... }`) and a
 // single-window layout via `window.LWin(id)` (qualified enum construction
 // works).  That asymmetry is why `rect` exists as a constructor fn at all.
-
 @intent("""A screen rectangle (1-based-friendly, but stored 0-based): origin
-(x, y) and size (w, h) in terminal cells.  A window draws into one of these.""")
+    (x, y) and size (w, h) in terminal cells.  A window draws into one of these.""")
 struct Rect
     x: Int
     y: Int
@@ -22,23 +21,24 @@ struct Rect
 // parse, so a Rect built outside this file goes through `window.rect`).
 fn rect(x: Int, y: Int, w: Int, h: Int) -> Rect
     Rect { x: x, y: y, w: w, h: h }
-
 @intent("""The window layout as a recursive tree.  `LWin` is a leaf holding a
-window id (index into the win_* parallel arrays); `LRow` tiles its parts
-side-by-side (a `:vsplit`), `LCol` stacks them top-to-bottom (a `:split`).
-A single full-screen window is just `LWin(0)` — the default before any split.""")
+    window id (index into the win_* parallel arrays); `LRow` tiles its parts
+    side-by-side (a `:vsplit`), `LCol` stacks them top-to-bottom (a `:split`).
+    A single full-screen window is just `LWin(0)` — the default before any split.""")
 enum Layout
     LWin(id: Int)
     LRow(parts: [Layout])
     LCol(parts: [Layout])
-
 @intent("""Total size weight of every leaf window under `lay`, summed from the
-per-window `weights` array (indexed by winid; missing ids count as 100).  Used
-to divide a split's space in proportion to its children.""")
+    per-window `weights` array (indexed by winid; missing ids count as 100).  Used
+    to divide a split's space in proportion to its children.""")
 fn subtree_weight(lay: Layout, weights: [Int]) -> Int
     match lay
-        LWin(id) =>
-            if id >= 0 and id < list.len(weights) then weights[id] else 100
+        LWin(id)    =>
+            if id >= 0 and id < list.len(weights)
+                weights[id]
+            else
+                100
         LRow(parts) =>
             var s = 0
             var i = 0
@@ -53,17 +53,16 @@ fn subtree_weight(lay: Layout, weights: [Int]) -> Int
                 s = s + subtree_weight(parts[i], weights)
                 i = i + 1
             s
-
 @intent("""Compute the cell rectangle of every leaf window under `lay`, given
-the screen rect `r`.  Returns a flat [Int] of 5-tuples (winid, x, y, w, h) —
-flat so it sidesteps [[Int]] / struct-list return shapes.  `LRow` divides width
-in proportion to each child's WIDTH weight (`ww`), `LCol` divides height in
-proportion to HEIGHT weight (`hw`); the last child absorbs the rounding
-remainder.  All-equal weights (the default 100) recover even division, so a
-single full-screen window stays byte-identical.""")
+    the screen rect `r`.  Returns a flat [Int] of 5-tuples (winid, x, y, w, h) —
+    flat so it sidesteps [[Int]] / struct-list return shapes.  `LRow` divides width
+    in proportion to each child's WIDTH weight (`ww`), `LCol` divides height in
+    proportion to HEIGHT weight (`hw`); the last child absorbs the rounding
+    remainder.  All-equal weights (the default 100) recover even division, so a
+    single full-screen window stays byte-identical.""")
 fn layout_rects(lay: Layout, r: Rect, ww: [Int], hw: [Int], acc: [Int]) -> [Int]
     match lay
-        LWin(id) =>
+        LWin(id)    =>
             var a = acc
             a = list.push(a, id)
             a = list.push(a, r.x)
@@ -88,7 +87,10 @@ fn layout_rects(lay: Layout, r: Rect, ww: [Int], hw: [Int], acc: [Int]) -> [Int]
             while i < n
                 let x0 = r.x + r.w * accw / total
                 accw = accw + subtree_weight(parts[i], ww)
-                let x1 = if i == n - 1 then r.x + r.w else r.x + r.w * accw / total
+                let x1 = if i == n - 1
+                    r.x + r.w
+                else
+                    r.x + r.w * accw / total
                 a = layout_rects(parts[i], Rect { x: x0, y: r.y, w: x1 - x0, h: r.h }, ww, hw, a)
                 i = i + 1
             a
@@ -109,14 +111,16 @@ fn layout_rects(lay: Layout, r: Rect, ww: [Int], hw: [Int], acc: [Int]) -> [Int]
             while i < n
                 let y0 = r.y + r.h * acch / total
                 acch = acch + subtree_weight(parts[i], hw)
-                let y1 = if i == n - 1 then r.y + r.h else r.y + r.h * acch / total
+                let y1 = if i == n - 1
+                    r.y + r.h
+                else
+                    r.y + r.h * acch / total
                 a = layout_rects(parts[i], Rect { x: r.x, y: y0, w: r.w, h: y1 - y0 }, ww, hw, a)
                 i = i + 1
             a
-
 @intent("""The cell rect of window `winid` within `lay` over `screen`, via
-layout_rects.  Falls back to the whole screen if the id isn't present (so a
-stale active-window id can never produce an empty draw rect).""")
+    layout_rects.  Falls back to the whole screen if the id isn't present (so a
+    stale active-window id can never produce an empty draw rect).""")
 fn window_rect(lay: Layout, winid: Int, screen: Rect, ww: [Int], hw: [Int]) -> Rect
     let rects = layout_rects(lay, screen, ww, hw, [])
     var i = 0
@@ -126,15 +130,14 @@ fn window_rect(lay: Layout, winid: Int, screen: Rect, ww: [Int], hw: [Int]) -> R
             return Rect { x: rects[i + 1], y: rects[i + 2], w: rects[i + 3], h: rects[i + 4] }
         i = i + 5
     screen
-
 @intent("""Split the leaf window `winid` into a pair (the old window plus a new
-`newid`), `vertical` → side-by-side LRow (`:vsplit`), else stacked LCol
-(`:split`).  Recurses the tree rebuilding each LRow/LCol so the split lands at
-the right leaf regardless of nesting.  Adjacent same-orientation splits nest
-rather than flatten into one row/column.""")
+    `newid`), `vertical` → side-by-side LRow (`:vsplit`), else stacked LCol
+    (`:split`).  Recurses the tree rebuilding each LRow/LCol so the split lands at
+    the right leaf regardless of nesting.  Adjacent same-orientation splits nest
+    rather than flatten into one row/column.""")
 fn layout_split(lay: Layout, winid: Int, newid: Int, vertical: Bool) -> Layout
     match lay
-        LWin(id) =>
+        LWin(id)    =>
             if id == winid
                 if vertical
                     LRow([LWin(id), LWin(newid)])
@@ -160,7 +163,7 @@ fn layout_split(lay: Layout, winid: Int, newid: Int, vertical: Bool) -> Layout
 @intent("""Number of leaf windows in the layout tree.""")
 fn layout_count(lay: Layout) -> Int
     match lay
-        LWin(id) => 1
+        LWin(id)    => 1
         LRow(parts) =>
             var n = 0
             var i = 0
@@ -175,13 +178,12 @@ fn layout_count(lay: Layout) -> Int
                 n = n + layout_count(parts[i])
                 i = i + 1
             n
-
 @intent("""The ordered list of leaf window ids, left-to-right / top-to-bottom as
-they appear in the tree.  Used for `Ctrl-W w` focus cycling (next id after the
-active one, wrapping) and to pick a survivor after a close.""")
+    they appear in the tree.  Used for `Ctrl-W w` focus cycling (next id after the
+    active one, wrapping) and to pick a survivor after a close.""")
 fn layout_winids(lay: Layout, acc: [Int]) -> [Int]
     match lay
-        LWin(id) => list.push(acc, id)
+        LWin(id)    => list.push(acc, id)
         LRow(parts) =>
             var a = acc
             var i = 0
@@ -196,9 +198,8 @@ fn layout_winids(lay: Layout, acc: [Int]) -> [Int]
                 a = layout_winids(parts[i], a)
                 i = i + 1
             a
-
 @intent("""The next window id after `awin` in tree order, wrapping — the target
-for `Ctrl-W w`.  Returns `awin` unchanged when there is only one window.""")
+    for `Ctrl-W w`.  Returns `awin` unchanged when there is only one window.""")
 fn win_cycle_next(lay: Layout, awin: Int) -> Int
     let ids = layout_winids(lay, [])
     let nw = list.len(ids)
@@ -211,12 +212,11 @@ fn win_cycle_next(lay: Layout, awin: Int) -> Int
             pos = k
         k = k + 1
     ids[(pos + 1) % nw]
-
 @intent("""The window to move focus to from `awin` in a direction (`Ctrl-W h/j/k/l`):
-dir 0=left 1=down 2=up 3=right.  Scans the computed rects for the nearest window
-that lies in that direction AND overlaps the active window on the perpendicular
-axis, by gap distance.  Returns `awin` unchanged when there is no window that
-way (edge of the layout).""")
+    dir 0=left 1=down 2=up 3=right.  Scans the computed rects for the nearest window
+    that lies in that direction AND overlaps the active window on the perpendicular
+    axis, by gap distance.  Returns `awin` unchanged when there is no window that
+    way (edge of the layout).""")
 fn window_in_dir(lay: Layout, awin: Int, screen: Rect, dir: Int, ww: [Int], hw: [Int]) -> Int
     let rects = layout_rects(lay, screen, ww, hw, [])
     var ax = 0
@@ -245,18 +245,18 @@ fn window_in_dir(lay: Layout, awin: Int, screen: Rect, dir: Int, ww: [Int], hw: 
         let hoverlap = wx < ax + aw and wx + ww > ax
         let indir = if dir == 0
             wx + ww <= ax and voverlap
-        elif dir == 3
+        else if dir == 3
             wx >= ax + aw and voverlap
-        elif dir == 2
+        else if dir == 2
             wy + wh <= ay and hoverlap
         else
             wy >= ay + ah and hoverlap
         if wid != awin and indir
             let d = if dir == 0
                 ax - (wx + ww)
-            elif dir == 3
+            else if dir == 3
                 wx - (ax + aw)
-            elif dir == 2
+            else if dir == 2
                 ay - (wy + wh)
             else
                 wy - (ay + ah)
@@ -265,9 +265,8 @@ fn window_in_dir(lay: Layout, awin: Int, screen: Rect, dir: Int, ww: [Int], hw: 
                 best = wid
         j = j + 5
     best
-
 @intent("""The id of the leaf window whose rect contains the cell (px, py), or
--1 if none.  Used to route a mouse click to the window under the pointer.""")
+    -1 if none.  Used to route a mouse click to the window under the pointer.""")
 fn window_at(lay: Layout, screen: Rect, ww: [Int], hw: [Int], px: Int, py: Int) -> Int
     let rects = layout_rects(lay, screen, ww, hw, [])
     var i = 0
@@ -280,17 +279,19 @@ fn window_at(lay: Layout, screen: Rect, ww: [Int], hw: [Int], px: Int, py: Int) 
             return rects[i]
         i = i + 5
     0 - 1
-
 @intent("""Remove window `winid` from the tree, returning a 0-or-1 element list
-(the surviving subtree, or empty if `winid` was the whole tree).  An LRow/LCol
-that loses a child and is left with exactly one collapses to that child (no
-empty or single-child rows linger).  Returns a LIST so a removed leaf yields
-`[]` and the parent flattens — relies on the perceus empty-vec-singleton fix
-(closed/llvm-recursive-fn-returning-list-of-recursive-enum-segfault).""")
+    (the surviving subtree, or empty if `winid` was the whole tree).  An LRow/LCol
+    that loses a child and is left with exactly one collapses to that child (no
+    empty or single-child rows linger).  Returns a LIST so a removed leaf yields
+    `[]` and the parent flattens — relies on the perceus empty-vec-singleton fix
+    (closed/llvm-recursive-fn-returning-list-of-recursive-enum-segfault).""")
 fn layout_remove(lay: Layout, winid: Int) -> [Layout]
     match lay
-        LWin(id) =>
-            if id == winid then [] else [LWin(id)]
+        LWin(id)    =>
+            if id == winid
+                []
+            else
+                [LWin(id)]
         LRow(parts) =>
             var np: [Layout] = []
             var i = 0
@@ -299,7 +300,7 @@ fn layout_remove(lay: Layout, winid: Int) -> [Layout]
                 i = i + 1
             if list.len(np) == 0
                 []
-            elif list.len(np) == 1
+            else if list.len(np) == 1
                 [np[0]]
             else
                 [LRow(np)]
@@ -311,7 +312,7 @@ fn layout_remove(lay: Layout, winid: Int) -> [Layout]
                 i = i + 1
             if list.len(np) == 0
                 []
-            elif list.len(np) == 1
+            else if list.len(np) == 1
                 [np[0]]
             else
                 [LCol(np)]
