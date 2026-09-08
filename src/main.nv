@@ -4928,7 +4928,7 @@ fn term_rows() -> Int [io]
 
 fn term_cols() -> Int [io]
     let packed = novo_pty_get_winsize_h()
-    let c = bits.band(packed, 65535)
+    let c = packed & 65535
     if c > 0 then c else 80
 
 // Drain the rest of a CSI/SS3 escape sequence (after the leading `ESC [` or
