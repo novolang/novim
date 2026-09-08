@@ -7,7 +7,7 @@
 @intent("Index of the first occurrence of byte `b` in `s`, or -1 if absent.")
 fn index_of_byte(s: Str, b: Int) -> Int
     let n = str.len(s)
-    var i = 0
+    let mut i = 0
     while i < n
         if (str.byte_at(s, i) ?? 0) == b
             return i
@@ -30,7 +30,7 @@ fn index_of_str(s: Str, needle: Str) -> Int
     let m = str.len(needle)
     if m == 0
         return 0
-    var i = 0
+    let mut i = 0
     while i + m <= n
         var j = 0
         var ok = true
@@ -47,7 +47,7 @@ fn index_of_str(s: Str, needle: Str) -> Int
 fn set_at<T>(xs: [T], idx: Int, v: T) -> [T]
     var out: [T] = []
     let n = list.len(xs)
-    var i = 0
+    let mut i = 0
     while i < n
         if i == idx
             out = list.append(out, [v])
@@ -94,7 +94,7 @@ fn remove_at_bool(xs: [Bool], idx: Int) -> [Bool]
 // Strip a surrounding pair of double quotes from a TOML scalar.
 fn strip_quotes(s: Str) -> Str
     let n = str.len(s)
-    if n >= 2 and (str.byte_at(s, 0) ?? 0) == 34 and (str.byte_at(s, n - 1) ?? 0) == 34
+    if n >= 2 and (str.byte_at(s, 0) ?? 0) == '"' and (str.byte_at(s, n - 1) ?? 0) == '"'
         str.slice(s, 1, n - 1)
     else
         s
@@ -107,9 +107,9 @@ fn strip_inline_comment(s: Str) -> Str
     var inq = false
     while i < n
         let b = str.byte_at(s, i) ?? 0
-        if b == 34
+        if b == '"'
             inq = not inq
-        else if b == 35 and not inq
+        elif b == 35 and (not inq)
             return str.slice(s, 0, i)
         i = i + 1
     s
@@ -118,23 +118,20 @@ fn strip_inline_comment(s: Str) -> Str
 // it isn't an integer.
 fn parse_color_val(s: Str) -> Int
     match str.to_int(str.trim(strip_quotes(str.trim(s))))
-        None    => 0 - 1
+        None => 0 - 1
         Some(v) => v
 
 // Resolve a colour index, falling back to `dflt` when unset (-1).
 fn cs_or(v: Int, dflt: Int) -> Int
-    if v >= 0
-        v
-    else
-        dflt
+    if v >= 0 then v else dflt
 
 // Byte class for word motions and command-delimiter detection: 0 = whitespace
 // (space / tab), 1 = word byte (alphanumeric or `_`), 2 = punctuation.  Shared
 // by main.nv's word motions and excmd.nv's `:s` / `:g` delimiter checks.
 fn char_class_of(c: Int) -> Int
-    if c == 32 or c == 9
+    if c == ' ' or c == '\t'
         0
-    else if c >= 48 and c <= 57 or c >= 65 and c <= 90 or c >= 97 and c <= 122 or c == 95
+    elif (c >= 48 and c <= 57) or (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or c == 95
         1
     else
         2
@@ -145,7 +142,7 @@ fn basename_of(p: Str) -> Str
     var i = 0
     let n = str.len(p)
     while i < n
-        if (str.byte_at(p, i) ?? 0) == 47
+        if (str.byte_at(p, i) ?? 0) == '/'
             last = i + 1
         i = i + 1
     str.slice(p, last, n)

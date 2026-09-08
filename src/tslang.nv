@@ -18,7 +18,7 @@
 // mapping and the native tokenizer should handle it).
 fn ts_ext_of(p: Str) -> Str
     let e = path.ext(p)
-    if str.len(e) >= 1 and (str.byte_at(e, 0) ?? 0) == 46
+    if str.len(e) >= 1 and (str.byte_at(e, 0) ?? 0) == '.'
         str.slice(e, 1, str.len(e))
     else
         e
@@ -27,15 +27,15 @@ fn ts_lang_of(p: Str) -> Str
     let ext = ts_ext_of(p)
     if ext == "nv"
         "novo"
-    else if ext == "md" or ext == "markdown"
+    elif ext == "md" or ext == "markdown"
         "markdown"
-    else if ext == "c" or ext == "h"
+    elif ext == "c" or ext == "h"
         "c"
-    else if ext == "toml"
+    elif ext == "toml"
         "toml"
-    else if ext == "py"
+    elif ext == "py"
         "python"
-    else if ext == "ll"
+    elif ext == "ll"
         "llvm"
     else
         ""
@@ -69,11 +69,11 @@ fn ts_search_paths(cfg: Str) -> [Str] [io]
             i = i + 1
         out
     else
-        [path.join(home, ".novo/lib"),
+        [ path.join(home, ".novo/lib"),
           path.join(home, ".local/share/nvim/lazy/nvim-treesitter/parser"),
           path.join(home, ".local/share/nvim/site/pack/packer/start/nvim-treesitter/parser"),
           "/usr/local/lib/nvim/parser",
-          "/usr/lib/nvim/parser"]
+          "/usr/lib/nvim/parser" ]
 
 fn ts_expand_home(p: Str, home: Str) -> Str
     if str.starts_with(p, "~/") and str.len(home) > 0
@@ -144,11 +144,11 @@ fn ts_cfg_list(cfg: Str, key: Str) -> [Str]
     let n = list.len(lines)
     while i < n
         let raw = str.trim(lines[i])
-        if str.len(raw) > 0 and (str.byte_at(raw, 0) ?? 0) != 35
-            if (str.byte_at(raw, 0) ?? 0) == 91
+        if str.len(raw) > 0 and (str.byte_at(raw, 0) ?? 0) != '#'
+            if (str.byte_at(raw, 0) ?? 0) == '['
                 in_sec = raw == "[treesitter]"
-            else if in_sec
-                let eq = util.index_of_byte(raw, 61)
+            elif in_sec
+                let eq = util.index_of_byte(raw, '=')
                 if eq > 0 and str.trim(str.slice(raw, 0, eq)) == key
                     acc = str.slice(raw, eq + 1, str.len(raw))
         i = i + 1
@@ -164,11 +164,11 @@ fn ts_cfg_str(cfg: Str, lang: Str, key: Str) -> Str
     let n = list.len(lines)
     while i < n
         let raw = str.trim(lines[i])
-        if str.len(raw) > 0 and (str.byte_at(raw, 0) ?? 0) != 35
-            if (str.byte_at(raw, 0) ?? 0) == 91
+        if str.len(raw) > 0 and (str.byte_at(raw, 0) ?? 0) != '#'
+            if (str.byte_at(raw, 0) ?? 0) == '['
                 in_sec = raw == want
-            else if in_sec
-                let eq = util.index_of_byte(raw, 61)
+            elif in_sec
+                let eq = util.index_of_byte(raw, '=')
                 if eq > 0 and str.trim(str.slice(raw, 0, eq)) == key
                     let items = ts_quoted_items(str.slice(raw, eq + 1, str.len(raw)))
                     if list.len(items) > 0
@@ -185,14 +185,14 @@ fn ts_quoted_items(s: Str) -> [Str]
     let n = str.len(s)
     while i < n
         let b = str.byte_at(s, i) ?? 0
-        if b == 34
+        if b == '"'
             if inq
                 out = list.push(out, cur)
                 cur = ""
                 inq = false
             else
                 inq = true
-        else if inq
+        elif inq
             cur = cur + str.slice(s, i, i + 1)
         i = i + 1
     out

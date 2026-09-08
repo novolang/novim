@@ -9,8 +9,8 @@ fn lsp_write_fd(fd: Int, s: Str) [io]
     let _ = proc.write(fd, s)
 
 fn lsp_send(fd: Int, body: Str) [io]
-    let cr = str.from_char(13)
-    let lf = str.from_char(10)
+    let cr = str.from_char('\r')
+    let lf = str.from_char('\n')
     lsp_write_fd(fd, "Content-Length: " + str.from_int(str.len(body)) + cr + lf + cr + lf)
     lsp_write_fd(fd, body)
 
@@ -22,11 +22,11 @@ fn lsp_content_length(hdr: Str) -> Int
         return 0
     var i = at + str.len(key)
     let n = str.len(hdr)
-    while i < n and (str.byte_at(hdr, i) ?? 0) == 32   // skip spaces
+    while i < n and (str.byte_at(hdr, i) ?? 0) == ' '          // skip spaces
         i = i + 1
     var v = 0
-    while i < n and (str.byte_at(hdr, i) ?? 0) >= 48 and (str.byte_at(hdr, i) ?? 0) <= 57
-        v = v * 10 + ((str.byte_at(hdr, i) ?? 0) - 48)
+    while i < n and (str.byte_at(hdr, i) ?? 0) >= '0' and (str.byte_at(hdr, i) ?? 0) <= '9'
+        v = v * 10 + ((str.byte_at(hdr, i) ?? 0) - '0')
         i = i + 1
     v
 
@@ -58,14 +58,14 @@ fn lsp_read_message(fd: Int) -> Str [io]
     let hbuf = IoBuf.sized(1, 4096)
     var out = ""
     match s.read_until(hbuf, bytes.from_str("\r\n\r\n"))
-        Err(_)  =>
+        Err(_) =>
             out = ""
         Ok(hdr) =>
             let clen = lsp_content_length(bytes.to_str(hdr))
             if clen > 0
                 let bbuf = IoBuf.sized(clen, clen)
                 match s.read_exact(bbuf, clen)
-                    Err(_)   =>
+                    Err(_) =>
                         out = ""
                     Ok(body) =>
                         out = bytes.to_str(body)
@@ -89,21 +89,21 @@ fn json_escape(s: Str) -> Str
     let n = str.len(s)
     while i < n
         let b = str.byte_at(s, i) ?? 0
-        if b == 34
-            str.builder_append_char(sb, 92)
-            str.builder_append_char(sb, 34)
-        else if b == 92
-            str.builder_append_char(sb, 92)
-            str.builder_append_char(sb, 92)
-        else if b == 10
-            str.builder_append_char(sb, 92)
-            str.builder_append_char(sb, 110)
-        else if b == 13
-            str.builder_append_char(sb, 92)
-            str.builder_append_char(sb, 114)
-        else if b == 9
-            str.builder_append_char(sb, 92)
-            str.builder_append_char(sb, 116)
+        if b == '"'
+            str.builder_append_char(sb, '\\')
+            str.builder_append_char(sb, '"')
+        elif b == '\\'
+            str.builder_append_char(sb, '\\')
+            str.builder_append_char(sb, '\\')
+        elif b == '\n'
+            str.builder_append_char(sb, '\\')
+            str.builder_append_char(sb, 'n')
+        elif b == '\r'
+            str.builder_append_char(sb, '\\')
+            str.builder_append_char(sb, 'r')
+        elif b == '\t'
+            str.builder_append_char(sb, '\\')
+            str.builder_append_char(sb, 't')
         else
             str.builder_append_char(sb, b)
         i = i + 1
@@ -112,7 +112,7 @@ fn json_escape(s: Str) -> Str
     out
 
 fn lsp_q(s: Str) -> Str
-    str.from_char(34) + s + str.from_char(34)
+    str.from_char('"') + s + str.from_char('"')
 
 // ── Multi-language server resolution ─────────────────────────────────────────
 // novim drives ONE language server per session, chosen from the active file's
@@ -128,15 +128,15 @@ fn lsp_q(s: Str) -> Str
 // space-separated `roots` list (project-root marker files/dirs).  Built only
 // inside this module; callers reach it through the flat string helpers below.
 struct LspSpec
-    cmd: Str
+    cmd:      Str
     language: Str
-    roots: Str
+    roots:    Str
 
 // The file's extension WITHOUT the leading dot ("" if none); `path.ext`
 // returns ".rs", we want "rs".
 fn lsp_ext_of(p: Str) -> Str
     let e = path.ext(p)
-    if str.len(e) >= 1 and (str.byte_at(e, 0) ?? 0) == 46
+    if str.len(e) >= 1 and (str.byte_at(e, 0) ?? 0) == '.'
         str.slice(e, 1, str.len(e))
     else
         e
@@ -147,35 +147,27 @@ fn lsp_ext_of(p: Str) -> Str
 fn lsp_default_for(ext: Str) -> LspSpec
     if ext == "nv"
         LspSpec { cmd: "novols", language: "novo", roots: "" }
-    else if ext == "rs"
+    elif ext == "rs"
         LspSpec { cmd: "rust-analyzer", language: "rust", roots: "Cargo.toml .git" }
-    else if ext == "go"
+    elif ext == "go"
         LspSpec { cmd: "gopls", language: "go", roots: "go.mod go.work .git" }
-    else if ext == "py"
-        LspSpec { cmd: "pyright-langserver --stdio",
-            language: "python",
-            roots: "pyproject.toml setup.py setup.cfg requirements.txt .git" }
-    else if ext == "c" or ext == "h"
+    elif ext == "py"
+        LspSpec { cmd: "pyright-langserver --stdio", language: "python", roots: "pyproject.toml setup.py setup.cfg requirements.txt .git" }
+    elif ext == "c" or ext == "h"
         LspSpec { cmd: "clangd", language: "c", roots: "compile_commands.json .clangd .git" }
-    else if ext == "cpp" or ext == "cc" or ext == "cxx" or ext == "hpp" or ext == "hh"
+    elif ext == "cpp" or ext == "cc" or ext == "cxx" or ext == "hpp" or ext == "hh"
         LspSpec { cmd: "clangd", language: "cpp", roots: "compile_commands.json .clangd .git" }
-    else if ext == "ts" or ext == "tsx"
-        LspSpec { cmd: "typescript-language-server --stdio",
-            language: "typescript",
-            roots: "tsconfig.json package.json .git" }
-    else if ext == "js" or ext == "jsx" or ext == "mjs" or ext == "cjs"
-        LspSpec { cmd: "typescript-language-server --stdio",
-            language: "javascript",
-            roots: "package.json .git" }
-    else if ext == "lua"
-        LspSpec { cmd: "lua-language-server",
-            language: "lua",
-            roots: ".luarc.json .luarc.jsonc .git" }
-    else if ext == "json"
+    elif ext == "ts" or ext == "tsx"
+        LspSpec { cmd: "typescript-language-server --stdio", language: "typescript", roots: "tsconfig.json package.json .git" }
+    elif ext == "js" or ext == "jsx" or ext == "mjs" or ext == "cjs"
+        LspSpec { cmd: "typescript-language-server --stdio", language: "javascript", roots: "package.json .git" }
+    elif ext == "lua"
+        LspSpec { cmd: "lua-language-server", language: "lua", roots: ".luarc.json .luarc.jsonc .git" }
+    elif ext == "json"
         LspSpec { cmd: "vscode-json-language-server --stdio", language: "json", roots: ".git" }
-    else if ext == "md" or ext == "markdown"
+    elif ext == "md" or ext == "markdown"
         LspSpec { cmd: "marksman server", language: "markdown", roots: ".marksman.toml .git" }
-    else if ext == "toml"
+    elif ext == "toml"
         LspSpec { cmd: "taplo lsp stdio", language: "toml", roots: ".taplo.toml taplo.toml .git" }
     else
         // No entry for `.ll` (LLVM IR): there is no established LLVM IR
@@ -200,11 +192,11 @@ fn lsp_cmd_override(cfg: Str, language: Str) -> Str
     let n = list.len(lines)
     while i < n
         let raw = str.trim(lines[i])
-        if str.len(raw) > 0 and (str.byte_at(raw, 0) ?? 0) != 35
-            if (str.byte_at(raw, 0) ?? 0) == 91
+        if str.len(raw) > 0 and (str.byte_at(raw, 0) ?? 0) != '#'
+            if (str.byte_at(raw, 0) ?? 0) == '['
                 in_sec = raw == "[lsp]"
-            else if in_sec
-                let eq = util.index_of_byte(raw, 61)
+            elif in_sec
+                let eq = util.index_of_byte(raw, '=')
                 if eq > 0
                     let key = str.trim(str.slice(raw, 0, eq))
                     if key == language
@@ -217,10 +209,7 @@ fn lsp_cmd_override(cfg: Str, language: Str) -> Str
 fn lsp_cmd_for(p: Str, cfg: Str) -> Str
     let spec = lsp_default_for(lsp_ext_of(p))
     let ov = lsp_cmd_override(cfg, spec.language)
-    if str.len(ov) > 0
-        ov
-    else
-        spec.cmd
+    if str.len(ov) > 0 then ov else spec.cmd
 
 // Walk up from `path`'s directory; the first ancestor that contains any of the
 // space-separated `markers` is the project root.  Falls back to the file's own
@@ -250,10 +239,7 @@ fn lsp_root_uri_for(p: Str) -> Str [fs]
     if str.len(spec.roots) == 0
         return ""
     let root = lsp_find_root(p, spec.roots)
-    if str.len(root) == 0
-        ""
-    else
-        "file://" + root
+    if str.len(root) == 0 then "" else "file://" + root
 
 // Spawn the server named by a command line (argv split on spaces); returns its
 // pid, or -1 on empty command / spawn failure.
@@ -268,7 +254,7 @@ fn lsp_spawn_cmd(cmd: Str) -> Int [io]
     if list.len(argv) == 0
         return 0 - 1
     match proc.spawn(argv)
-        None      => 0 - 1
+        None => 0 - 1
         Some(pid) => pid
 
 // Request / notification builders.
@@ -278,10 +264,7 @@ fn lsp_spawn_cmd(cmd: Str) -> Int [io]
 // the novols frame stays byte-for-byte unchanged).  Community servers
 // (rust-analyzer / gopls / …) need a real rootUri to load their project model.
 fn lsp_init_req(uri: Str, root_uri: Str) -> Str
-    let root = if str.len(root_uri) == 0
-        "null"
-    else
-        lsp_q(root_uri)
+    let root = if str.len(root_uri) == 0 then "null" else lsp_q(root_uri)
     "{" + lsp_q("jsonrpc") + ":" + lsp_q("2.0") + "," + lsp_q("id") + ":1," + lsp_q("method") + ":" + lsp_q("initialize") + "," + lsp_q("params") + ":{" + lsp_q("processId") + ":null," + lsp_q("rootUri") + ":" + root + "," + lsp_q("capabilities") + ":{}}}"
 
 fn lsp_initialized() -> Str
@@ -298,11 +281,11 @@ fn lsp_didclose(uri: Str) -> Str
 // Diagnostic's start line (range.start.line), or -1.
 fn lsp_diag_line(d: JsonValueH) -> Int
     match json.get(d, "range")
-        None      => 0 - 1
+        None => 0 - 1
         Some(rng) =>
             match json.get(rng, "start")
-                None     => 0 - 1
-                Some(st) => json.get_int(st, "line") ?? 0 - 1
+                None => 0 - 1
+                Some(st) => json.get_int(st, "line") ?? (0 - 1)
 
 // If `doc` is a publishDiagnostics notification, print its diagnostics and
 // return true; otherwise return false.  Flattens the nesting that the parser
@@ -319,11 +302,10 @@ fn lsp_print_diags(doc: JsonValueH) -> Bool [io]
     if (json.get_str(doc, "method") ?? "") != "textDocument/publishDiagnostics"
         return false
     match json.get(doc, "params")
-        None         =>
-            return false
+        None => return false
         Some(params) =>
             match json.get_list(params, "diagnostics")
-                None     => println("diagnostics: 0")
+                None => println("diagnostics: 0")
                 Some(ds) => lsp_print_diag_list(ds)
     return true
 
@@ -333,8 +315,7 @@ fn lsp_msg_diags(msg: Str) -> Bool [io]
     if str.len(msg) == 0
         return false
     match json.parse(msg)
-        None      =>
-            return false
+        None => return false
         Some(doc) =>
             // NB: `return lsp_print_diags(doc)` directly miscompiles on LLVM —
             // the match-subject drop is emitted before the call, so `doc` is a
@@ -351,7 +332,7 @@ fn lsp_didchange(uri: Str, version: Int, text: Str) -> Str
 // notification/response).
 fn lsp_is_diag(msg: Str) -> Bool
     match json.parse(msg)
-        None      => false
+        None => false
         Some(doc) =>
             let mth = json.get_str(doc, "method") ?? ""
             mth == "textDocument/publishDiagnostics"
@@ -375,18 +356,18 @@ fn lsp_ci_ds(ds: [JsonValueH]) -> [Int]
 
 fn lsp_ci_params(params: JsonValueH) -> [Int]
     match json.get_list(params, "diagnostics")
-        None     => []
+        None => []
         Some(ds) => lsp_ci_ds(ds)
 
 fn lsp_ci_doc(doc: JsonValueH) -> [Int]
     match json.get(doc, "params")
-        None         => []
+        None => []
         Some(params) => lsp_ci_params(params)
 
 // Flat [line, sev, line, sev, …] for the current document's diagnostics.
 fn lsp_collect_diag_ints(msg: Str) -> [Int]
     match json.parse(msg)
-        None      => []
+        None => []
         Some(doc) => lsp_ci_doc(doc)
 
 fn lsp_cm_ds(ds: [JsonValueH]) -> [Str]
@@ -399,18 +380,18 @@ fn lsp_cm_ds(ds: [JsonValueH]) -> [Str]
 
 fn lsp_cm_params(params: JsonValueH) -> [Str]
     match json.get_list(params, "diagnostics")
-        None     => []
+        None => []
         Some(ds) => lsp_cm_ds(ds)
 
 fn lsp_cm_doc(doc: JsonValueH) -> [Str]
     match json.get(doc, "params")
-        None         => []
+        None => []
         Some(params) => lsp_cm_params(params)
 
 // Per-diagnostic messages, index-aligned with `lsp_collect_diag_ints` pairs.
 fn lsp_collect_diag_msgs(msg: Str) -> [Str]
     match json.parse(msg)
-        None      => []
+        None => []
         Some(doc) => lsp_cm_doc(doc)
 
 // The `params.uri` of a publishDiagnostics notification (which document the
@@ -422,12 +403,12 @@ fn lsp_du_params(params: JsonValueH) -> Str
 
 fn lsp_du_doc(doc: JsonValueH) -> Str
     match json.get(doc, "params")
-        None         => ""
+        None => ""
         Some(params) => lsp_du_params(params)
 
 fn lsp_diag_uri(msg: Str) -> Str
     match json.parse(msg)
-        None      => ""
+        None => ""
         Some(doc) => lsp_du_doc(doc)
 
 //
@@ -438,8 +419,8 @@ fn lsp_pos_req(id: Int, method: Str, uri: Str, line: Int, char: Int) -> Str
 // The JSON-RPC `id` of a message, or -1 for a notification (no id).
 fn lsp_msg_id(msg: Str) -> Int
     match json.parse(msg)
-        None      => 0 - 1
-        Some(doc) => json.get_int(doc, "id") ?? 0 - 1
+        None => 0 - 1
+        Some(doc) => json.get_int(doc, "id") ?? (0 - 1)
 
 // Bounded pump: read framed messages until the response with `want_id` arrives
 // or the deadline (iters × 50 ms) lapses.  Returns the matching body, or "".
@@ -457,13 +438,13 @@ fn lsp_pump(out_fd: Int, want_id: Int, iters: Int) -> Str [io, time]
 
 fn lsp_loc_pos(loc: JsonValueH) -> [Int]
     match json.get(loc, "range")
-        None      => []
+        None => []
         Some(rng) =>
             match json.get(rng, "start")
-                None     => []
+                None => []
                 Some(st) =>
-                    let ln = json.get_int(st, "line") ?? 0 - 1
-                    let ch = json.get_int(st, "character") ?? 0 - 1
+                    let ln = json.get_int(st, "line") ?? (0 - 1)
+                    let ch = json.get_int(st, "character") ?? (0 - 1)
                     [ln, ch]
 
 fn lsp_loc_uri(loc: JsonValueH) -> Str
@@ -471,68 +452,62 @@ fn lsp_loc_uri(loc: JsonValueH) -> Str
 
 fn lsp_def_pos_obj(doc: JsonValueH) -> [Int]
     match json.get(doc, "result")
-        None      => []
+        None => []
         Some(loc) => lsp_loc_pos(loc)
 
 fn lsp_def_pos_arr(locs: [JsonValueH]) -> [Int]
-    if list.len(locs) == 0
-        []
-    else
-        lsp_loc_pos(locs[0])
+    if list.len(locs) == 0 then [] else lsp_loc_pos(locs[0])
 
 fn lsp_def_pos_doc(doc: JsonValueH) -> [Int]
     match json.get_list(doc, "result")
-        None       => lsp_def_pos_obj(doc)
+        None => lsp_def_pos_obj(doc)
         Some(locs) => lsp_def_pos_arr(locs)
 
 // [line, character] of the definition target, or [] when there is none.
 fn lsp_def_pos(msg: Str) -> [Int]
     match json.parse(msg)
-        None      => []
+        None => []
         Some(doc) => lsp_def_pos_doc(doc)
 
 fn lsp_def_uri_obj(doc: JsonValueH) -> Str
     match json.get(doc, "result")
-        None      => ""
+        None => ""
         Some(loc) => lsp_loc_uri(loc)
 
 fn lsp_def_uri_arr(locs: [JsonValueH]) -> Str
-    if list.len(locs) == 0
-        ""
-    else
-        lsp_loc_uri(locs[0])
+    if list.len(locs) == 0 then "" else lsp_loc_uri(locs[0])
 
 fn lsp_def_uri_doc(doc: JsonValueH) -> Str
     match json.get_list(doc, "result")
-        None       => lsp_def_uri_obj(doc)
+        None => lsp_def_uri_obj(doc)
         Some(locs) => lsp_def_uri_arr(locs)
 
 // The definition target's document URI, or "".
 fn lsp_def_uri(msg: Str) -> Str
     match json.parse(msg)
-        None      => ""
+        None => ""
         Some(doc) => lsp_def_uri_doc(doc)
 
 fn lsp_hover_of_result(res: JsonValueH) -> Str
     match json.get(res, "contents")
-        None       => ""
+        None => ""
         Some(cont) =>
             let v = json.get_str(cont, "value") ?? ""
             v
 
 fn lsp_hover_doc(doc: JsonValueH) -> Str
     match json.get(doc, "result")
-        None      => ""
+        None => ""
         Some(res) => lsp_hover_of_result(res)
 
 fn lsp_hover_text(msg: Str) -> Str
     match json.parse(msg)
-        None      => ""
+        None => ""
         Some(doc) => lsp_hover_doc(doc)
 
 // True when `s` opens a markdown code fence (```).
 fn starts_with_fence(s: Str) -> Bool
-    str.len(s) >= 3 and (str.byte_at(s, 0) ?? 0) == 96 and (str.byte_at(s, 1) ?? 0) == 96 and (str.byte_at(s, 2) ?? 0) == 96
+    str.len(s) >= 3 and (str.byte_at(s, 0) ?? 0) == '`' and (str.byte_at(s, 1) ?? 0) == '`' and (str.byte_at(s, 2) ?? 0) == '`'
 
 // First meaningful line of a hover markdown blob (skipping ``` fences and
 // blank lines) — the one line that fits the status bar.
@@ -544,7 +519,7 @@ fn hover_oneline(s: Str) -> Str
     var done = false
     while i < n and not done
         let b = str.byte_at(s, i) ?? 0
-        if b == 10
+        if b == '\n'
             if str.len(line) > 0 and not starts_with_fence(line)
                 out = line
                 done = true
@@ -564,15 +539,12 @@ fn lsp_formatting_req(id: Int, uri: Str, tabsize: Int) -> Str
 // this just takes the first edit's newText.)
 fn lsp_fmt_newtext_doc(doc: JsonValueH) -> Str
     match json.get_list(doc, "result")
-        None        => ""
-        Some(edits) => if list.len(edits) > 0
-            json.get_str(edits[0], "newText") ?? ""
-        else
-            ""
+        None => ""
+        Some(edits) => if list.len(edits) > 0 then (json.get_str(edits[0], "newText") ?? "") else ""
 
 fn lsp_fmt_newtext(msg: Str) -> Str
     match json.parse(msg)
-        None      => ""
+        None => ""
         Some(doc) => lsp_fmt_newtext_doc(doc)
 
 fn lsp_documentsymbol_req(id: Int, uri: Str) -> Str
@@ -581,7 +553,7 @@ fn lsp_documentsymbol_req(id: Int, uri: Str) -> Str
 // [line, character] of a Range node's start, or [].
 fn range_start_pos(rng: JsonValueH) -> [Int]
     match json.get(rng, "start")
-        None     => []
+        None => []
         Some(st) =>
             let ln = json.get_int(st, "line") ?? 0
             let ch = json.get_int(st, "character") ?? 0
@@ -590,7 +562,7 @@ fn range_start_pos(rng: JsonValueH) -> [Int]
 // A symbol's name location ([line, char]) from selectionRange (the name span).
 fn lsp_sym_pos_of(s: JsonValueH) -> [Int]
     match json.get(s, "selectionRange")
-        None     => []
+        None => []
         Some(sr) => range_start_pos(sr)
 
 // Parallel name + position stores for the document's top-level symbols.  (The
@@ -606,12 +578,12 @@ fn lsp_sym_names_arr(syms: [JsonValueH]) -> [Str]
 
 fn lsp_sym_names_doc(doc: JsonValueH) -> [Str]
     match json.get_list(doc, "result")
-        None       => []
+        None => []
         Some(syms) => lsp_sym_names_arr(syms)
 
 fn lsp_sym_names(msg: Str) -> [Str]
     match json.parse(msg)
-        None      => []
+        None => []
         Some(doc) => lsp_sym_names_doc(doc)
 
 fn lsp_sym_pos_arr(syms: [JsonValueH]) -> [Int]
@@ -630,13 +602,13 @@ fn lsp_sym_pos_arr(syms: [JsonValueH]) -> [Int]
 
 fn lsp_sym_pos_doc(doc: JsonValueH) -> [Int]
     match json.get_list(doc, "result")
-        None       => []
+        None => []
         Some(syms) => lsp_sym_pos_arr(syms)
 
 // Flat [line0, char0, line1, char1, …] index-aligned with `lsp_sym_names`.
 fn lsp_sym_pos(msg: Str) -> [Int]
     match json.parse(msg)
-        None      => []
+        None => []
         Some(doc) => lsp_sym_pos_doc(doc)
 
 fn lsp_rename_req(id: Int, uri: Str, line: Int, char: Int, newname: Str) -> Str
@@ -645,20 +617,17 @@ fn lsp_rename_req(id: Int, uri: Str, line: Int, char: Int, newname: Str) -> Str
 // The end character of a Range node (rename edits are single-line).
 fn range_end_char(rng: JsonValueH) -> Int
     match json.get(rng, "end")
-        None     => 0 - 1
-        Some(en) => json.get_int(en, "character") ?? 0 - 1
+        None => 0 - 1
+        Some(en) => json.get_int(en, "character") ?? (0 - 1)
 
 // [line, start_char, end_char] of a single TextEdit, or [].
 fn lsp_edit_triple(e: JsonValueH) -> [Int]
     match json.get(e, "range")
-        None      => []
+        None => []
         Some(rng) =>
             let sp = range_start_pos(rng)
             let ec = range_end_char(rng)
-            if list.len(sp) >= 2 and ec >= 0
-                [sp[0], sp[1], ec]
-            else
-                []
+            if list.len(sp) >= 2 and ec >= 0 then [sp[0], sp[1], ec] else []
 
 // WorkspaceEdit `changes` is an object keyed by URI; a local rename has a
 // single key (this file).  Take that key's TextEdit array.  (Multi-file
@@ -680,23 +649,23 @@ fn lsp_rename_triples_changes(changes: JsonValueH) -> [Int]
     if list.len(ks) == 0
         return []
     match json.get_list(changes, ks[0])
-        None        => []
+        None => []
         Some(edits) => lsp_rename_triples_arr(edits)
 
 fn lsp_rename_triples_res(res: JsonValueH) -> [Int]
     match json.get(res, "changes")
-        None          => []
+        None => []
         Some(changes) => lsp_rename_triples_changes(changes)
 
 fn lsp_rename_triples_doc(doc: JsonValueH) -> [Int]
     match json.get(doc, "result")
-        None      => []
+        None => []
         Some(res) => lsp_rename_triples_res(res)
 
 // Flat [line, schar, echar, …] for every rename edit, ascending source order.
 fn lsp_rename_triples(msg: Str) -> [Int]
     match json.parse(msg)
-        None      => []
+        None => []
         Some(doc) => lsp_rename_triples_doc(doc)
 
 fn lsp_rename_newtexts_arr(edits: [JsonValueH]) -> [Str]
@@ -712,23 +681,23 @@ fn lsp_rename_newtexts_changes(changes: JsonValueH) -> [Str]
     if list.len(ks) == 0
         return []
     match json.get_list(changes, ks[0])
-        None        => []
+        None => []
         Some(edits) => lsp_rename_newtexts_arr(edits)
 
 fn lsp_rename_newtexts_res(res: JsonValueH) -> [Str]
     match json.get(res, "changes")
-        None          => []
+        None => []
         Some(changes) => lsp_rename_newtexts_changes(changes)
 
 fn lsp_rename_newtexts_doc(doc: JsonValueH) -> [Str]
     match json.get(doc, "result")
-        None      => []
+        None => []
         Some(res) => lsp_rename_newtexts_res(res)
 
 // Replacement text per edit, index-aligned with `lsp_rename_triples`.
 fn lsp_rename_newtexts(msg: Str) -> [Str]
     match json.parse(msg)
-        None      => []
+        None => []
         Some(doc) => lsp_rename_newtexts_doc(doc)
 
 fn lsp_completion_req(id: Int, uri: Str, line: Int, char: Int) -> Str
@@ -744,17 +713,17 @@ fn lsp_comp_labels_arr(items: [JsonValueH]) -> [Str]
 
 fn lsp_comp_labels_res(res: JsonValueH) -> [Str]
     match json.get_list(res, "items")
-        None        => []
+        None => []
         Some(items) => lsp_comp_labels_arr(items)
 
 fn lsp_comp_labels_doc(doc: JsonValueH) -> [Str]
     match json.get(doc, "result")
-        None      => []
+        None => []
         Some(res) => lsp_comp_labels_res(res)
 
 // Completion labels (novols returns a CompletionList; the client filters by the
 // typed prefix — see the driver's Ctrl-N handling).
 fn lsp_comp_labels(msg: Str) -> [Str]
     match json.parse(msg)
-        None      => []
+        None => []
         Some(doc) => lsp_comp_labels_doc(doc)
