@@ -14,18 +14,17 @@ use util
 struct ExResult
     quit: Bool
     save: Bool
-
 @intent("""Parse the text after `:` into quit/save signals: `w` save, `q`/`q!`
-quit, `wq`/`x` save+quit.  Returns an ExResult the driver acts on; commands it
-doesn't recognise are ignored here (richer Ex commands are dispatched before
-this fallback).""")
+    quit, `wq`/`x` save+quit.  Returns an ExResult the driver acts on; commands it
+    doesn't recognise are ignored here (richer Ex commands are dispatched before
+    this fallback).""")
 fn exec_ex(cmd: Str) -> ExResult
     let c = str.trim(cmd)
     if c == "w"
         ExResult { quit: false, save: true }
-    elif c == "q" or c == "q!"
+    else if c == "q" or c == "q!"
         ExResult { quit: true, save: false }
-    elif c == "wq" or c == "x" or c == "wq!"
+    else if c == "wq" or c == "x" or c == "wq!"
         ExResult { quit: true, save: true }
     else
         ExResult { quit: false, save: false }
@@ -44,9 +43,12 @@ fn subst_current_line(cmd: Str) -> Str
 fn is_substitute(cmd: Str) -> Bool
     let c = str.trim(cmd)
     let n = str.len(c)
-    let p = if n > 0 and (str.byte_at(c, 0) ?? 0) == '%' then 1 else 0   // optional %
-    if p < n and (str.byte_at(c, p) ?? 0) == 's' and p + 1 < n           // 's' + delimiter
-        util.char_class_of(str.byte_at(c, p + 1) ?? 0) == 2               // punctuation delim
+    let p = if n > 0 and (str.byte_at(c, 0) ?? 0) == '%'   // optional %
+        1
+    else
+        0
+    if p < n and (str.byte_at(c, p) ?? 0) == 's' and p + 1 < n   // 's' + delimiter
+        util.char_class_of(str.byte_at(c, p + 1) ?? 0) == 2   // punctuation delim
     else
         false
 
@@ -75,7 +77,7 @@ fn is_goto(cmd: Str) -> Bool
 // `.+N` / `.-N`.  Ranges and the visual `'<,'>` form are a follow-on.
 
 fn is_alpha_byte(b: Int) -> Bool
-    (b >= 'a' and b <= 'z') or (b >= 'A' and b <= 'Z')
+    b >= 'a' and b <= 'z' or b >= 'A' and b <= 'Z'
 
 // Parse a run of decimal digits at the start of `s` into an Int (0 if none).
 fn parse_uint(s: Str) -> Int
@@ -91,7 +93,7 @@ fn parse_uint(s: Str) -> Int
 // leading alpha word must be exactly a move/copy alias AND be followed by an
 // address (so `:colo gruvbox` / `:copy` without an address don't match).
 fn move_kind(cmd: Str) -> Int
-    let c = range_body(cmd)                // tolerate a leading range (:2,5m$, :'<,'>t0)
+    let c = range_body(cmd)   // tolerate a leading range (:2,5m$, :'<,'>t0)
     let n = str.len(c)
     if n == 0
         return 0
@@ -102,7 +104,7 @@ fn move_kind(cmd: Str) -> Int
     var kind = 0
     if word == "m" or word == "mo" or word == "mov" or word == "move"
         kind = 1
-    elif word == "t" or word == "co" or word == "cop" or word == "copy"
+    else if word == "t" or word == "co" or word == "cop" or word == "copy"
         kind = 2
     if kind == 0
         return 0
@@ -110,10 +112,13 @@ fn move_kind(cmd: Str) -> Int
     while j < n and (str.byte_at(c, j) ?? 0) == ' '
         j = j + 1
     if j >= n
-        return 0                       // ":m" with no address — not handled
+        return 0   // ":m" with no address — not handled
     let a0 = str.byte_at(c, j) ?? 0
-    let okaddr = (a0 >= '0' and a0 <= '9') or a0 == '$' or a0 == '.' or a0 == '+' or a0 == '-'
-    if okaddr then kind else 0
+    let okaddr = a0 >= '0' and a0 <= '9' or a0 == '$' or a0 == '.' or a0 == '+' or a0 == '-'
+    if okaddr
+        kind
+    else
+        0
 
 // Resolve a `:move`/`:copy` address to a 0-based "place AFTER this line index"
 // (-1 = before the first line, nlines-1 = after the last).  Relative forms are
@@ -134,19 +139,22 @@ fn move_addr(cmd: Str, cur: Int, nlines: Int) -> Int
         return nlines - 1
     let b0 = str.byte_at(a, 0) ?? 0
     if b0 == '0' and m == 1
-        return 0 - 1                   // ":m 0" → before the first line
+        return 0 - 1   // ":m 0" → before the first line
     if b0 == '.' or b0 == '+' or b0 == '-'
-        let rest = if b0 == '.' then str.slice(a, 1, m) else a
+        let rest = if b0 == '.'
+            str.slice(a, 1, m)
+        else
+            a
         if str.len(rest) == 0
-            return cur                 // bare "." → current line
+            return cur   // bare "." → current line
         let s0 = str.byte_at(rest, 0) ?? 0
         if s0 == '+'
             return cur + parse_uint(str.slice(rest, 1, str.len(rest)))
-        elif s0 == '-'
+        else if s0 == '-'
             return cur - parse_uint(str.slice(rest, 1, str.len(rest)))
         else
             return cur
-    parse_uint(a) - 1                  // absolute N (1-indexed) → after index N-1
+    parse_uint(a) - 1   // absolute N (1-indexed) → after index N-1
 
 // `:fmt` / `:format` — reformat the buffer via the language server.
 fn is_fmt(cmd: Str) -> Bool
@@ -160,10 +168,10 @@ fn is_fmt(cmd: Str) -> Bool
 // The visual `'<,'>` form needs a `:`-from-visual entry and is a follow-on.
 
 struct RangeSpec
-    lo:   Int
-    hi:   Int
+    lo: Int
+    hi: Int
     body: Str
-    has:  Bool
+    has: Bool
 
 fn range_spec(lo: Int, hi: Int, body: Str, has: Bool) -> RangeSpec
     RangeSpec { lo: lo, hi: hi, body: body, has: has }
@@ -184,28 +192,28 @@ fn addr_parse(s: Str, start: Int, vlo: Int, vhi: Int, cur: Int, nlines: Int) -> 
         while i < n and (str.byte_at(s, i) ?? 0) >= '0' and (str.byte_at(s, i) ?? 0) <= '9'
             v = v * 10 + ((str.byte_at(s, i) ?? 0) - '0')
             i = i + 1
-        base = v - 1                       // 1-indexed source → 0-based
+        base = v - 1   // 1-indexed source → 0-based
         found = true
-    elif b == '.'
+    else if b == '.'
         base = cur
         i = i + 1
         found = true
-    elif b == '$'
+    else if b == '$'
         base = nlines - 1
         i = i + 1
         found = true
-    elif b == 39 and i + 1 < n             // 39 = `'` — a mark: '< / '>
+    else if b == 39 and i + 1 < n   // 39 = `'` — a mark: '< / '>
         let m = str.byte_at(s, i + 1) ?? 0
         if m == '<'
             base = vlo
             i = i + 2
             found = true
-        elif m == '>'
+        else if m == '>'
             base = vhi
             i = i + 2
             found = true
-    elif b == '+' or b == '-'
-        base = cur                         // bare +K / -K is relative to current
+    else if b == '+' or b == '-'
+        base = cur   // bare +K / -K is relative to current
         found = true
     if not found
         return [0, 0, start]
@@ -219,7 +227,7 @@ fn addr_parse(s: Str, start: Int, vlo: Int, vhi: Int, cur: Int, nlines: Int) -> 
                 k = k * 10 + ((str.byte_at(s, i) ?? 0) - '0')
                 i = i + 1
             if k == 0
-                k = 1                      // bare `+`/`-` means ±1
+                k = 1   // bare `+`/`-` means ±1
             if c == '+'
                 base = base + k
             else
@@ -249,7 +257,7 @@ fn parse_range(cmd: Str, vlo: Int, vhi: Int, cur: Int, nlines: Int) -> RangeSpec
         if a2[0] == 1
             hi = a2[1]
             i = a2[2]
-    if lo > hi                              // `:5,2` → swap
+    if lo > hi   // `:5,2` → swap
         let t = lo
         lo = hi
         hi = t
@@ -310,7 +318,10 @@ fn is_files(cmd: Str) -> Bool
 fn files_query(cmd: Str) -> Str
     let c = str.trim(cmd)
     let sp = util.index_of_byte(c, ' ')
-    if sp < 0 then "" else str.trim(str.slice(c, sp + 1, str.len(c)))
+    if sp < 0
+        ""
+    else
+        str.trim(str.slice(c, sp + 1, str.len(c)))
 
 // `:grep [query]` / `:livegrep [query]` — the live-grep picker (rg --vimgrep,
 // re-spawned as the prompt changes).  The argument is shared with files_query.
@@ -341,7 +352,10 @@ fn is_pins(cmd: Str) -> Bool
 fn pin_slot_arg(cmd: Str) -> Int
     let c = str.trim(cmd)
     let sp = util.index_of_byte(c, ' ')
-    if sp < 0 then 0 else parse_uint(str.trim(str.slice(c, sp + 1, str.len(c))))
+    if sp < 0
+        0
+    else
+        parse_uint(str.trim(str.slice(c, sp + 1, str.len(c))))
 
 // `:>` / `:<` (optionally ranged, repeatable `:>>`) — shift lines right/left.
 // Returns +N for N indent levels, -N for N dedent levels, 0 for neither.
@@ -355,20 +369,26 @@ fn shift_amount(cmd: Str) -> Int
         return 0
     var i = 0
     while i < n
-        if (str.byte_at(c, i) ?? 0) != b0     // must be a uniform run of > or <
+        if (str.byte_at(c, i) ?? 0) != b0   // must be a uniform run of > or <
             return 0
         i = i + 1
-    if b0 == '>' then n else 0 - n
+    if b0 == '>'
+        n
+    else
+        0 - n
 
 // `:sort[!] [flags]` — sort the buffer's lines.  `!` reverses (descending);
 // `u` removes duplicate lines; `n` sorts by the first number on each line; `i`
 // sorts case-insensitively.  Flag letters follow a space (`:sort n`) or pack
 // after `!` (`:sort!u`).  `n`+`i` combine; `u` dedups by the active key.
 fn is_sort(cmd: Str) -> Bool
-    let c = range_body(cmd)                // tolerate a leading range (:%sort, :2,4sort)
+    let c = range_body(cmd)   // tolerate a leading range (:%sort, :2,4sort)
     if str.starts_with(c, "sort")
         let rest = str.slice(c, 4, str.len(c))
-        let r0 = if str.len(rest) > 0 then str.byte_at(rest, 0) ?? 0 else 0
+        let r0 = if str.len(rest) > 0
+            str.byte_at(rest, 0) ?? 0
+        else
+            0
         str.len(rest) == 0 or r0 == '!' or r0 == ' '   // reject "sorted" etc.
     else
         false
@@ -388,11 +408,11 @@ fn sort_flags(cmd: Str) -> [Int]
         let b = str.byte_at(rest, i) ?? 0
         if b == '!'
             rev = 1
-        elif b == 'u'
+        else if b == 'u'
             uniq = 1
-        elif b == 'n'
+        else if b == 'n'
             num = 1
-        elif b == 'i'
+        else if b == 'i'
             ic = 1
         i = i + 1
     [rev, uniq, num, ic]
@@ -406,31 +426,49 @@ fn is_noh(cmd: Str) -> Bool
 // `:sym <name>` — jump to a document symbol whose name contains <name>.
 fn is_sym(cmd: Str) -> Bool
     let c = str.trim(cmd)
-    c == "sym" or (str.len(c) > 4 and str.slice(c, 0, 4) == "sym ")
+    c == "sym" or str.len(c) > 4 and str.slice(c, 0, 4) == "sym "
 
 // The query fragment after `:sym` (trimmed; "" jumps to the first symbol).
 fn sym_query(cmd: Str) -> Str
     let c = str.trim(cmd)
-    if str.len(c) <= 4 then "" else str.trim(str.slice(c, 4, str.len(c)))
+    if str.len(c) <= 4
+        ""
+    else
+        str.trim(str.slice(c, 4, str.len(c)))
 
 // `:e <file>` / `:edit <file>` (with optional `!` to discard unsaved changes).
 fn is_edit_cmd(cmd: Str) -> Bool
     let c = str.trim(cmd)
-    let h2 = if str.len(c) >= 2 then str.slice(c, 0, 2) else ""
-    let h3 = if str.len(c) >= 3 then str.slice(c, 0, 3) else ""
-    let h5 = if str.len(c) >= 5 then str.slice(c, 0, 5) else ""
-    let h6 = if str.len(c) >= 6 then str.slice(c, 0, 6) else ""
+    let h2 = if str.len(c) >= 2
+        str.slice(c, 0, 2)
+    else
+        ""
+    let h3 = if str.len(c) >= 3
+        str.slice(c, 0, 3)
+    else
+        ""
+    let h5 = if str.len(c) >= 5
+        str.slice(c, 0, 5)
+    else
+        ""
+    let h6 = if str.len(c) >= 6
+        str.slice(c, 0, 6)
+    else
+        ""
     h2 == "e " or h3 == "e! " or h5 == "edit " or h6 == "edit! "
 
 fn edit_cmd_bang(cmd: Str) -> Bool
     let c = str.trim(cmd)
-    util.index_of_byte(c, '!') >= 0          // contains '!'
+    util.index_of_byte(c, '!') >= 0   // contains '!'
 
 // The path after `:e`/`:edit` (and optional `!`), trimmed.
 fn edit_cmd_path(cmd: Str) -> Str
     let c = str.trim(cmd)
-    let sp = util.index_of_byte(c, ' ')      // first space
-    if sp < 0 then "" else str.trim(str.slice(c, sp + 1, str.len(c)))
+    let sp = util.index_of_byte(c, ' ')   // first space
+    if sp < 0
+        ""
+    else
+        str.trim(str.slice(c, sp + 1, str.len(c)))
 
 // Bare `:e`/`:e!`/`:edit`/`:edit!` (no filename) — reload the current file from
 // disk (`!` discards unsaved changes).
@@ -456,13 +494,13 @@ fn is_only(cmd: Str) -> Bool
 // `:colorscheme <name>` / `:colo <name>` — switch the active colourscheme.
 fn is_colorscheme(cmd: Str) -> Bool
     let c = str.trim(cmd)
-    (str.len(c) >= 12 and str.slice(c, 0, 12) == "colorscheme ") or (str.len(c) >= 5 and str.slice(c, 0, 5) == "colo ")
+    str.len(c) >= 12 and str.slice(c, 0, 12) == "colorscheme " or str.len(c) >= 5 and str.slice(c, 0, 5) == "colo "
 
 fn colorscheme_arg(cmd: Str) -> Str
     let c = str.trim(cmd)
     if str.len(c) >= 12 and str.slice(c, 0, 12) == "colorscheme "
         str.trim(str.slice(c, 12, str.len(c)))
-    elif str.len(c) >= 5 and str.slice(c, 0, 5) == "colo "
+    else if str.len(c) >= 5 and str.slice(c, 0, 5) == "colo "
         str.trim(str.slice(c, 5, str.len(c)))
     else
         ""
@@ -478,7 +516,10 @@ fn is_winclose(cmd: Str) -> Bool
 fn cmd_arg(cmd: Str) -> Str
     let c = str.trim(cmd)
     let sp = util.index_of_byte(c, ' ')
-    if sp < 0 then "" else str.trim(str.slice(c, sp + 1, str.len(c)))
+    if sp < 0
+        ""
+    else
+        str.trim(str.slice(c, sp + 1, str.len(c)))
 
 // `:bufdo <subcmd>` — run a substitution across every buffer (applies the
 // given `:s` / `:%s` to each in turn).
@@ -496,7 +537,22 @@ fn is_badd(cmd: Str) -> Bool
 // 6 = :wnext (write+next), 7 = :wprev (write+prev).
 fn argcmd_kind(cmd: Str) -> Int
     let c = str.trim(cmd)
-    if c == "args" or c == "ar" then 1 elif c == "next" or c == "n" or c == "n!" or c == "next!" then 2 elif c == "prev" or c == "previous" or c == "N" or c == "Next" or c == "prev!" then 3 elif c == "first" or c == "rewind" or c == "fir" then 4 elif c == "last" or c == "la" then 5 elif c == "wn" or c == "wnext" then 6 elif c == "wN" or c == "wp" or c == "wprev" then 7 else 0
+    if c == "args" or c == "ar"
+        1
+    else if c == "next" or c == "n" or c == "n!" or c == "next!"
+        2
+    else if c == "prev" or c == "previous" or c == "N" or c == "Next" or c == "prev!"
+        3
+    else if c == "first" or c == "rewind" or c == "fir"
+        4
+    else if c == "last" or c == "la"
+        5
+    else if c == "wn" or c == "wnext"
+        6
+    else if c == "wN" or c == "wp" or c == "wprev"
+        7
+    else
+        0
 
 // Render the argument list with the current entry bracketed: `a [b] c`.
 fn arglist_str(args: [Str], cur: Int) -> Str
@@ -506,7 +562,10 @@ fn arglist_str(args: [Str], cur: Int) -> Str
         if i > 0
             s = s + " "
         let nm = util.basename_of(args[i])
-        s = if i == cur then s + "[" + nm + "]" else s + nm
+        s = if i == cur
+            s + "[" + nm + "]"
+        else
+            s + nm
         i = i + 1
     s
 
@@ -521,18 +580,38 @@ fn is_bufcmd(cmd: Str) -> Bool
 // 4 = quit all forced (`:qa!`/`:qall!`).
 fn writeall_kind(cmd: Str) -> Int
     let c = str.trim(cmd)
-    if c == "wa" or c == "wall" then 1 elif c == "wqa" or c == "wqall" or c == "xa" or c == "xall" then 2 elif c == "qa" or c == "qall" then 3 elif c == "qa!" or c == "qall!" then 4 else 0
+    if c == "wa" or c == "wall"
+        1
+    else if c == "wqa" or c == "wqall" or c == "xa" or c == "xall"
+        2
+    else if c == "qa" or c == "qall"
+        3
+    else if c == "qa!" or c == "qall!"
+        4
+    else
+        0
 
 // 0 = :ls, 1 = :bn (next), 2 = :bp (prev), 3 = :bd (close), 4 = :bfirst, 5 = :blast.
 fn bufcmd_kind(cmd: Str) -> Int
     let c = str.trim(cmd)
-    if c == "bn" or c == "bnext" then 1 elif c == "bp" or c == "bprev" or c == "bprevious" then 2 elif c == "bd" or c == "bdelete" then 3 elif c == "bf" or c == "bfirst" then 4 elif c == "bl" or c == "blast" then 5 else 0
+    if c == "bn" or c == "bnext"
+        1
+    else if c == "bp" or c == "bprev" or c == "bprevious"
+        2
+    else if c == "bd" or c == "bdelete"
+        3
+    else if c == "bf" or c == "bfirst"
+        4
+    else if c == "bl" or c == "blast"
+        5
+    else
+        0
 
 // `:b <n>` / `:buffer <n>` — switch to buffer number <n> (1-based); the
 // space-free `:b#` / `:buffer#` (alternate buffer) form is accepted too.
 fn is_bgoto(cmd: Str) -> Bool
     let c = str.trim(cmd)
-    (str.len(c) > 2 and str.slice(c, 0, 2) == "b ") or (str.len(c) > 7 and str.slice(c, 0, 7) == "buffer ") or c == "b#" or c == "buffer#"
+    str.len(c) > 2 and str.slice(c, 0, 2) == "b " or str.len(c) > 7 and str.slice(c, 0, 7) == "buffer " or c == "b#" or c == "buffer#"
 
 // The argument string after `:b`/`:buffer`, trimmed (`:b#` → "#").
 fn bgoto_arg(cmd: Str) -> Str
@@ -540,11 +619,14 @@ fn bgoto_arg(cmd: Str) -> Str
     if c == "b#" or c == "buffer#"
         return "#"
     let sp = util.index_of_byte(c, ' ')
-    if sp < 0 then "" else str.trim(str.slice(c, sp + 1, str.len(c)))
+    if sp < 0
+        ""
+    else
+        str.trim(str.slice(c, sp + 1, str.len(c)))
 
 // The 1-based buffer number from `:b <n>`, or -1 if the arg isn't a number.
 fn bgoto_target(cmd: Str) -> Int
-    str.to_int(bgoto_arg(cmd)) ?? (0 - 1)
+    str.to_int(bgoto_arg(cmd)) ?? 0 - 1
 
 // Index of the first buffer whose basename or path contains `name`, or -1.
 fn buf_find_by_name(paths: [Str], name: Str) -> Int
@@ -558,19 +640,31 @@ fn buf_find_by_name(paths: [Str], name: Str) -> Int
 // `:rename <newname>` — rename the symbol under the cursor across the file.
 fn is_rename(cmd: Str) -> Bool
     let c = str.trim(cmd)
-    c == "rename" or (str.len(c) > 7 and str.slice(c, 0, 7) == "rename ")
+    c == "rename" or str.len(c) > 7 and str.slice(c, 0, 7) == "rename "
 
 fn rename_query(cmd: Str) -> Str
     let c = str.trim(cmd)
-    if str.len(c) <= 7 then "" else str.trim(str.slice(c, 7, str.len(c)))
+    if str.len(c) <= 7
+        ""
+    else
+        str.trim(str.slice(c, 7, str.len(c)))
 
 // `:g/pat/d` (delete matching) / `:v/pat/d` / `:g!/pat/d` (delete non-matching).
 fn is_global(cmd: Str) -> Bool
     let c = str.trim(cmd)
     let n = str.len(c)
-    let c0 = if n > 0 then str.byte_at(c, 0) ?? 0 else 0
-    if n >= 2 and (c0 == 'g' or c0 == 'v')                    // g or v
-        let p = if c0 == 'g' and (str.byte_at(c, 1) ?? 0) == '!' then 2 else 1   // g!
-        if p < n then util.char_class_of(str.byte_at(c, p) ?? 0) == 2 else false
+    let c0 = if n > 0
+        str.byte_at(c, 0) ?? 0
+    else
+        0
+    if n >= 2 and (c0 == 'g' or c0 == 'v')   // g or v
+        let p = if c0 == 'g' and (str.byte_at(c, 1) ?? 0) == '!'   // g!
+            2
+        else
+            1
+        if p < n
+            util.char_class_of(str.byte_at(c, p) ?? 0) == 2
+        else
+            false
     else
         false

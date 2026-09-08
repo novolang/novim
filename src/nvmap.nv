@@ -14,15 +14,21 @@ use util
 // Result of scanning one token out of a Lua source string: the value, the index
 // just past it, and whether the scan matched at all.
 struct Scan
-    val:  Str
+    val: Str
     next: Int
-    ok:   Bool
+    ok: Bool
 
 fn nv_lower_byte(b: Int) -> Int
-    if b >= 'A' and b <= 'Z' then b + 32 else b
+    if b >= 'A' and b <= 'Z'
+        b + 32
+    else
+        b
 
 fn nv_upper_byte(b: Int) -> Int
-    if b >= 'a' and b <= 'z' then b - 32 else b
+    if b >= 'a' and b <= 'z'
+        b - 32
+    else
+        b
 
 fn nv_lower(s: Str) -> Str
     var o = ""
@@ -36,7 +42,22 @@ fn nv_lower(s: Str) -> Str
 // The control byte for `<C-x>`: ctrl-a=1 … ctrl-z=26, plus the `[ \ ] ^ _`
 // block (27-31); -1 when x has no control form.
 fn ctrl_byte(c: Int) -> Int
-    if c >= 'a' and c <= 'z' then c - 'a' + 1 elif c >= 'A' and c <= 'Z' then c - 'A' + 1 elif c == '[' then 27 elif c == '\\' then 28 elif c == ']' then 29 elif c == '^' then 30 elif c == '_' then 31 else 0 - 1
+    if c >= 'a' and c <= 'z'
+        c - 'a' + 1
+    else if c >= 'A' and c <= 'Z'
+        c - 'A' + 1
+    else if c == '['
+        27
+    else if c == '\\'
+        28
+    else if c == ']'
+        29
+    else if c == '^'
+        30
+    else if c == '_'
+        31
+    else
+        0 - 1
 
 // `\x00` (the unsupported-notation sentinel) as a one-char string.
 fn nul() -> Str
@@ -53,35 +74,41 @@ fn translate_token(tok: Str, leader: Str) -> Str
     let n = str.len(tok)
     if low == "leader"
         leader
-    elif low == "cr" or low == "enter" or low == "return"
+    else if low == "cr" or low == "enter" or low == "return"
         str.from_char('\r')
-    elif low == "esc"
+    else if low == "esc"
         str.from_char('\x1b')
-    elif low == "tab"
+    else if low == "tab"
         str.from_char('\t')
-    elif low == "bs"
+    else if low == "bs"
         str.from_char('\x7f')
-    elif low == "space"
+    else if low == "space"
         " "
-    elif low == "lt"
+    else if low == "lt"
         "<"
-    elif low == "bar"
+    else if low == "bar"
         "|"
-    elif low == "nop"
+    else if low == "nop"
         ""
-    elif n == 3 and (str.byte_at(low, 0) ?? 0) == 'c' and (str.byte_at(low, 1) ?? 0) == '-'
+    else if n == 3 and (str.byte_at(low, 0) ?? 0) == 'c' and (str.byte_at(low, 1) ?? 0) == '-'
         ctrl_str(str.byte_at(tok, 2) ?? 0)
-    elif n == 3 and (str.byte_at(low, 0) ?? 0) == 's' and (str.byte_at(low, 1) ?? 0) == '-'
+    else if n == 3 and (str.byte_at(low, 0) ?? 0) == 's' and (str.byte_at(low, 1) ?? 0) == '-'
         shift_str(str.byte_at(tok, 2) ?? 0)
     else
         nul()
 
 fn ctrl_str(c: Int) -> Str
     let b = ctrl_byte(c)
-    if b >= 0 then str.from_char(b) else nul()
+    if b >= 0
+        str.from_char(b)
+    else
+        nul()
 
 fn shift_str(c: Int) -> Str
-    if (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') then str.from_char(nv_upper_byte(c)) else nul()
+    if c >= 'a' and c <= 'z' or c >= 'A' and c <= 'Z'
+        str.from_char(nv_upper_byte(c))
+    else
+        nul()
 
 // Expand a vim key-notation string (an LHS or RHS) to raw bytes.  `<cmd>X<CR>`
 // becomes `:X<CR>`; `<Leader>`/`<C-x>`/`<CR>`/… expand per translate_token; plain
@@ -102,13 +129,19 @@ fn parse_notation(s: Str, leader: Str) -> Str
                 if nv_lower(tok) == "cmd"
                     // `<cmd>` … `<cr>`: the inner text is an Ex command → `:…\r`
                     let lt2 = util.index_of_byte_from(s, '<', close + 1)
-                    let gt2 = if lt2 < 0 then 0 - 1 else util.index_of_byte_from(s, '>', lt2 + 1)
-                    let tok2 = if gt2 < 0 then "" else nv_lower(str.slice(s, lt2 + 1, gt2))
+                    let gt2 = if lt2 < 0
+                        0 - 1
+                    else
+                        util.index_of_byte_from(s, '>', lt2 + 1)
+                    let tok2 = if gt2 < 0
+                        ""
+                    else
+                        nv_lower(str.slice(s, lt2 + 1, gt2))
                     if gt2 >= 0 and (tok2 == "cr" or tok2 == "enter" or tok2 == "return")
                         str.builder_append(sb, ":" + str.slice(s, close + 1, lt2) + str.from_char('\r'))
                         i = gt2 + 1
                     else
-                        str.builder_append(sb, nul())          // malformed <cmd> → drop the map
+                        str.builder_append(sb, nul())   // malformed <cmd> → drop the map
                         i = close + 1
                 else
                     str.builder_append(sb, translate_token(tok, leader))
@@ -142,9 +175,16 @@ fn read_dquote(s: Str, from: Int) -> Scan
         let b = str.byte_at(s, i) ?? 0
         if b == '\\' and i + 1 < n
             let nx = str.byte_at(s, i + 1) ?? 0
-            if nx == 'n' then str.builder_append_char(sb, '\n') elif nx == 'r' then str.builder_append_char(sb, '\r') elif nx == 't' then str.builder_append_char(sb, '\t') else str.builder_append_char(sb, nx)
+            if nx == 'n'
+                str.builder_append_char(sb, '\n')
+            else if nx == 'r'
+                str.builder_append_char(sb, '\r')
+            else if nx == 't'
+                str.builder_append_char(sb, '\t')
+            else
+                str.builder_append_char(sb, nx)
             i = i + 2
-        elif b == '"'
+        else if b == '"'
             done = true
             i = i + 1
         else
@@ -174,17 +214,28 @@ fn read_longbracket(s: Str, from: Int) -> Scan
 fn read_ident(s: Str, from: Int) -> Scan
     var i = from
     let n = str.len(s)
-    while i < n and (nv_ident_byte(str.byte_at(s, i) ?? 0))
+    while i < n and nv_ident_byte(str.byte_at(s, i) ?? 0)
         i = i + 1
     Scan { val: str.slice(s, from, i), next: i, ok: i > from }
 
 fn nv_ident_byte(b: Int) -> Bool
-    (b >= 'a' and b <= 'z') or (b >= 'A' and b <= 'Z') or (b >= '0' and b <= '9') or b == '_' or b == '.'
+    b >= 'a' and b <= 'z' or b >= 'A' and b <= 'Z' or b >= '0' and b <= '9' or b == '_' or b == '.'
 
 // Map a `vim.cmd.<name>` to the Ex command novim understands (write→w, quit→q,
 // etc.); other names pass through as `:<name>`.
 fn vimcmd_alias(name: Str) -> Str
-    if name == "write" then "w" elif name == "quit" then "q" elif name == "wq" then "wq" elif name == "wqall" then "wqa" elif name == "qall" then "qa" else name
+    if name == "write"
+        "w"
+    else if name == "quit"
+        "q"
+    else if name == "wq"
+        "wq"
+    else if name == "wqall"
+        "wqa"
+    else if name == "qall"
+        "qa"
+    else
+        name
 
 // The third `vim.keymap.set` argument starting at `from`: a quoted/long string is
 // its notation; `vim.cmd.X` / `vim.cmd("X")` becomes `:X\r`; anything else
@@ -195,14 +246,16 @@ fn read_rhs(s: Str, from: Int, leader: Str) -> Scan
     if b == '"'
         let q = read_dquote(s, i)
         Scan { val: parse_notation(q.val, leader), next: q.next, ok: q.ok }
-    elif b == '['
+    else if b == '['
         let q = read_longbracket(s, i)
         Scan { val: parse_notation(q.val, leader), next: q.next, ok: q.ok }
-    elif str_at_is(s, i, "vim.cmd.")
+    else if str_at_is(s, i, "vim.cmd.")
         let id = read_ident(s, i)
-        let name = str.slice(id.val, 8, str.len(id.val))      // drop "vim.cmd."
-        Scan { val: ":" + vimcmd_alias(name) + str.from_char('\r'), next: id.next, ok: str.len(name) > 0 }
-    elif str_at_is(s, i, "vim.cmd(")
+        let name = str.slice(id.val, 8, str.len(id.val))   // drop "vim.cmd."
+        Scan { val: ":" + vimcmd_alias(name) + str.from_char('\r'),
+            next: id.next,
+            ok: str.len(name) > 0 }
+    else if str_at_is(s, i, "vim.cmd(")
         let q = read_dquote(s, skip_ws(s, i + 8))
         Scan { val: ":" + q.val + str.from_char('\r'), next: q.next, ok: q.ok }
     else

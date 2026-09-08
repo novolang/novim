@@ -31,7 +31,10 @@ fn pad_num_l(n: Int, width: Int) -> Str
 
 // Decimal digit count of a non-negative Int (min 1).
 fn num_digits(n: Int) -> Int
-    var v = if n < 0 then 0 - n else n
+    var v = if n < 0
+        0 - n
+    else
+        n
     var d = 1
     while v >= 10
         v = v / 10
@@ -61,17 +64,17 @@ fn expand_tabs(s: Str, ts: Int) -> Str
     var out = ""
     var col = 0
     let n = str.len(s)
-    let mut i = 0
+    var i = 0
     while i < n
         let b = str.byte_at(s, i) ?? 0
         if b == '\t'
-            let nextstop = ((col / ts) + 1) * ts
+            let nextstop = (col / ts + 1) * ts
             while col < nextstop
                 out = out + " "
                 col = col + 1
         else
             out = out + str.from_char(b)
-            if not is_utf8_cont(b)               // count one column per character
+            if not is_utf8_cont(b)   // count one column per character
                 col = col + 1
         i = i + 1
     out
@@ -80,13 +83,16 @@ fn expand_tabs(s: Str, ts: Int) -> Str
 // to place the hardware cursor over the rendered (tab-expanded) text.
 fn vis_col(s: Str, cx: Int, ts: Int) -> Int
     var col = 0
-    let mut i = 0
-    let stop = if cx > str.len(s) then str.len(s) else cx
+    var i = 0
+    let stop = if cx > str.len(s)
+        str.len(s)
+    else
+        cx
     while i < stop
         let b = str.byte_at(s, i) ?? 0
         if b == '\t' and ts > 0
-            col = ((col / ts) + 1) * ts
-        elif not is_utf8_cont(b)               // UTF-8 continuation bytes add no column
+            col = (col / ts + 1) * ts
+        else if not is_utf8_cont(b)   // UTF-8 continuation bytes add no column
             col = col + 1
         i = i + 1
     col
@@ -95,7 +101,10 @@ fn vis_col(s: Str, cx: Int, ts: Int) -> Int
 // offset `left` so the cursor's visual column stays within a `width`-wide
 // text area.  No side margin (cursor sits at the very edge before scrolling).
 fn hscroll_to(left: Int, viscol: Int, width: Int) -> Int
-    let w = if width < 1 then 1 else width
+    let w = if width < 1
+        1
+    else
+        width
     var l = left
     if viscol < l
         l = viscol
@@ -118,10 +127,10 @@ fn byte_offset_of_line(lines: [Str], n: Int) -> Int
 // ── Novo tokenizer + per-column syntax colours ───────────────────────────────
 
 fn nv_ident_start(b: Int) -> Bool
-    (b >= 'a' and b <= 'z') or (b >= 'A' and b <= 'Z') or b == '_'
+    b >= 'a' and b <= 'z' or b >= 'A' and b <= 'Z' or b == '_'
 
 fn nv_ident_char(b: Int) -> Bool
-    nv_ident_start(b) or (b >= '0' and b <= '9')
+    nv_ident_start(b) or b >= '0' and b <= '9'
 
 fn nv_keyword(w: Str) -> Bool
     w == "fn" or w == "let" or w == "var" or w == "mut" or w == "if" or w == "elif" or w == "else" or w == "while" or w == "for" or w == "in" or w == "return" or w == "struct" or w == "enum" or w == "trait" or w == "impl" or w == "match" or w == "and" or w == "or" or w == "not" or w == "true" or w == "false" or w == "async" or w == "await" or w == "import" or w == "type" or w == "alias" or w == "break" or w == "continue" or w == "then" or w == "pub" or w == "as" or w == "None" or w == "Some"
@@ -191,7 +200,7 @@ fn effect_spans(s: Str, d: Int) -> [Int]
                         let nx = str.byte_at(s, j) ?? 0
                         if nx == ','
                             j = j + 1
-                        elif nx == ']'
+                        else if nx == ']'
                             done = true
                         else
                             ok = false
@@ -242,7 +251,7 @@ fn syntax_colors(s: Str, kw: Int, strc: Int, cmt: Int, num: Int, d: Int) -> [Int
             while i < n
                 col = list.append(col, [cmt])
                 i = i + 1
-        elif b == '"'                                                       // " string
+        else if b == '"'   // " string
             col = list.append(col, [strc])
             i = i + 1
             while i < n and (str.byte_at(s, i) ?? 0) != '"'
@@ -251,16 +260,19 @@ fn syntax_colors(s: Str, kw: Int, strc: Int, cmt: Int, num: Int, d: Int) -> [Int
             if i < n
                 col = list.append(col, [strc])
                 i = i + 1
-        elif nv_ident_start(b)                                              // identifier / keyword
+        else if nv_ident_start(b)   // identifier / keyword
             let start = i
             while i < n and nv_ident_char(str.byte_at(s, i) ?? 0)
                 i = i + 1
-            let c = if nv_keyword(str.slice(s, start, i)) then kw else 0
+            let c = if nv_keyword(str.slice(s, start, i))
+                kw
+            else
+                0
             var j = start
             while j < i
                 col = list.append(col, [c])
                 j = j + 1
-        elif b >= '0' and b <= '9'                                        // number
+        else if b >= '0' and b <= '9'   // number
             while i < n and ((str.byte_at(s, i) ?? 0) >= '0' and (str.byte_at(s, i) ?? 0) <= '9' or (str.byte_at(s, i) ?? 0) == '.' or (str.byte_at(s, i) ?? 0) == '_')
                 col = list.append(col, [num])
                 i = i + 1
@@ -278,19 +290,19 @@ fn syntax_colors(s: Str, kw: Int, strc: Int, cmt: Int, num: Int, d: Int) -> [Int
 fn ts_color_for_kind(kind: Int, cs: colorscheme.Colorscheme) -> Int
     if kind == 0
         util.cs_or(cs.kw_fg, 170)
-    elif kind == 1
+    else if kind == 1
         util.cs_or(cs.type_fg, 81)
-    elif kind == 2
+    else if kind == 2
         util.cs_or(cs.str_fg, 150)
-    elif kind == 3
+    else if kind == 3
         util.cs_or(cs.cmt_fg, 245)
-    elif kind == 4
+    else if kind == 4
         util.cs_or(cs.fn_fg, 78)
-    elif kind == 5
+    else if kind == 5
         util.cs_or(cs.num_fg, 215)
-    elif kind == 6
+    else if kind == 6
         util.cs_or(cs.const_fg, 215)
-    elif kind == 8
+    else if kind == 8
         util.cs_or(cs.mod_fg, 80)
     else
         0 - 1
@@ -300,7 +312,8 @@ fn ts_color_for_kind(kind: Int, cs: colorscheme.Colorscheme) -> Int
 // the line's byte offset; tabs expand to `tabstop` columns so the colours line
 // up with emit_line_styled's expanded view.  Later spans override earlier on
 // overlap.  Returns [] semantics-compatible with syntax_colors (0 = default).
-fn ts_line_syncols(spans: [Int], line_start: Int, raw: Str, tabstop: Int, cs: colorscheme.Colorscheme) -> [Int]
+fn ts_line_syncols(spans: [Int], line_start: Int, raw: Str, tabstop: Int,
+                   cs: colorscheme.Colorscheme) -> [Int]
     let rlen = str.len(raw)
     let line_end = line_start + rlen
     // line-local spans (filtered once): start, end (line-relative), colour
@@ -308,7 +321,8 @@ fn ts_line_syncols(spans: [Int], line_start: Int, raw: Str, tabstop: Int, cs: co
     var k = 0
     while k < list.len(spans)
         if spans[k + 1] > line_start and spans[k] < line_end
-            ls = list.append(ls, [spans[k] - line_start, spans[k + 1] - line_start, ts_color_for_kind(spans[k + 2], cs)])
+            ls = list.append(ls,
+                [spans[k] - line_start, spans[k + 1] - line_start, ts_color_for_kind(spans[k + 2], cs)])
         k = k + 3
     // Effect labels last, so they win over whatever the grammar called them.
     // Rule 4 says an effect carries its colour everywhere; a tree-sitter
@@ -327,7 +341,7 @@ fn ts_line_syncols(spans: [Int], line_start: Int, raw: Str, tabstop: Int, cs: co
             m = m + 3
         let ch = str.byte_at(raw, b) ?? 0
         if ch == '\t'
-            let w = tabstop - (vc % tabstop)
+            let w = tabstop - vc % tabstop
             var t = 0
             while t < w
                 cols = list.append(cols, [color])
