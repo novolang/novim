@@ -24,23 +24,23 @@
 // smoothness for the least repaint work per second of held key.
 fn frame_budget_ms() -> Int
     33
-
 @intent("""Whether a coalescing input loop must interrupt its drain and paint.
 
-Three inputs decide it.  `selection_moved` is the only reason to paint at all —
-a loop that has consumed input without changing what the screen would show has
-nothing to present.  `input_pending` separates the two ways a drain ends: with
-the queue empty the loop is about to fall out of the drain and paint anyway, so
-the budget is irrelevant and the answer is false; with input still queued the
-loop would otherwise keep coalescing, and the budget is the only thing that
-stops it doing so for as long as the key repeats.  The elapsed time is measured
-from the END of the previous frame, so a loop that is already keeping up (one
-frame per drained batch) is never asked to paint more often than it already
-does — the budget can only add frames a starved loop was not going to produce.
+    Three inputs decide it.  `selection_moved` is the only reason to paint at all —
+    a loop that has consumed input without changing what the screen would show has
+    nothing to present.  `input_pending` separates the two ways a drain ends: with
+    the queue empty the loop is about to fall out of the drain and paint anyway, so
+    the budget is irrelevant and the answer is false; with input still queued the
+    loop would otherwise keep coalescing, and the budget is the only thing that
+    stops it doing so for as long as the key repeats.  The elapsed time is measured
+    from the END of the previous frame, so a loop that is already keeping up (one
+    frame per drained batch) is never asked to paint more often than it already
+    does — the budget can only add frames a starved loop was not going to produce.
 
-`now_ms` and `last_render_ms` must come from the same monotonic clock;
-a wall-clock difference is not a duration.""")
-fn should_render(now_ms: Int, last_render_ms: Int, budget_ms: Int, input_pending: Bool, selection_moved: Bool) -> Bool
+    `now_ms` and `last_render_ms` must come from the same monotonic clock;
+    a wall-clock difference is not a duration.""")
+fn should_render(now_ms: Int, last_render_ms: Int, budget_ms: Int, input_pending: Bool,
+                 selection_moved: Bool) -> Bool
     if not selection_moved
         return false
     if not input_pending
