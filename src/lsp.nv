@@ -550,7 +550,7 @@ fn hover_oneline(s: Str) -> Str
                 done = true
             line = ""
         else
-            line = line + str.from_char(b)
+            line = line + str.from_byte(b)
         i = i + 1
     if not done and str.len(line) > 0 and not starts_with_fence(line)
         out = line

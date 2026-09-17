@@ -349,10 +349,10 @@ fn re_expand_repl(repl: Str, matched: Str, caps: [Int], line: Str) -> Str
                 if gs >= 0 and ge >= gs
                     out = out + str.slice(line, gs, ge)
             else
-                out = out + str.from_char(nx)
+                out = out + str.from_byte(nx)
             i = i + 2
         else
-            out = out + str.from_char(c)
+            out = out + str.from_byte(c)
             i = i + 1
     out
 
@@ -375,9 +375,9 @@ fn re_replace_line(atoms: [ReAtom], line: Str, repl: Str, global: Bool) -> Str
         else if e == i   // zero-width match
             out = out + re_expand_repl(repl, "", r.caps, line)
             did = true
-            out = out + str.from_char(str.byte_at(line, i) ?? 0)
+            out = out + str.from_byte(str.byte_at(line, i) ?? 0)
             i = i + 1
         else
-            out = out + str.from_char(str.byte_at(line, i) ?? 0)
+            out = out + str.from_byte(str.byte_at(line, i) ?? 0)
             i = i + 1
     out

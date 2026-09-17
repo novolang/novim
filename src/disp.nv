@@ -73,7 +73,7 @@ fn expand_tabs(s: Str, ts: Int) -> Str
                 out = out + " "
                 col = col + 1
         else
-            out = out + str.from_char(b)
+            out = out + str.from_byte(b)
             if not is_utf8_cont(b)   // count one column per character
                 col = col + 1
         i = i + 1

@@ -35,7 +35,7 @@ fn nv_lower(s: Str) -> Str
     var i = 0
     let n = str.len(s)
     while i < n
-        o = o + str.from_char(nv_lower_byte(str.byte_at(s, i) ?? 0))
+        o = o + str.from_byte(nv_lower_byte(str.byte_at(s, i) ?? 0))
         i = i + 1
     o
 
@@ -61,7 +61,7 @@ fn ctrl_byte(c: Int) -> Int
 
 // `\x00` (the unsupported-notation sentinel) as a one-char string.
 fn nul() -> Str
-    str.from_char('\x00')
+    str.from_byte('\x00')
 
 // True if `s` carries the unsupported-notation marker.
 fn has_nul(s: Str) -> Bool
@@ -77,11 +77,11 @@ fn translate_token(tok: Str, leader: Str) -> Str
     else if low == "cr" or low == "enter" or low == "return"
         str.from_char('\r')
     else if low == "esc"
-        str.from_char('\x1b')
+        str.from_byte('\x1b')
     else if low == "tab"
         str.from_char('\t')
     else if low == "bs"
-        str.from_char('\x7f')
+        str.from_byte('\x7f')
     else if low == "space"
         " "
     else if low == "lt"
@@ -100,13 +100,13 @@ fn translate_token(tok: Str, leader: Str) -> Str
 fn ctrl_str(c: Int) -> Str
     let b = ctrl_byte(c)
     if b >= 0
-        str.from_char(b)
+        str.from_byte(b)
     else
         nul()
 
 fn shift_str(c: Int) -> Str
     if c >= 'a' and c <= 'z' or c >= 'A' and c <= 'Z'
-        str.from_char(nv_upper_byte(c))
+        str.from_byte(nv_upper_byte(c))
     else
         nul()
 
