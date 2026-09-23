@@ -75,7 +75,7 @@ in **if/elif ladders** that should each delegate to a named fn:
 
 ## 3. Integer codes that should be enums / consts
 
-novim uses **no `enum`s in main.nv** even though the sibling `src/window.nv`
+novim uses **no `enum`s in main.nv** even though the sibling `src/wlayout.nv`
 already defines enums — the mode/pending model is entirely magic integers.
 
 - `src/main.nv:38` — `InputState.mode: Int` documented inline as
@@ -106,7 +106,7 @@ already defines enums — the mode/pending model is entirely magic integers.
 ## 4. Traits / generics opportunities
 
 Enums + generics are supported (used in `orbit/hal`, `orbit/novodb`, and this
-package's own `src/window.nv`), so these are actionable, not blocked.
+package's own `src/wlayout.nv`), so these are actionable, not blocked.
 
 - `src/util.nv:47`/`60`/`73` — `set_str_at` / `set_int_at` / `set_bool_at` are
   **byte-for-byte identical modulo the element type** (copy-with-one-element-

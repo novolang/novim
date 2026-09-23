@@ -14,7 +14,7 @@ use util
 use lsp
 use nvregex
 use ts
-use window
+use wlayout
 use colorscheme
 use disp
 use excmd
@@ -4632,7 +4632,7 @@ rows); for a single full-screen window (rx=ry=0) these reduce to absolute
 coordinates.  Does NOT touch cursor visibility or place the hardware cursor —
 the orchestrator (`render` / `render_all`) hides the cursor once, draws every
 window, then places it in the active window.""")
-fn draw_window(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: colorscheme.Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, clip: Bool, active: Bool, ts_spans: [Int], flash: Flash) [io]
+fn draw_window(ed: Editor, win: wlayout.Rect, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: colorscheme.Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, clip: Bool, active: Bool, ts_spans: [Int], flash: Flash) [io]
     let rows = win.h
     let cols = win.w
     let rx = win.x
@@ -4828,7 +4828,7 @@ fn draw_window(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mod
 offset by the window origin and the (recomputed) gutter width, wrap-aware.
 Split out of draw_window so a multi-window frame draws every window first,
 then homes the cursor in the focused one.""")
-fn place_cursor(ed: Editor, win: window.Rect, top: Int, left: Int, opts: Options) [io]
+fn place_cursor(ed: Editor, win: wlayout.Rect, top: Int, left: Int, opts: Options) [io]
     let rx = win.x
     let ry = win.y
     let cols = win.w
@@ -4854,7 +4854,7 @@ fn place_cursor(ed: Editor, win: window.Rect, top: Int, left: Int, opts: Options
 @intent("""Single-window frame: hide the cursor, draw the one window, place the
 cursor, restore it.  Byte-identical to the pre-split render — the interactive
 driver calls this whenever there is exactly one window.""")
-fn render(ed: Editor, win: window.Rect, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: colorscheme.Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, ts_spans: [Int], flash: Flash) [io]
+fn render(ed: Editor, win: wlayout.Rect, path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: colorscheme.Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, ts_spans: [Int], flash: Flash) [io]
     draw_window(ed, win, path, top, left, mode, avy, avx, search, cs, opts, diag_li, diag_msgs, info, modified, false, true, ts_spans, flash)
     place_cursor(ed, win, top, left, opts)
     cursor_shape(mode)   // block in normal/visual, bar in insert, underline in replace
@@ -4874,12 +4874,12 @@ The active window draws from the live ed cursor / top / left and the real mode
 (selection, INSERT, gd/K info); every other pane draws from its saved win_*
 cursor/viewport in plain NORMAL mode.  Diagnostics + the modified flag follow
 the live active buffer only.""")
-fn render_all(ed: Editor, lay: window.Layout, awin: Int, screen: window.Rect, win_cy: [Int], win_cx: [Int], win_top: [Int], win_left: [Int], win_buf: [Int], win_ww: [Int], win_hw: [Int], cur_buf: Int, bufs_text: [Str], bufs_path: [Str], path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: colorscheme.Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, ts_spans: [Int], flash: Flash) [io]
-    let rects = window.layout_rects(lay, screen, win_ww, win_hw, [])
+fn render_all(ed: Editor, lay: wlayout.Layout, awin: Int, screen: wlayout.Rect, win_cy: [Int], win_cx: [Int], win_top: [Int], win_left: [Int], win_buf: [Int], win_ww: [Int], win_hw: [Int], cur_buf: Int, bufs_text: [Str], bufs_path: [Str], path: Str, top: Int, left: Int, mode: Int, avy: Int, avx: Int, search: Str, cs: colorscheme.Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, ts_spans: [Int], flash: Flash) [io]
+    let rects = wlayout.layout_rects(lay, screen, win_ww, win_hw, [])
     var i = 0
     while i < list.len(rects)
         let wid = rects[i]
-        let wr = window.rect(rects[i + 1], rects[i + 2], rects[i + 3], rects[i + 4])
+        let wr = wlayout.rect(rects[i + 1], rects[i + 2], rects[i + 3], rects[i + 4])
         let isact = wid == awin
         let bi = win_buf[wid]
         let same = bi == cur_buf            // shows the live (active) buffer
@@ -4904,7 +4904,7 @@ fn render_all(ed: Editor, lay: window.Layout, awin: Int, screen: window.Rect, wi
         let wflash = if isact then flash else flash_none()   // flash only on the active window
         draw_window(view, wr, wpath, wtop, wleft, wmode, wavy, wavx, search, cs, opts, wdiag_li, wdiag_msgs, winfo, wmod, clip, isact, wts, wflash)
         i = i + 5
-    place_cursor(ed, window.window_rect(lay, awin, screen, win_ww, win_hw), top, left, opts)
+    place_cursor(ed, wlayout.window_rect(lay, awin, screen, win_ww, win_hw), top, left, opts)
     cursor_shape(mode)
 
 @intent("""Paint one frame, dispatching on window count: a single window keeps
@@ -4914,10 +4914,10 @@ named `frame` — that is a reserved word in Novo.)
 This is the BOTTOM layer only.  Callers open the frame (frame_begin) before it
 and close it (frame_end) after every overlay they intend to stack on top, so the
 terminal presents buffer and overlay as one image.""")
-fn paint_frame(ed: Editor, lay: window.Layout, awin: Int, cols: Int, rows: Int, win_cy: [Int], win_cx: [Int], win_top: [Int], win_left: [Int], win_buf: [Int], win_ww: [Int], win_hw: [Int], cur_buf: Int, bufs_text: [Str], bufs_path: [Str], path: Str, top: Int, left: Int, st: InputState, cs: colorscheme.Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, ts_spans: [Int], flash: Flash) [io]
-    let screen = window.rect(0, 0, cols, rows)
-    if window.layout_count(lay) == 1
-        render(ed, window.window_rect(lay, awin, screen, win_ww, win_hw), path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, info, modified, ts_spans, flash)
+fn paint_frame(ed: Editor, lay: wlayout.Layout, awin: Int, cols: Int, rows: Int, win_cy: [Int], win_cx: [Int], win_top: [Int], win_left: [Int], win_buf: [Int], win_ww: [Int], win_hw: [Int], cur_buf: Int, bufs_text: [Str], bufs_path: [Str], path: Str, top: Int, left: Int, st: InputState, cs: colorscheme.Colorscheme, opts: Options, diag_li: [Int], diag_msgs: [Str], info: Str, modified: Bool, ts_spans: [Int], flash: Flash) [io]
+    let screen = wlayout.rect(0, 0, cols, rows)
+    if wlayout.layout_count(lay) == 1
+        render(ed, wlayout.window_rect(lay, awin, screen, win_ww, win_hw), path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, info, modified, ts_spans, flash)
     else
         render_all(ed, lay, awin, screen, win_cy, win_cx, win_top, win_left, win_buf, win_ww, win_hw, cur_buf, bufs_text, bufs_path, path, top, left, st.mode, st.avy, st.avx, st.search, cs, opts, diag_li, diag_msgs, info, modified, ts_spans, flash)
 
@@ -5243,7 +5243,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
     // shows a buffer (win_buf) with its own cursor/viewport; the active window's
     // live state is ed.cy/ed.cx/top/left, while win_* holds the OTHER windows'
     // saved state, synced on every focus change / split.
-    var lay = window.LWin(0)
+    var lay = wlayout.LWin(0)
     var awin = 0
     var win_cy: [Int] = [0]
     var win_cx: [Int] = [0]
@@ -5538,14 +5538,14 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                                         ncy = top + body - 1
                                     ed = clamp(Editor { lines: ed.lines, cy: ncy, cx: ed.cx })
                                 elif mfin == 'M' and btn == 0     // left-click press — position the caret
-                                    let scr = window.rect(0, 0, cols, rows)
+                                    let scr = wlayout.rect(0, 0, cols, rows)
                                     let px = mev[1] - 1
                                     let py = mev[2] - 1
-                                    let wid = window.window_at(lay, scr, win_ww, win_hw, px, py)
+                                    let wid = wlayout.window_at(lay, scr, win_ww, win_hw, px, py)
                                     if wid >= 0 and wid != awin
                                         pending_focus = wid       // clicked a different pane → focus it
                                     elif wid == awin
-                                        let wr = window.window_rect(lay, awin, scr, win_ww, win_hw)
+                                        let wr = wlayout.window_rect(lay, awin, scr, win_ww, win_hw)
                                         let r0 = py - wr.y
                                         if r0 >= 0 and r0 < wr.h - 1   // a text row (not the status line)
                                             let nl = list.len(ed.lines)
@@ -6188,7 +6188,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                             pending_wcmd = 1
                         elif excmd.is_vsplit(cmd_buf)           // :vsplit / :vs — side-by-side split
                             pending_wcmd = 4
-                        elif excmd.is_winclose(cmd_buf) and window.layout_count(lay) > 1   // :close / :q with splits → close window
+                        elif excmd.is_winclose(cmd_buf) and wlayout.layout_count(lay) > 1   // :close / :q with splits → close window
                             pending_wcmd = 3
                         elif excmd.is_only(cmd_buf)            // :only — keep just the active window
                             pending_wcmd = 5
@@ -6277,15 +6277,15 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                     elif b == 'v' or b == 'V' or b == 22 // Ctrl-W v / V / Ctrl-V — vertical split
                         pending_wcmd = 4
                     elif b == 'w' or b == 23             // Ctrl-W w / Ctrl-W Ctrl-W — cycle focus
-                        pending_focus = window.win_cycle_next(lay, awin)
+                        pending_focus = wlayout.win_cycle_next(lay, awin)
                     elif b == 'h'                        // Ctrl-W h — focus window to the left
-                        pending_focus = window.window_in_dir(lay, awin, window.rect(0, 0, cols, rows), 0, win_ww, win_hw)
+                        pending_focus = wlayout.window_in_dir(lay, awin, wlayout.rect(0, 0, cols, rows), 0, win_ww, win_hw)
                     elif b == 'j'                        // Ctrl-W j — focus window below
-                        pending_focus = window.window_in_dir(lay, awin, window.rect(0, 0, cols, rows), 1, win_ww, win_hw)
+                        pending_focus = wlayout.window_in_dir(lay, awin, wlayout.rect(0, 0, cols, rows), 1, win_ww, win_hw)
                     elif b == 'k'                        // Ctrl-W k — focus window above
-                        pending_focus = window.window_in_dir(lay, awin, window.rect(0, 0, cols, rows), 2, win_ww, win_hw)
+                        pending_focus = wlayout.window_in_dir(lay, awin, wlayout.rect(0, 0, cols, rows), 2, win_ww, win_hw)
                     elif b == 'l'                        // Ctrl-W l — focus window to the right
-                        pending_focus = window.window_in_dir(lay, awin, window.rect(0, 0, cols, rows), 3, win_ww, win_hw)
+                        pending_focus = wlayout.window_in_dir(lay, awin, wlayout.rect(0, 0, cols, rows), 3, win_ww, win_hw)
                     elif b == 'c' or b == 'q' or b == 17 // Ctrl-W c / q / Ctrl-Q — close active window
                         pending_wcmd = 3
                     elif b == 'o' or b == 15             // Ctrl-W o / Ctrl-O — close all but the active window
@@ -6647,16 +6647,16 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
             win_buf = list.push(win_buf, cur_buf)   // new window shows the current buffer
             win_ww = list.push(win_ww, 100)
             win_hw = list.push(win_hw, 100)
-            lay = window.layout_split(lay, awin, newid, vertical)
+            lay = wlayout.layout_split(lay, awin, newid, vertical)
             awin = newid                                   // focus the new window
-            lsp_info = (if vertical then "vsplit (" else "split (") + str.from_int(window.layout_count(lay)) + " windows)"
+            lsp_info = (if vertical then "vsplit (" else "split (") + str.from_int(wlayout.layout_count(lay)) + " windows)"
             changed = true
         elif pending_wcmd == 3                // Ctrl-W c / Ctrl-W q / :close / :q — close active window
-            if window.layout_count(lay) > 1
-                let rem = window.layout_remove(lay, awin)
+            if wlayout.layout_count(lay) > 1
+                let rem = wlayout.layout_remove(lay, awin)
                 if list.len(rem) > 0
                     lay = rem[0]
-                    let ids = window.layout_winids(lay, [])
+                    let ids = wlayout.layout_winids(lay, [])
                     let surv = ids[0]            // first surviving window takes focus
                     awin = surv
                     if win_buf[surv] == cur_buf
@@ -6670,11 +6670,11 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                         want_path = bufs_path[tb]
                         want_y = win_cy[surv]
                         want_x = win_cx[surv]
-                    lsp_info = "closed (" + str.from_int(window.layout_count(lay)) + " windows)"
+                    lsp_info = "closed (" + str.from_int(wlayout.layout_count(lay)) + " windows)"
                     changed = true
         elif pending_wcmd == 5                // Ctrl-W o / :only — keep just the active window
-            if window.layout_count(lay) > 1
-                lay = window.LWin(awin)              // active window keeps its live ed/top/left
+            if wlayout.layout_count(lay) > 1
+                lay = wlayout.LWin(awin)              // active window keeps its live ed/top/left
                 lsp_info = "only"
                 changed = true
         pending_wcmd = 0

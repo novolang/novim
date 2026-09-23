@@ -1,13 +1,13 @@
-// window.nv — window layout geometry for novim's splits.
+// wlayout.nv — window layout geometry for novim's splits.
 //
 // Self-contained: a screen `Rect`, the recursive `Layout` tree, and the pure
 // functions that compute per-window rectangles, split / close / count / focus
 // the tree, and resize via per-window weights.  No dependency on the editor /
 // render state, so it lives outside main.nv.
 //
-// Cross-module note: callers in main.nv build a Rect via `window.rect(...)`
-// (Novo has no qualified struct-literal form `window.Rect { ... }`) and a
-// single-window layout via `window.LWin(id)` (qualified enum construction
+// Cross-module note: callers in main.nv build a Rect via `wlayout.rect(...)`
+// (Novo has no qualified struct-literal form `wlayout.Rect { ... }`) and a
+// single-window layout via `wlayout.LWin(id)` (qualified enum construction
 // works).  That asymmetry is why `rect` exists as a constructor fn at all.
 
 @intent("""A screen rectangle (1-based-friendly, but stored 0-based): origin
@@ -19,7 +19,7 @@ struct Rect
     h: Int
 
 // Constructor for callers in other modules (qualified struct literals don't
-// parse, so a Rect built outside this file goes through `window.rect`).
+// parse, so a Rect built outside this file goes through `wlayout.rect`).
 fn rect(x: Int, y: Int, w: Int, h: Int) -> Rect
     Rect { x: x, y: y, w: w, h: h }
 
