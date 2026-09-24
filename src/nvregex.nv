@@ -261,6 +261,7 @@ fn re_split_top(pat: Str) -> [Str]
         else
             i = i + 1
     list.append(parts, [str.slice(pat, start, n)])
+    parts
 
 // Compile a pattern into atoms.  Top-level alternation `a\|b\|c` lowers to a
 // relative-offset split/jump NFA (folded iteratively, no recursion); a pattern

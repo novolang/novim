@@ -188,9 +188,11 @@ fn layout_count(lay: Layout) -> Int
 @intent("""The ordered list of leaf window ids, left-to-right / top-to-bottom as
     they appear in the tree.  Used for `Ctrl-W w` focus cycling (next id after the
     active one, wrapping) and to pick a survivor after a close.""")
-fn layout_winids(lay: Layout, acc: [Int]) -> [Int]
+fn layout_winids(lay: Layout, var acc: [Int]) -> [Int]
     match lay
-        LWin(id)    => list.push(acc, id)
+        LWin(id)    =>
+            list.push(acc, id)
+            acc
         LRow(parts) =>
             var a = acc
             var i = 0

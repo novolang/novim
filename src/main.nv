@@ -3468,7 +3468,7 @@ struct EditState
     snaptxt:  Str          // dot: buf_text at command start (change detection)
     active:   Bool         // a command is being recorded
     snaped:   Snapshot     // undo: editor at command start
-    undos:    [Snapshot]   // undo stack (last = most recent pre-change state)
+    var undos:    [Snapshot]   // undo stack (last = most recent pre-change state)
     redos:    [Snapshot]   // redo stack
     regs:     [Str]        // named registers a-z: contents
     reglw:    [Bool]       // named registers a-z: linewise flag
@@ -3686,8 +3686,9 @@ fn edit_new_undo(undos: [Snapshot], redos: [Snapshot], regs: [Str], reglw: [Bool
 
 // Push a manual undo snapshot (for buffer-changing Ex commands like :s, which
 // run in the driver outside the feed/feed_edit recording path) and clear redo.
-fn edit_push_undo(es: EditState, ed: Editor) -> EditState
-    EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: list.append(es.undos, [snap_of(ed)]), redos: snaps_empty(), regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: es.recording, macrobuf: es.macrobuf, awaitmac: es.awaitmac, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt, giy: es.giy, gix: es.gix }
+fn edit_push_undo(var es: EditState, ed: Editor) -> EditState
+    list.push(es.undos, snap_of(ed))    // onto the undo stack in place
+    EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: snaps_empty(), regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: es.recording, macrobuf: es.macrobuf, awaitmac: es.awaitmac, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt, giy: es.giy, gix: es.gix }
 
 // First `k` snapshots of `xs` (the stack minus its top).
 fn take_snaps(xs: [Snapshot], k: Int) -> [Snapshot]
