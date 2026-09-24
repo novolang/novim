@@ -3469,7 +3469,7 @@ struct EditState
     active:   Bool         // a command is being recorded
     snaped:   Snapshot     // undo: editor at command start
     var undos:    [Snapshot]   // undo stack (last = most recent pre-change state)
-    redos:    [Snapshot]   // redo stack
+    var redos:    [Snapshot]   // redo stack
     regs:     [Str]        // named registers a-z: contents
     reglw:    [Bool]       // named registers a-z: linewise flag
     rreg:     Int          // register selected for the current command (0 = none, 1-26 = a-z)
@@ -3706,7 +3706,7 @@ fn edit_start(es: EditState, ed: Editor) -> EditState
 
 // Feed one byte mid/within a tracked command; on completion record the dot
 // `last` and push the pre-change snapshot onto the undo stack if it changed.
-fn edit_record(ed: Editor, st: InputState, km: Keymap, es: EditState, b: Int) -> EditStep
+fn edit_record(ed: Editor, st: InputState, km: Keymap, var es: EditState, b: Int) -> EditStep
     let step = feed_mapped(ed, st, km, b)
     let s2 = step.st
     let cur2 = es.cur + str.from_byte(b)
@@ -3788,7 +3788,7 @@ fn edit_repeat_find(ed: Editor, st: InputState, es: EditState, reverse: Bool) ->
     EditStep { ed: move_find(ed, es.findc, fwd, till, cnt), st: ist_done(st), es: EditState { last: es.last, cur: "", snaptxt: "", active: false, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: es.recording, macrobuf: es.macrobuf, awaitmac: es.awaitmac, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt, giy: es.giy, gix: es.gix } }
 
 // `u` — pop the undo stack onto the redo stack and restore the buffer.
-fn edit_undo(ed: Editor, st: InputState, es: EditState) -> EditStep
+fn edit_undo(ed: Editor, st: InputState, var es: EditState) -> EditStep
     let nu = list.len(es.undos)
     let can = nu > 0
     let snap = if can then es.undos[nu - 1] else snap_of(ed)
@@ -3798,7 +3798,7 @@ fn edit_undo(ed: Editor, st: InputState, es: EditState) -> EditStep
     EditStep { ed: nede, st: ist_done(st), es: EditState { last: es.last, cur: "", snaptxt: "", active: false, snaped: es.snaped, undos: undos2, redos: redos2, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: es.recording, macrobuf: es.macrobuf, awaitmac: es.awaitmac, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt, giy: es.giy, gix: es.gix } }
 
 // Ctrl-R — pop the redo stack onto the undo stack and restore the buffer.
-fn edit_redo(ed: Editor, st: InputState, es: EditState) -> EditStep
+fn edit_redo(ed: Editor, st: InputState, var es: EditState) -> EditStep
     let nr = list.len(es.redos)
     let can = nr > 0
     let snap = if can then es.redos[nr - 1] else snap_of(ed)
@@ -3809,7 +3809,7 @@ fn edit_redo(ed: Editor, st: InputState, es: EditState) -> EditStep
 
 // `.` — replay the last change `count` times; it is itself an undoable change,
 // so snapshot the pre-replay buffer and push it on the undo stack if it changed.
-fn edit_dot(ed: Editor, st: InputState, km: Keymap, es: EditState) -> EditStep
+fn edit_dot(ed: Editor, st: InputState, km: Keymap, var es: EditState) -> EditStep
     let reps = if st.count > 0 then st.count else 1
     let presnap = snap_of(ed)
     let pretxt = buf_text(ed)
