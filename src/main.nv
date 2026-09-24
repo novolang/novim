@@ -2683,8 +2683,10 @@ fn csort(lines: [Str], numeric: Bool, icase: Bool) -> [Str]
 
 // Sort + reverse + dedup a block of lines under the active flags (shared by the
 // whole-buffer and range paths of `:sort`).
+// `lines` is the caller's list (the buffer the undo history still holds),
+// so the builtin sort runs on a copy.
 fn sort_apply(lines: [Str], rev: Bool, uniq: Bool, numeric: Bool, icase: Bool) -> [Str]
-    let base = if numeric or icase then csort(lines, numeric, icase) else list.sort(lines)
+    let base = if numeric or icase then csort(lines, numeric, icase) else list.sort(list.clone(lines))
     let n = list.len(base)
     var ls: [Str] = []
     var i = 0
