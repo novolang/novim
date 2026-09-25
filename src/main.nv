@@ -96,7 +96,7 @@ fn history_file() -> Str [io]
     path.join(path.join(base, "novim"), "history")
 
 // Keep only the last `n` entries.
-fn hist_cap(xs: [Str], n: Int) -> [Str]
+fn hist_cap(var xs: [Str], n: Int) -> [Str]
     let total = list.len(xs)
     if total <= n
         return xs
@@ -288,9 +288,9 @@ slots as needed, and clearing any OTHER slot already holding `p` — a path pins
 once, so an explicit `:pin N` on an already-pinned file moves it rather than
 leaving the same file reachable from two slots.""")
 fn pins_put(pn: Pins, slot: Int, p: Str, y: Int, x: Int) -> Pins
-    var pp = pn.p
-    var py = pn.y
-    var px = pn.x
+    var pp = pn.p[:]
+    var py = pn.y[:]
+    var px = pn.x[:]
     let prev = pins_slot_of(pp, p)
     if prev >= 0 and prev != slot
         pp = util.set_str_at(pp, prev, "")
@@ -905,7 +905,7 @@ fn uncomment_line(line: Str, prefix: Str) -> Str
 // Toggle line-comments over `lines[lo..hi]` with `prefix`: if every non-blank
 // line is already commented, uncomment; else comment (inserting `prefix `  at
 // the block's minimum indent so the markers align).  Blank lines untouched.
-fn comment_toggle(lines: [Str], lo: Int, hi: Int, prefix: Str) -> [Str]
+fn comment_toggle(var lines: [Str], lo: Int, hi: Int, prefix: Str) -> [Str]
     var any = false
     var all = true
     var y = lo
@@ -917,7 +917,7 @@ fn comment_toggle(lines: [Str], lo: Int, hi: Int, prefix: Str) -> [Str]
         y = y + 1
     if not any
         return lines
-    var out = lines
+    var out = lines[:]
     if all
         y = lo
         while y <= hi
@@ -1811,7 +1811,7 @@ fn vblock_delete(ed: Editor, st: InputState) -> Step
     let yhi = if st.avy < ed.cy then ed.cy else st.avy
     let xlo = if st.avx < ed.cx then st.avx else ed.cx
     let xhi = if st.avx < ed.cx then ed.cx else st.avx
-    var lines = ed.lines
+    var lines = ed.lines[:]
     var y = ylo
     while y <= yhi
         let line = if y < list.len(lines) then lines[y] else ""
@@ -1832,7 +1832,7 @@ fn vblock_fill(ed: Editor, st: InputState, ch: Int) -> Step
     let yhi = if st.avy < ed.cy then ed.cy else st.avy
     let xlo = if st.avx < ed.cx then st.avx else ed.cx
     let xhi = if st.avx < ed.cx then ed.cx else st.avx
-    var lines = ed.lines
+    var lines = ed.lines[:]
     var y = ylo
     while y <= yhi
         let line = if y < list.len(lines) then lines[y] else ""
@@ -1875,7 +1875,7 @@ fn vblock_yank(ed: Editor, st: InputState) -> Step
 fn vblock_shift(ed: Editor, st: InputState, right: Bool) -> Step
     let ylo = if st.avy < ed.cy then st.avy else ed.cy
     let yhi = if st.avy < ed.cy then ed.cy else st.avy
-    var lines = ed.lines
+    var lines = ed.lines[:]
     var y = ylo
     while y <= yhi
         let line = if y < list.len(lines) then lines[y] else ""
@@ -1917,7 +1917,7 @@ fn block_replicate(ed: Editor, ylo: Int, yhi: Int, col: Int, flen0: Int, append:
     let ins = if grew > 0 and col + grew <= flen then str.slice(first, col, col + grew) else ""
     if str.len(ins) == 0
         return ed
-    var lines = ed.lines
+    var lines = ed.lines[:]
     var y = ylo + 1
     while y <= yhi
         let line = if y < list.len(lines) then lines[y] else ""
@@ -2421,7 +2421,7 @@ fn undo_push_text(serial_undo: Str, pretext: Str) -> Str
 
 // Mark every buffer clean (saved-text := current-text) after a write-all.
 fn mark_all_saved(texts: [Str], disks: [Str]) -> [Str]
-    var d = disks
+    var d = disks[:]
     var i = 0
     while i < list.len(texts)
         d = util.set_str_at(d, i, texts[i])
@@ -2746,7 +2746,7 @@ fn ex_sort(ed: Editor, cmd: Str, vlo: Int, vhi: Int) -> Editor
 
 // Append the block lines `blk` to `ls` (helper for ex_linemove's splice).
 fn push_block(ls: [Str], blk: [Str]) -> [Str]
-    var out = ls
+    var out = ls[:]
     var i = 0
     let n = list.len(blk)
     while i < n
@@ -3109,9 +3109,9 @@ fn import_nvim_keymaps(dir: Str, base: Keymap) -> Keymap [fs]
     let text = collect_lua(dir, 0)
     let ml = nvmap.find_mapleader(text)
     let leader = if str.len(ml) > 0 then ml else str.from_char('\\')
-    var lhs = base.lhs
-    var rhs = base.rhs
-    var kmode = base.kmode
+    var lhs = base.lhs[:]
+    var rhs = base.rhs[:]
+    var kmode = base.kmode[:]
     // Normal (mode class 0)
     let np = nvmap.scrape_mode_maps(text, leader, "n")
     var i = 0
@@ -3681,7 +3681,7 @@ fn edit_new() -> EditState
 // (both buffer-local in vim) plus the session-global registers (used on buffer
 // switch so each buffer keeps its own `u` / Ctrl-R stacks and `a-z` marks while
 // yanks/macros remain shared — registers are global in vim).
-fn edit_new_undo(undos: [Snapshot], redos: [Snapshot], regs: [Str], reglw: [Bool], marky: [Int], markx: [Int]) -> EditState
+fn edit_new_undo(var undos: [Snapshot], var redos: [Snapshot], regs: [Str], reglw: [Bool], marky: [Int], markx: [Int]) -> EditState
     EditState { last: "", cur: "", snaptxt: "", active: false, snaped: snap_empty(), undos: undos, redos: redos, regs: regs, reglw: reglw, rreg: 0, awaitreg: false, marky: marky, markx: markx, awaitmark: 0, recording: 0, macrobuf: "", awaitmac: 0, lastmacro: 0, lvy: 0 - 1, lvx: 0 - 1, lvey: 0 - 1, lvex: 0 - 1, lvmode: 0, findc: 0, findt: 0, giy: 0 - 1, gix: 0 - 1 }
 
 // Push a manual undo snapshot (for buffer-changing Ex commands like :s, which
@@ -3701,7 +3701,7 @@ fn take_snaps(xs: [Snapshot], k: Int) -> [Snapshot]
 
 // Begin recording a command: snapshot the buffer text (for change detection)
 // and the full editor (for undo).
-fn edit_start(es: EditState, ed: Editor) -> EditState
+fn edit_start(var es: EditState, ed: Editor) -> EditState
     EditState { last: es.last, cur: "", snaptxt: buf_text(ed), active: true, snaped: snap_of(ed), undos: es.undos, redos: es.redos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: es.recording, macrobuf: es.macrobuf, awaitmac: es.awaitmac, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt, giy: es.giy, gix: es.gix }
 
 // Feed one byte mid/within a tracked command; on completion record the dot
@@ -3715,8 +3715,8 @@ fn edit_record(ed: Editor, st: InputState, km: Keymap, var es: EditState, b: Int
     let newlast    = if push then cur2 else es.last
     let newcur     = if done then "" else cur2
     let newsnaptxt = if done then "" else es.snaptxt
-    let newundos   = if push then list.append(es.undos, [es.snaped]) else es.undos
-    let newredos   = if push then snaps_empty() else es.redos
+    var newundos   = if push then list.append(es.undos, [es.snaped]) else es.undos
+    var newredos   = if push then snaps_empty() else es.redos
     EditStep { ed: step.ed, st: s2, es: EditState { last: newlast, cur: newcur, snaptxt: newsnaptxt, active: not done, snaped: es.snaped, undos: newundos, redos: newredos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: es.recording, macrobuf: es.macrobuf, awaitmac: es.awaitmac, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt, giy: es.giy, gix: es.gix } }
 
 // Untracked byte (pure motion / navigation): feed without touching dot/undo.
@@ -3726,7 +3726,7 @@ fn edit_pass(ed: Editor, st: InputState, km: Keymap, es: EditState, b: Int) -> E
 
 // Remember the visual selection that was just left (for `gv`).  `st`/`ed` are
 // the PRE-command state: anchor (avy,avx) + cursor (ed.cy,ed.cx) + mode.
-fn edit_save_visual(es: EditState, st: InputState, ed: Editor) -> EditState
+fn edit_save_visual(var es: EditState, st: InputState, ed: Editor) -> EditState
     EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: es.recording, macrobuf: es.macrobuf, awaitmac: es.awaitmac, lastmacro: es.lastmacro, lvy: st.avy, lvx: st.avx, lvey: ed.cy, lvex: ed.cx, lvmode: st.mode, findc: es.findc, findt: es.findt, giy: es.giy, gix: es.gix }
 
 // `gv` — re-enter the last visual selection (mode + anchor + cursor).
@@ -3735,17 +3735,17 @@ fn edit_regv(ed: Editor, st: InputState, es: EditState) -> EditStep
     EditStep { ed: ne, st: InputState { count: 0, pending: 0, mode: es.lvmode, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: es.lvy, avx: es.lvx }, es: es }
 
 // A yank → the "0 register (slot 26).
-fn edit_numreg_yank(es: EditState, text: Str, lw: Bool) -> EditState
-    var r = es.regs
-    var w = es.reglw
+fn edit_numreg_yank(var es: EditState, text: Str, lw: Bool) -> EditState
+    var r = es.regs[:]
+    var w = es.reglw[:]
     r = util.set_str_at(r, 26, text)
     w = util.set_bool_at(w, 26, lw)
     EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: r, reglw: w, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: es.recording, macrobuf: es.macrobuf, awaitmac: es.awaitmac, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt, giy: es.giy, gix: es.gix }
 
 // A linewise delete → shift the "1-"9 ring (slots 27-35) and store at "1.
-fn edit_numreg_del(es: EditState, text: Str) -> EditState
-    var r = es.regs
-    var w = es.reglw
+fn edit_numreg_del(var es: EditState, text: Str) -> EditState
+    var r = es.regs[:]
+    var w = es.reglw[:]
     var i = 35
     while i >= 28
         r = util.set_str_at(r, i, r[i - 1])
@@ -3756,20 +3756,20 @@ fn edit_numreg_del(es: EditState, text: Str) -> EditState
     EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: r, reglw: w, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: es.recording, macrobuf: es.macrobuf, awaitmac: es.awaitmac, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt, giy: es.giy, gix: es.gix }
 
 // A charwise (sub-line) delete → the small-delete register "- (slot 36).
-fn edit_numreg_small(es: EditState, text: Str) -> EditState
-    var r = es.regs
-    var w = es.reglw
+fn edit_numreg_small(var es: EditState, text: Str) -> EditState
+    var r = es.regs[:]
+    var w = es.reglw[:]
     r = util.set_str_at(r, 36, text)
     w = util.set_bool_at(w, 36, false)
     EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: r, reglw: w, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: es.recording, macrobuf: es.macrobuf, awaitmac: es.awaitmac, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt, giy: es.giy, gix: es.gix }
 
 // Remember the f/F/t/T that just completed (target `c`, pending `t`) for ; / ,.
-fn edit_save_find(es: EditState, c: Int, t: Int) -> EditState
+fn edit_save_find(var es: EditState, c: Int, t: Int) -> EditState
     EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: es.recording, macrobuf: es.macrobuf, awaitmac: es.awaitmac, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: c, findt: t, giy: es.giy, gix: es.gix }
 
 // Remember where Insert mode was just left (for `gi`).  `ed` is the PRE-Esc
 // editor — the cursor sits where the next character would have gone.
-fn edit_save_gi(es: EditState, ed: Editor) -> EditState
+fn edit_save_gi(var es: EditState, ed: Editor) -> EditState
     EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: es.recording, macrobuf: es.macrobuf, awaitmac: es.awaitmac, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt, giy: ed.cy, gix: ed.cx }
 
 // `gi` — jump to the last insert-leave position and re-enter Insert mode.
@@ -3779,7 +3779,7 @@ fn edit_gi(ed: Editor, st: InputState, es: EditState) -> EditStep
 
 // `;` repeats the last find; `,` repeats it reversed.  findt: 8 f, 9 F, 10 t,
 // 11 T (f/t go forward; t/T stop one short of the target).
-fn edit_repeat_find(ed: Editor, st: InputState, es: EditState, reverse: Bool) -> EditStep
+fn edit_repeat_find(ed: Editor, st: InputState, var es: EditState, reverse: Bool) -> EditStep
     let cnt = if st.count > 0 then st.count else 1
     let fwd0 = es.findt == '\b' or es.findt == '\n'
     let till = es.findt == '\n' or es.findt == 11
@@ -3792,8 +3792,8 @@ fn edit_undo(ed: Editor, st: InputState, var es: EditState) -> EditStep
     let nu = list.len(es.undos)
     let can = nu > 0
     let snap = if can then es.undos[nu - 1] else snap_of(ed)
-    let undos2 = if can then take_snaps(es.undos, nu - 1) else es.undos
-    let redos2 = if can then list.append(es.redos, [snap_of(ed)]) else es.redos
+    var undos2 = if can then take_snaps(es.undos, nu - 1) else es.undos
+    var redos2 = if can then list.append(es.redos, [snap_of(ed)]) else es.redos
     let nede = if can then clamp(Editor { lines: snap.lines, cy: snap.cy, cx: snap.cx }) else ed
     EditStep { ed: nede, st: ist_done(st), es: EditState { last: es.last, cur: "", snaptxt: "", active: false, snaped: es.snaped, undos: undos2, redos: redos2, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: es.recording, macrobuf: es.macrobuf, awaitmac: es.awaitmac, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt, giy: es.giy, gix: es.gix } }
 
@@ -3802,8 +3802,8 @@ fn edit_redo(ed: Editor, st: InputState, var es: EditState) -> EditStep
     let nr = list.len(es.redos)
     let can = nr > 0
     let snap = if can then es.redos[nr - 1] else snap_of(ed)
-    let redos2 = if can then take_snaps(es.redos, nr - 1) else es.redos
-    let undos2 = if can then list.append(es.undos, [snap_of(ed)]) else es.undos
+    var redos2 = if can then take_snaps(es.redos, nr - 1) else es.redos
+    var undos2 = if can then list.append(es.undos, [snap_of(ed)]) else es.undos
     let nede = if can then clamp(Editor { lines: snap.lines, cy: snap.cy, cx: snap.cx }) else ed
     EditStep { ed: nede, st: ist_done(st), es: EditState { last: es.last, cur: "", snaptxt: "", active: false, snaped: es.snaped, undos: undos2, redos: redos2, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: es.recording, macrobuf: es.macrobuf, awaitmac: es.awaitmac, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt, giy: es.giy, gix: es.gix } }
 
@@ -3822,8 +3822,8 @@ fn edit_dot(ed: Editor, st: InputState, km: Keymap, var es: EditState) -> EditSt
         s = step.st
         r = r + 1
     let push = buf_text(e) != pretxt
-    let newundos = if push then list.append(es.undos, [presnap]) else es.undos
-    let newredos = if push then snaps_empty() else es.redos
+    var newundos = if push then list.append(es.undos, [presnap]) else es.undos
+    var newredos = if push then snaps_empty() else es.redos
     EditStep { ed: e, st: s, es: EditState { last: es.last, cur: "", snaptxt: "", active: false, snaped: es.snaped, undos: newundos, redos: newredos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: es.recording, macrobuf: es.macrobuf, awaitmac: es.awaitmac, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt, giy: es.giy, gix: es.gix } }
 
 @intent("""Drive one input byte through feed_mapped with dot-repeat and
@@ -3857,12 +3857,12 @@ fn feed_edit_inner(ed: Editor, st: InputState, km: Keymap, es: EditState, b: Int
 // in EditState; feed stays pure (it only ever touches the unnamed register).
 
 // Begin a `"` register prefix — await the register letter.
-fn edit_await_reg(ed: Editor, st: InputState, es: EditState) -> EditStep
+fn edit_await_reg(ed: Editor, st: InputState, var es: EditState) -> EditStep
     EditStep { ed: ed, st: st, es: EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: true, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: es.recording, macrobuf: es.macrobuf, awaitmac: es.awaitmac, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt, giy: es.giy, gix: es.gix } }
 
 // The byte after `"`: a-z selects that register (loaded into the unnamed
 // register for reads); anything else cancels.
-fn edit_select_reg(ed: Editor, st: InputState, es: EditState, b: Int) -> EditStep
+fn edit_select_reg(ed: Editor, st: InputState, var es: EditState, b: Int) -> EditStep
     if (b >= 'a' and b <= 'z') or (b >= '0' and b <= '9') or (b >= 'A' and b <= 'Z') or b == '-'
         let upper = b >= 'A' and b <= 'Z'                         // A-Z → append to a-z
         let idx = if b == '-' then 36 elif b <= '9' then 26 + (b - '0') elif upper then b - 'A' else b - 'a'
@@ -3891,18 +3891,18 @@ fn edit_persist_reg(step: EditStep) -> EditStep
         let newlw = step.st.reg_lw     // append keeps the appended chunk's line-wise flag
         let regs2 = if wrote then util.set_str_at(step.es.regs, idx, newval) else step.es.regs
         let lw2 = if wrote then util.set_bool_at(step.es.reglw, idx, newlw) else step.es.reglw
-        EditStep { ed: step.ed, st: step.st, es: EditState { last: step.es.last, cur: step.es.cur, snaptxt: step.es.snaptxt, active: step.es.active, snaped: step.es.snaped, undos: step.es.undos, redos: step.es.redos, regs: regs2, reglw: lw2, rreg: 0, awaitreg: step.es.awaitreg, marky: step.es.marky, markx: step.es.markx, awaitmark: step.es.awaitmark, recording: step.es.recording, macrobuf: step.es.macrobuf, awaitmac: step.es.awaitmac, lastmacro: step.es.lastmacro, lvy: step.es.lvy, lvx: step.es.lvx, lvey: step.es.lvey, lvex: step.es.lvex, lvmode: step.es.lvmode, findc: step.es.findc, findt: step.es.findt, giy: step.es.giy, gix: step.es.gix } }
+        EditStep { ed: step.ed, st: step.st, es: EditState { last: step.es.last, cur: step.es.cur, snaptxt: step.es.snaptxt, active: step.es.active, snaped: step.es.snaped, undos: step.es.undos[:], redos: step.es.redos[:], regs: regs2, reglw: lw2, rreg: 0, awaitreg: step.es.awaitreg, marky: step.es.marky, markx: step.es.markx, awaitmark: step.es.awaitmark, recording: step.es.recording, macrobuf: step.es.macrobuf, awaitmac: step.es.awaitmac, lastmacro: step.es.lastmacro, lvy: step.es.lvy, lvx: step.es.lvx, lvey: step.es.lvey, lvex: step.es.lvex, lvmode: step.es.lvmode, findc: step.es.findc, findt: step.es.findt, giy: step.es.giy, gix: step.es.gix } }
     else
         step
 
 // ── Marks: m<a-z> set, `<a-z> jump exact, '<a-z> jump line ────────
 
 // Begin a mark prefix (op: 1 set, 2 jump-exact, 3 jump-line).
-fn edit_await_mark(ed: Editor, st: InputState, es: EditState, op: Int) -> EditStep
+fn edit_await_mark(ed: Editor, st: InputState, var es: EditState, op: Int) -> EditStep
     EditStep { ed: ed, st: st, es: EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: op, recording: es.recording, macrobuf: es.macrobuf, awaitmac: es.awaitmac, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt, giy: es.giy, gix: es.gix } }
 
 // The mark letter after m / ` / ' — set or jump.
-fn edit_mark_op(ed: Editor, st: InputState, es: EditState, b: Int) -> EditStep
+fn edit_mark_op(ed: Editor, st: InputState, var es: EditState, b: Int) -> EditStep
     if b >= 'a' and b <= 'z'
         let idx = b - 'a'
         if es.awaitmark == 1                                    // set mark at cursor
@@ -3936,25 +3936,25 @@ fn feed_edit_core(ed: Editor, st: InputState, km: Keymap, es: EditState, b: Int)
 // replayed (those are handled by the drivers, not feed).
 
 // Set the await-macro state (1 = after q, 2 = after @).
-fn macro_await(es: EditState, op: Int) -> EditState
+fn macro_await(var es: EditState, op: Int) -> EditState
     EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: es.recording, macrobuf: es.macrobuf, awaitmac: op, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt, giy: es.giy, gix: es.gix }
 
 // The register letter after q — begin recording (or cancel on a bad name).
-fn macro_start(es: EditState, b: Int) -> EditState
+fn macro_start(var es: EditState, b: Int) -> EditState
     let rec = if b >= 'a' and b <= 'z' then b - 'a' + 1 else 0
     EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: rec, macrobuf: "", awaitmac: 0, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt, giy: es.giy, gix: es.gix }
 
 // Stop recording — store the recorded keystrokes into the register slot.
-fn macro_stop(es: EditState) -> EditState
+fn macro_stop(var es: EditState) -> EditState
     let regs2 = util.set_str_at(es.regs, es.recording - 1, es.macrobuf)
     EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: regs2, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: 0, macrobuf: "", awaitmac: 0, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt, giy: es.giy, gix: es.gix }
 
 // Append a keystroke to the in-progress recording.
-fn macro_capture(es: EditState, b: Int) -> EditState
+fn macro_capture(var es: EditState, b: Int) -> EditState
     EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: es.recording, macrobuf: es.macrobuf + str.from_byte(b), awaitmac: 0, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt, giy: es.giy, gix: es.gix }
 
 // Clear awaitmac and remember the last replayed register (for @@).
-fn macro_done_await(es: EditState, last: Int) -> EditState
+fn macro_done_await(var es: EditState, last: Int) -> EditState
     EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: es.recording, macrobuf: es.macrobuf, awaitmac: 0, lastmacro: last, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt, giy: es.giy, gix: es.gix }
 
 // The register letter after @ — replay it (`@@` = last) through feed_edit.
@@ -4045,9 +4045,9 @@ fn run_batch(keys: Str, cfg_path: Str, fpath: Str) [io, fs, time]
     let batch_rows = term_rows()         // 24 off-tty — makes paging deterministic
     let pins_root = project_root()
     let pins0 = pins_load(pins_root)
-    var pins_p = pins0.p
-    var pins_y = pins0.y
-    var pins_x = pins0.x
+    var pins_p = pins0.p[:]
+    var pins_y = pins0.y[:]
+    var pins_x = pins0.x[:]
     var pnote = ""                       // what a pin command would show in the status line
     var picker_active = false
     var picker_src = 0                   // 0 :bufs · 1 :files · 2 :pins
@@ -4217,9 +4217,9 @@ fn run_batch(keys: Str, cfg_path: Str, fpath: Str) [io, fs, time]
                     else
                         let pslot = if psl >= 1 then psl - 1 else pins_free_slot(pins_p)
                         let pnew = pins_put(Pins { p: pins_p, y: pins_y, x: pins_x }, pslot, pabs, ed.cy, ed.cx)
-                        pins_p = pnew.p
-                        pins_y = pnew.y
-                        pins_x = pnew.x
+                        pins_p = pnew.p[:]
+                        pins_y = pnew.y[:]
+                        pins_x = pnew.x[:]
                         pins_save(pins_root, pins_p, pins_y, pins_x)
                         pnote = "pinned [" + str.from_int(pslot + 1) + "] " + util.basename_of(curpath)
                 else
@@ -5370,9 +5370,9 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
     // ── Pins (harpoon slots): per-project, persisted, loaded at start ──
     let pins_root = project_root()
     let pins_at_start = pins_load(pins_root)
-    var pins_p = pins_at_start.p         // slot i → pinned path, absolute ("" = free)
-    var pins_y = pins_at_start.y
-    var pins_x = pins_at_start.x
+    var pins_p = pins_at_start.p[:]         // slot i → pinned path, absolute ("" = free)
+    var pins_y = pins_at_start.y[:]
+    var pins_x = pins_at_start.x[:]
     var modified = false                 // active buffer differs from disk → status `[+]`
     var lsp_dirty = false                // buffer changed since the last didChange
     var lsp_idle = 0                      // consecutive idle poll cycles (debounce)
@@ -6122,9 +6122,9 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                             else
                                 let pslot = if psl >= 1 then psl - 1 else pins_free_slot(pins_p)
                                 let pnew = pins_put(Pins { p: pins_p, y: pins_y, x: pins_x }, pslot, pabs, ed.cy, ed.cx)
-                                pins_p = pnew.p
-                                pins_y = pnew.y
-                                pins_x = pnew.x
+                                pins_p = pnew.p[:]
+                                pins_y = pnew.y[:]
+                                pins_x = pnew.x[:]
                                 pins_save(pins_root, pins_p, pins_y, pins_x)
                                 lsp_info = "pinned [" + str.from_int(pslot + 1) + "] " + util.basename_of(curpath)
                         elif excmd.is_bufcmd(cmd_buf)
@@ -6380,7 +6380,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                             chi = ed.cy
                         if clo >= 0
                             es = edit_push_undo(es, ed)
-                            ed = clamp(Editor { lines: comment_toggle(ed.lines, clo, chi, pfx), cy: ed.cy, cx: ed.cx })
+                            ed = clamp(Editor { lines: comment_toggle(ed.lines[:], clo, chi, pfx), cy: ed.cy, cx: ed.cx })
                         st = ist_done(st)             // consume the count either way
                 elif cpend_obj                        // gc + a/i, awaiting the object char (p)
                     cpend_obj = false
@@ -6388,7 +6388,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                         let to = textobj_paragraph(ed, cpend_around)
                         if to.ok
                             es = edit_push_undo(es, ed)
-                            ed = clamp(Editor { lines: comment_toggle(ed.lines, to.vr.sy, to.vr.ey, comment_prefix(curpath)), cy: ed.cy, cx: ed.cx })
+                            ed = clamp(Editor { lines: comment_toggle(ed.lines[:], to.vr.sy, to.vr.ey, comment_prefix(curpath)), cy: ed.cy, cx: ed.cx })
                     st = ist_done(st)                 // consume any count
                 elif vgc_pend                         // Visual `g` 2nd byte (gc on the selection)
                     vgc_pend = false
@@ -6396,7 +6396,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                         let vlo = if st.avy < ed.cy then st.avy else ed.cy
                         let vhi = if st.avy < ed.cy then ed.cy else st.avy
                         es = edit_push_undo(es, ed)
-                        ed = clamp(Editor { lines: comment_toggle(ed.lines, vlo, vhi, comment_prefix(curpath)), cy: vlo, cx: 0 })
+                        ed = clamp(Editor { lines: comment_toggle(ed.lines[:], vlo, vhi, comment_prefix(curpath)), cy: vlo, cx: 0 })
                         st = ist_done(st)
                     else                              // not gc — replay g + this byte through Visual
                         let v1 = feed_edit(ed, st, km, es, 'g')
@@ -6874,8 +6874,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                     let dpath = uri_to_path(lsp.lsp_diag_uri(msg))
                     let dbi = buf_index_of(bufs_path, dpath)
                     if dbi >= 0
-                        let dli = lsp.lsp_collect_diag_ints(msg)
-                        let dmsgs = lsp.lsp_collect_diag_msgs(msg)
+                        var dli = lsp.lsp_collect_diag_ints(msg)
+                        var dmsgs = lsp.lsp_collect_diag_msgs(msg)
                         bufs_diag = util.set_str_at(bufs_diag, dbi, diag_ser(dli, dmsgs))
                         if dbi == cur_buf
                             diag_li = dli
@@ -7103,7 +7103,7 @@ fn proc_drain_lines(pid: Int) -> [Str] [io, time]
 
 // Internal recursive file walk (the no-ripgrep fallback for `:files`) —
 // relative paths, skipping VCS/build dirs, bounded depth + count.
-fn walk_files(dir: Str, prefix: Str, depth: Int, acc: [Str], cap: Int) -> [Str] [fs]
+fn walk_files(dir: Str, prefix: Str, depth: Int, var acc: [Str], cap: Int) -> [Str] [fs]
     if depth > 12 or list.len(acc) >= cap
         return acc
     var a = acc
@@ -7364,7 +7364,7 @@ fn comp_apply(ed: Editor, start: Int, endc: Int, ins: Str) -> Editor
 // order, so iterating in REVERSE applies them right-to-left / bottom-to-top —
 // earlier positions never shift.  Each edit replaces line[ln][schar..echar).
 fn apply_rename(ed: Editor, triples: [Int], newtexts: [Str]) -> Editor
-    var lines = ed.lines
+    var lines = ed.lines[:]
     var k = list.len(newtexts) - 1
     while k >= 0
         if k * 3 + 2 < list.len(triples)

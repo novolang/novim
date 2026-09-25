@@ -67,7 +67,7 @@ fn subtree_weight(lay: Layout, weights: [Int]) -> Int
 fn layout_rects(lay: Layout, r: Rect, ww: [Int], hw: [Int], acc: [Int]) -> [Int]
     match lay
         LWin(id)    =>
-            var a = acc
+            var a = acc[:]
             a = list.push(a, id)
             a = list.push(a, r.x)
             a = list.push(a, r.y)
@@ -75,7 +75,7 @@ fn layout_rects(lay: Layout, r: Rect, ww: [Int], hw: [Int], acc: [Int]) -> [Int]
             a = list.push(a, r.h)
             a
         LRow(parts) =>
-            var a = acc
+            var a = acc[:]
             let n = list.len(parts)
             if n == 0
                 return a
@@ -99,7 +99,7 @@ fn layout_rects(lay: Layout, r: Rect, ww: [Int], hw: [Int], acc: [Int]) -> [Int]
                 i = i + 1
             a
         LCol(parts) =>
-            var a = acc
+            var a = acc[:]
             let n = list.len(parts)
             if n == 0
                 return a

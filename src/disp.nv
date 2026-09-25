@@ -219,7 +219,7 @@ fn effect_spans(s: Str, d: Int) -> [Int]
 // IS the byte index (the native tokenizer's, over a tab-expanded line).
 // Rebuilt rather than mutated, and later spans win — the same shape
 // ts_line_syncols resolves its overlapping tree-sitter spans with.
-fn apply_effect_spans(cols: [Int], s: Str, d: Int) -> [Int]
+fn apply_effect_spans(var cols: [Int], s: Str, d: Int) -> [Int]
     let sp = effect_spans(s, d)
     if list.len(sp) == 0
         return cols

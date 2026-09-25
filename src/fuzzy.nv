@@ -70,7 +70,7 @@ fn score(query: Str, cand: Str) -> Int
 // descending `scores[..]`.  A tie takes from the LEFT run, which is what keeps
 // the whole sort stable — equal scores come out in producer order.
 fn merge_run(out: [Int], idx: [Int], scores: [Int], lo: Int, mid: Int, hi: Int) -> [Int]
-    var o = out
+    var o = out[:]
     var i = lo
     var j = mid
     while i < mid or j < hi
