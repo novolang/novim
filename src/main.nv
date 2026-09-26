@@ -81,11 +81,9 @@ fn ist_set_search(st: InputState, pat: Str) -> InputState
 empty file, yields a single empty line — a fresh scratch buffer — so the cursor
 always has somewhere to sit.""")
 fn buf_load(path: Str) -> [Str] [fs]
-    match fs.read(path)
-        None    => [""]
-        Some(s) =>
-            let ls = str.split_lines(s)
-            if list.len(ls) == 0 then [""] else ls
+    let Some(s) = fs.read(path) else return [""]
+    let ls = str.split_lines(s)
+    if list.len(ls) == 0 then [""] else ls
 
 // ── Command / search history persistence ─────────────────────────────────────
 // One entry per line in $XDG_STATE_HOME/novim/history (else
@@ -3048,59 +3046,55 @@ fn keymap_is_prefix(km: Keymap, s: Str, mclass: Int) -> Bool
 // `\e` etc.).  Comments (`#`) and blank lines are skipped; section headers
 // (`[name]`) gate which section we're in.  Missing file → empty keymap.
 fn load_keymaps(cfg_path: Str) -> Keymap [fs]
-    match fs.read(cfg_path)
-        None => keymap_empty()
-        Some(content) =>
-            var lhs: [Str] = []
-            var rhs: [Str] = []
-            var kmode: [Int] = []
-            let lines = str.split_lines(content)
-            var in_km = false
-            let mut i = 0
-            let n = list.len(lines)
-            while i < n
-                let raw = str.trim(lines[i])
-                if str.len(raw) > 0 and (str.byte_at(raw, 0) ?? 0) != 35    // not a '#' comment
-                    if (str.byte_at(raw, 0) ?? 0) == 91                     // '[' section
-                        in_km = raw == "[keymaps]"
-                    elif in_km
-                        let eq = util.index_of_byte(raw, 61)                     // '='
-                        if eq > 0
-                            let lkey = util.strip_quotes(str.trim(str.slice(raw, 0, eq)))
-                            let rseq = util.strip_quotes(str.trim(util.strip_inline_comment(str.slice(raw, eq + 1, str.len(raw)))))
-                            // Skip `[keymaps]` directives that aren't remaps (e.g.
-                            // `import_nvim = true`) — else they'd become bogus LHS
-                            // (`import_nvim` made `i` a multi-key prefix, stalling
-                            // Insert-mode entry until the next key).
-                            if str.len(lkey) >= 1 and lkey != "import_nvim"
-                                lhs = list.append(lhs, [decode_escapes(lkey)])
-                                rhs = list.append(rhs, [decode_escapes(rseq)])
-                                kmode = list.append(kmode, [0])    // TOML maps are Normal mode
-                i = i + 1
-            Keymap { lhs: lhs, rhs: rhs, kmode: kmode }
+    let Some(content) = fs.read(cfg_path) else return keymap_empty()
+    var lhs: [Str] = []
+    var rhs: [Str] = []
+    var kmode: [Int] = []
+    let lines = str.split_lines(content)
+    var in_km = false
+    let mut i = 0
+    let n = list.len(lines)
+    while i < n
+        let raw = str.trim(lines[i])
+        if str.len(raw) > 0 and (str.byte_at(raw, 0) ?? 0) != 35    // not a '#' comment
+            if (str.byte_at(raw, 0) ?? 0) == 91                     // '[' section
+                in_km = raw == "[keymaps]"
+            elif in_km
+                let eq = util.index_of_byte(raw, 61)                     // '='
+                if eq > 0
+                    let lkey = util.strip_quotes(str.trim(str.slice(raw, 0, eq)))
+                    let rseq = util.strip_quotes(str.trim(util.strip_inline_comment(str.slice(raw, eq + 1, str.len(raw)))))
+                    // Skip `[keymaps]` directives that aren't remaps (e.g.
+                    // `import_nvim = true`) — else they'd become bogus LHS
+                    // (`import_nvim` made `i` a multi-key prefix, stalling
+                    // Insert-mode entry until the next key).
+                    if str.len(lkey) >= 1 and lkey != "import_nvim"
+                        lhs = list.append(lhs, [decode_escapes(lkey)])
+                        rhs = list.append(rhs, [decode_escapes(rseq)])
+                        kmode = list.append(kmode, [0])    // TOML maps are Normal mode
+        i = i + 1
+    Keymap { lhs: lhs, rhs: rhs, kmode: kmode }
 
 // True when the config opts into Neovim keymap import (`[keymaps] import_nvim =
 // true`).  Reuses the same flat section reader as the other loaders.
 fn keymaps_import_nvim(cfg_path: Str) -> Bool [fs]
-    match fs.read(cfg_path)
-        None => false
-        Some(content) =>
-            let lines = str.split_lines(content)
-            var in_km = false
-            var on = false
-            var i = 0
-            let n = list.len(lines)
-            while i < n
-                let raw = str.trim(lines[i])
-                if str.len(raw) > 0 and (str.byte_at(raw, 0) ?? 0) != 35
-                    if (str.byte_at(raw, 0) ?? 0) == 91
-                        in_km = raw == "[keymaps]"
-                    elif in_km
-                        let eq = util.index_of_byte(raw, 61)
-                        if eq > 0 and str.trim(str.slice(raw, 0, eq)) == "import_nvim"
-                            on = parse_bool_val(util.strip_inline_comment(str.slice(raw, eq + 1, str.len(raw))))
-                i = i + 1
-            on
+    let Some(content) = fs.read(cfg_path) else return false
+    let lines = str.split_lines(content)
+    var in_km = false
+    var on = false
+    var i = 0
+    let n = list.len(lines)
+    while i < n
+        let raw = str.trim(lines[i])
+        if str.len(raw) > 0 and (str.byte_at(raw, 0) ?? 0) != 35
+            if (str.byte_at(raw, 0) ?? 0) == 91
+                in_km = raw == "[keymaps]"
+            elif in_km
+                let eq = util.index_of_byte(raw, 61)
+                if eq > 0 and str.trim(str.slice(raw, 0, eq)) == "import_nvim"
+                    on = parse_bool_val(util.strip_inline_comment(str.slice(raw, eq + 1, str.len(raw))))
+        i = i + 1
+    on
 
 // Assemble a Keymap from the nvim config dir: find the leader (default `\`), then
 // scrape the Normal-mode maps (kmode 0) and the Visual-mode `v`/`x` maps
@@ -3177,48 +3171,46 @@ fn parse_bool_val(s: Str) -> Bool
     str.trim(util.strip_quotes(str.trim(s))) == "true"
 
 fn load_options(cfg_path: Str) -> Options [fs]
-    match fs.read(cfg_path)
-        None => options_default()
-        Some(content) =>
-            var number = false
-            var relativenumber = false
-            var hlsearch = true
-            var wrap = false
-            var syntax = true
-            var tabstop = 8
-            var expandtab = false
-            let lines = str.split_lines(content)
-            var in_opt = false
-            let mut i = 0
-            let n = list.len(lines)
-            while i < n
-                let raw = str.trim(lines[i])
-                if str.len(raw) > 0 and (str.byte_at(raw, 0) ?? 0) != 35
-                    if (str.byte_at(raw, 0) ?? 0) == 91
-                        in_opt = raw == "[options]"
-                    elif in_opt
-                        let eq = util.index_of_byte(raw, 61)
-                        if eq > 0
-                            let key = str.trim(str.slice(raw, 0, eq))
-                            let valr = util.strip_inline_comment(str.slice(raw, eq + 1, str.len(raw)))
-                            if key == "number" or key == "nu"
-                                number = parse_bool_val(valr)
-                            elif key == "relativenumber" or key == "rnu"
-                                relativenumber = parse_bool_val(valr)
-                            elif key == "hlsearch" or key == "hls"
-                                hlsearch = parse_bool_val(valr)
-                            elif key == "wrap"
-                                wrap = parse_bool_val(valr)
-                            elif key == "syntax" or key == "syn"
-                                syntax = parse_bool_val(valr)
-                            elif key == "tabstop" or key == "ts"
-                                let tv = util.parse_color_val(valr)
-                                if tv > 0
-                                    tabstop = tv
-                            elif key == "expandtab" or key == "et"
-                                expandtab = parse_bool_val(valr)
-                i = i + 1
-            Options { number: number, relativenumber: relativenumber, hlsearch: hlsearch, wrap: wrap, syntax: syntax, tabstop: tabstop, expandtab: expandtab }
+    let Some(content) = fs.read(cfg_path) else return options_default()
+    var number = false
+    var relativenumber = false
+    var hlsearch = true
+    var wrap = false
+    var syntax = true
+    var tabstop = 8
+    var expandtab = false
+    let lines = str.split_lines(content)
+    var in_opt = false
+    let mut i = 0
+    let n = list.len(lines)
+    while i < n
+        let raw = str.trim(lines[i])
+        if str.len(raw) > 0 and (str.byte_at(raw, 0) ?? 0) != 35
+            if (str.byte_at(raw, 0) ?? 0) == 91
+                in_opt = raw == "[options]"
+            elif in_opt
+                let eq = util.index_of_byte(raw, 61)
+                if eq > 0
+                    let key = str.trim(str.slice(raw, 0, eq))
+                    let valr = util.strip_inline_comment(str.slice(raw, eq + 1, str.len(raw)))
+                    if key == "number" or key == "nu"
+                        number = parse_bool_val(valr)
+                    elif key == "relativenumber" or key == "rnu"
+                        relativenumber = parse_bool_val(valr)
+                    elif key == "hlsearch" or key == "hls"
+                        hlsearch = parse_bool_val(valr)
+                    elif key == "wrap"
+                        wrap = parse_bool_val(valr)
+                    elif key == "syntax" or key == "syn"
+                        syntax = parse_bool_val(valr)
+                    elif key == "tabstop" or key == "ts"
+                        let tv = util.parse_color_val(valr)
+                        if tv > 0
+                            tabstop = tv
+                    elif key == "expandtab" or key == "et"
+                        expandtab = parse_bool_val(valr)
+        i = i + 1
+    Options { number: number, relativenumber: relativenumber, hlsearch: hlsearch, wrap: wrap, syntax: syntax, tabstop: tabstop, expandtab: expandtab }
 
 // Number formatting (pad_num / pad_num_l / num_digits) and `nspaces` moved to
 // disp.nv (pure display helpers).
@@ -6993,26 +6985,24 @@ fn clip_ends_nl(s: Str) -> Bool
 // parse (whitespace / alignment / inline-comment tolerant), not a brittle
 // fixed-spacing substring match.
 fn clipboard_enabled(cfg_path: Str) -> Bool [fs]
-    match fs.read(cfg_path)
-        None => false
-        Some(content) =>
-            let lines = str.split_lines(content)
-            var in_opt = false
-            var on = false
-            var i = 0
-            let n = list.len(lines)
-            while i < n
-                let raw = str.trim(lines[i])
-                if str.len(raw) > 0 and (str.byte_at(raw, 0) ?? 0) != 35
-                    if (str.byte_at(raw, 0) ?? 0) == 91
-                        in_opt = raw == "[options]"
-                    elif in_opt
-                        let eq = util.index_of_byte(raw, 61)
-                        if eq > 0 and str.trim(str.slice(raw, 0, eq)) == "clipboard"
-                            let v = util.strip_quotes(str.trim(util.strip_inline_comment(str.slice(raw, eq + 1, str.len(raw)))))
-                            on = util.index_of_str(v, "unnamed") >= 0
-                i = i + 1
-            on
+    let Some(content) = fs.read(cfg_path) else return false
+    let lines = str.split_lines(content)
+    var in_opt = false
+    var on = false
+    var i = 0
+    let n = list.len(lines)
+    while i < n
+        let raw = str.trim(lines[i])
+        if str.len(raw) > 0 and (str.byte_at(raw, 0) ?? 0) != 35
+            if (str.byte_at(raw, 0) ?? 0) == 91
+                in_opt = raw == "[options]"
+            elif in_opt
+                let eq = util.index_of_byte(raw, 61)
+                if eq > 0 and str.trim(str.slice(raw, 0, eq)) == "clipboard"
+                    let v = util.strip_quotes(str.trim(util.strip_inline_comment(str.slice(raw, eq + 1, str.len(raw)))))
+                    on = util.index_of_str(v, "unnamed") >= 0
+        i = i + 1
+    on
 
 // Push `text` to the OS clipboard with OSC 52: ESC ] 52 ; c ; <base64> ESC \.
 fn clip_copy(text: Str, linewise: Bool) [io]
@@ -7032,25 +7022,23 @@ fn clip_paste_argv() -> [Str] [io]
 // Read the OS clipboard: spawn the paste tool and drain its stdout (poll-gated
 // so a stuck helper can't freeze the editor).  "" on spawn failure / empty.
 fn clip_paste() -> Str [io, time]
-    match proc.spawn(clip_paste_argv())
-        None => ""
-        Some(pid) =>
-            let out = proc.stdout_fd(pid)
-            let sb = str.builder_new()
-            var more = true
-            while more
-                if proc.poll(out, 500) == 1
-                    let b = proc.read_byte(out)
-                    if b < 0
-                        more = false
-                    else
-                        str.builder_append_char(sb, b)
-                else
-                    more = false                  // 500ms idle → EOF or stalled
-            let r = str.builder_to_str(sb)
-            str.builder_drop(sb)
-            proc.close(pid)
-            r
+    let Some(pid) = proc.spawn(clip_paste_argv()) else return ""
+    let out = proc.stdout_fd(pid)
+    let sb = str.builder_new()
+    var more = true
+    while more
+        if proc.poll(out, 500) == 1
+            let b = proc.read_byte(out)
+            if b < 0
+                more = false
+            else
+                str.builder_append_char(sb, b)
+        else
+            more = false                  // 500ms idle → EOF or stalled
+    let r = str.builder_to_str(sb)
+    str.builder_drop(sb)
+    proc.close(pid)
+    r
 
 // ── `:files` picker source ──────────────────────────────────────────────────
 

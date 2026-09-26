@@ -584,122 +584,120 @@ fn colorscheme_named(name: Str, d: Int) -> Colorscheme
         colorscheme_default(d)
 
 fn load_colorscheme(cfg_path: Str, d: Int) -> Colorscheme [fs]
-    match fs.read(cfg_path)
-        None          => colorscheme_default(d)
-        Some(content) =>
-            var sfg = 0 - 1
-            var sbg = 0 - 1
-            var tfg = 0 - 1
-            var kwf = 0 - 1
-            var strf = 0 - 1
-            var cmtf = 0 - 1
-            var numf = 0 - 1
-            var typef = 0 - 1
-            var fnf = 0 - 1
-            var constf = 0 - 1
-            var modf = 0 - 1
-            // Chrome slots (Highlights).  Same -1 = "leave the base alone"
-            // convention as the syntax keys above.
-            var selfg = 0 - 1
-            var selbg = 0 - 1
-            var schfg = 0 - 1
-            var schbg = 0 - 1
-            var flsfg = 0 - 1
-            var flsbg = 0 - 1
-            var errf = 0 - 1
-            var warnf = 0 - 1
-            var curf = 0 - 1
-            var name_str = ""
-            let lines = str.split_lines(content)
-            var in_cs = false
-            var i = 0
-            let n = list.len(lines)
-            while i < n
-                let raw = str.trim(lines[i])
-                if str.len(raw) > 0 and (str.byte_at(raw, 0) ?? 0) != 35
-                    if (str.byte_at(raw, 0) ?? 0) == 91
-                        in_cs = raw == "[colorscheme]"
-                    else if in_cs
-                        let eq = util.index_of_byte(raw, 61)
-                        if eq > 0
-                            let key = str.trim(str.slice(raw, 0, eq))
-                            let cv = util.parse_color_val(util.strip_inline_comment(str.slice(raw, eq + 1, str.len(raw))))
-                            if key == "status_fg"
-                                sfg = cv
-                            else if key == "status_bg"
-                                sbg = cv
-                            else if key == "tilde_fg"
-                                tfg = cv
-                            else if key == "keyword"
-                                kwf = cv
-                            else if key == "string"
-                                strf = cv
-                            else if key == "comment"
-                                cmtf = cv
-                            else if key == "number"
-                                numf = cv
-                            else if key == "type"
-                                typef = cv
-                            else if key == "function"
-                                fnf = cv
-                            else if key == "constant"
-                                constf = cv
-                            else if key == "module"
-                                modf = cv
-                            else if key == "selection_fg"
-                                selfg = cv
-                            else if key == "selection_bg"
-                                selbg = cv
-                            else if key == "search_fg"
-                                schfg = cv
-                            else if key == "search_bg"
-                                schbg = cv
-                            else if key == "flash_fg"
-                                flsfg = cv
-                            else if key == "flash_bg"
-                                flsbg = cv
-                            else if key == "error_fg"
-                                errf = cv
-                            else if key == "warning_fg"
-                                warnf = cv
-                            else if key == "curline_fg"
-                                curf = cv
-                            else if key == "name"
-                                let nv = str.trim(util.strip_inline_comment(str.slice(raw, eq + 1, str.len(raw))))
-                                name_str = if str.len(nv) >= 2 and (str.byte_at(nv, 0) ?? 0) == '"'
-                                    str.slice(nv, 1, str.len(nv) - 1)
-                                else
-                                    nv
-                i = i + 1
-            // Layer explicit keys (>= 0) over the named-preset base (or the
-            // terminal-default base when no `name` is set).
-            let base = colorscheme_named(name_str, d)
-            Colorscheme {
-                status_fg: (if sfg >= 0 then sfg else base.status_fg),
-                status_bg: (if sbg >= 0 then sbg else base.status_bg),
-                tilde_fg: (if tfg >= 0 then tfg else base.tilde_fg),
-                kw_fg: (if kwf >= 0 then kwf else base.kw_fg),
-                str_fg: (if strf >= 0 then strf else base.str_fg),
-                cmt_fg: (if cmtf >= 0 then cmtf else base.cmt_fg),
-                num_fg: (if numf >= 0 then numf else base.num_fg),
-                type_fg: (if typef >= 0 then typef else base.type_fg),
-                fn_fg: (if fnf >= 0 then fnf else base.fn_fg),
-                const_fg: (if constf >= 0 then constf else base.const_fg),
-                mod_fg: (if modf >= 0 then modf else base.mod_fg),
-                // The base's depth, not `d`: a `name = "novo-16"` base was
-                // resolved at depth 16 whatever the terminal claims, and the
-                // amber mode indicator has to agree with the bar under it.
-                depth: base.depth,
-                hl: Highlights {
-                    sel_fg: (if selfg >= 0 then selfg else base.hl.sel_fg),
-                    sel_bg: (if selbg >= 0 then selbg else base.hl.sel_bg),
-                    search_fg: (if schfg >= 0 then schfg else base.hl.search_fg),
-                    search_bg: (if schbg >= 0 then schbg else base.hl.search_bg),
-                    flash_fg: (if flsfg >= 0 then flsfg else base.hl.flash_fg),
-                    flash_bg: (if flsbg >= 0 then flsbg else base.hl.flash_bg),
-                    err_fg: (if errf >= 0 then errf else base.hl.err_fg),
-                    warn_fg: (if warnf >= 0 then warnf else base.hl.warn_fg),
-                    curline_fg: (if curf >= 0 then curf else base.hl.curline_fg) } }
+    let Some(content) = fs.read(cfg_path) else return colorscheme_default(d)
+    var sfg = 0 - 1
+    var sbg = 0 - 1
+    var tfg = 0 - 1
+    var kwf = 0 - 1
+    var strf = 0 - 1
+    var cmtf = 0 - 1
+    var numf = 0 - 1
+    var typef = 0 - 1
+    var fnf = 0 - 1
+    var constf = 0 - 1
+    var modf = 0 - 1
+    // Chrome slots (Highlights).  Same -1 = "leave the base alone"
+    // convention as the syntax keys above.
+    var selfg = 0 - 1
+    var selbg = 0 - 1
+    var schfg = 0 - 1
+    var schbg = 0 - 1
+    var flsfg = 0 - 1
+    var flsbg = 0 - 1
+    var errf = 0 - 1
+    var warnf = 0 - 1
+    var curf = 0 - 1
+    var name_str = ""
+    let lines = str.split_lines(content)
+    var in_cs = false
+    var i = 0
+    let n = list.len(lines)
+    while i < n
+        let raw = str.trim(lines[i])
+        if str.len(raw) > 0 and (str.byte_at(raw, 0) ?? 0) != 35
+            if (str.byte_at(raw, 0) ?? 0) == 91
+                in_cs = raw == "[colorscheme]"
+            else if in_cs
+                let eq = util.index_of_byte(raw, 61)
+                if eq > 0
+                    let key = str.trim(str.slice(raw, 0, eq))
+                    let cv = util.parse_color_val(util.strip_inline_comment(str.slice(raw, eq + 1, str.len(raw))))
+                    if key == "status_fg"
+                        sfg = cv
+                    else if key == "status_bg"
+                        sbg = cv
+                    else if key == "tilde_fg"
+                        tfg = cv
+                    else if key == "keyword"
+                        kwf = cv
+                    else if key == "string"
+                        strf = cv
+                    else if key == "comment"
+                        cmtf = cv
+                    else if key == "number"
+                        numf = cv
+                    else if key == "type"
+                        typef = cv
+                    else if key == "function"
+                        fnf = cv
+                    else if key == "constant"
+                        constf = cv
+                    else if key == "module"
+                        modf = cv
+                    else if key == "selection_fg"
+                        selfg = cv
+                    else if key == "selection_bg"
+                        selbg = cv
+                    else if key == "search_fg"
+                        schfg = cv
+                    else if key == "search_bg"
+                        schbg = cv
+                    else if key == "flash_fg"
+                        flsfg = cv
+                    else if key == "flash_bg"
+                        flsbg = cv
+                    else if key == "error_fg"
+                        errf = cv
+                    else if key == "warning_fg"
+                        warnf = cv
+                    else if key == "curline_fg"
+                        curf = cv
+                    else if key == "name"
+                        let nv = str.trim(util.strip_inline_comment(str.slice(raw, eq + 1, str.len(raw))))
+                        name_str = if str.len(nv) >= 2 and (str.byte_at(nv, 0) ?? 0) == '"'
+                            str.slice(nv, 1, str.len(nv) - 1)
+                        else
+                            nv
+        i = i + 1
+    // Layer explicit keys (>= 0) over the named-preset base (or the
+    // terminal-default base when no `name` is set).
+    let base = colorscheme_named(name_str, d)
+    Colorscheme {
+        status_fg: (if sfg >= 0 then sfg else base.status_fg),
+        status_bg: (if sbg >= 0 then sbg else base.status_bg),
+        tilde_fg: (if tfg >= 0 then tfg else base.tilde_fg),
+        kw_fg: (if kwf >= 0 then kwf else base.kw_fg),
+        str_fg: (if strf >= 0 then strf else base.str_fg),
+        cmt_fg: (if cmtf >= 0 then cmtf else base.cmt_fg),
+        num_fg: (if numf >= 0 then numf else base.num_fg),
+        type_fg: (if typef >= 0 then typef else base.type_fg),
+        fn_fg: (if fnf >= 0 then fnf else base.fn_fg),
+        const_fg: (if constf >= 0 then constf else base.const_fg),
+        mod_fg: (if modf >= 0 then modf else base.mod_fg),
+        // The base's depth, not `d`: a `name = "novo-16"` base was
+        // resolved at depth 16 whatever the terminal claims, and the
+        // amber mode indicator has to agree with the bar under it.
+        depth: base.depth,
+        hl: Highlights {
+            sel_fg: (if selfg >= 0 then selfg else base.hl.sel_fg),
+            sel_bg: (if selbg >= 0 then selbg else base.hl.sel_bg),
+            search_fg: (if schfg >= 0 then schfg else base.hl.search_fg),
+            search_bg: (if schbg >= 0 then schbg else base.hl.search_bg),
+            flash_fg: (if flsfg >= 0 then flsfg else base.hl.flash_fg),
+            flash_bg: (if flsbg >= 0 then flsbg else base.hl.flash_bg),
+            err_fg: (if errf >= 0 then errf else base.hl.err_fg),
+            warn_fg: (if warnf >= 0 then warnf else base.hl.warn_fg),
+            curline_fg: (if curf >= 0 then curf else base.hl.curline_fg) } }
 
 // SGR parameters selecting one colour, in whichever encoding the slot
 // carries: `38;2;R;G;B` for a packed triple, `38;5;N` for an index.  The
