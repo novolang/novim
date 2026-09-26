@@ -336,11 +336,7 @@ fn lsp_msg_diags(msg: Str) -> Bool [io]
         None      =>
             return false
         Some(doc) =>
-            // NB: `return lsp_print_diags(doc)` directly miscompiles on LLVM —
-            // the match-subject drop is emitted before the call, so `doc` is a
-            // freed handle inside the callee.  Bind first, then return.
-            let r = lsp_print_diags(doc)
-            return r
+            return lsp_print_diags(doc)
 
 // `textDocument/didChange` (full-document sync; novols files are small).
 fn lsp_didchange(uri: Str, version: Int, text: Str) -> Str
