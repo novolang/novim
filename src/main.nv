@@ -82,8 +82,18 @@ empty file, yields a single empty line — a fresh scratch buffer — so the cur
 always has somewhere to sit.""")
 fn buf_load(path: Str) -> [Str] [fs]
     let Some(s) = fs.read(path) else return [""]
-    let ls = str.split_lines(s)
+    let ls = file_lines(s)
     if list.len(ls) == 0 then [""] else ls
+
+// The lines of a file's text or a process's output, where each line
+// ends in a newline.  `str.split_lines` keeps the empty segment after a
+// final newline, which here is the end of the last line, not a line of
+// its own, so it is dropped.  Buffer text joined with `buf_text` has no
+// final newline and is split with `str.split_lines` itself.
+fn file_lines(text: Str) -> [Str]
+    let ls = str.split_lines(text)
+    let n = list.len(ls)
+    if n > 0 and str.len(ls[n - 1]) == 0 then list.take(ls, n - 1) else ls
 
 // ── Command / search history persistence ─────────────────────────────────────
 // One entry per line in $XDG_STATE_HOME/novim/history (else
@@ -129,7 +139,7 @@ fn history_init() [io, fs]
     let _ = fs.mkdir_all(path.dirname(f))
     let cur = fs.read(f) ?? ""
     if str.len(cur) > 0
-        let kept = hist_cap(str.split_lines(cur), 1000)
+        let kept = hist_cap(file_lines(cur), 1000)
         let _ = fs.write(f, str.join(kept, str.from_char('\n')) + str.from_char('\n'))
 
 // Append one executed entry (best-effort; failures are ignored).
@@ -7067,7 +7077,7 @@ fn proc_take_lines(pid: Int, cap: Int) -> [Str] [io, time]
     let text = str.builder_to_str(sb)
     str.builder_drop(sb)
     grep_child_kill(pid)                  // kill+reap; an already-exited child just reaps
-    str.split_lines(text)
+    file_lines(text)
 
 // Drain a child process's stdout to EOF (poll-gated so a stuck child can't
 // freeze the editor), split into lines.  Reaps the child.
@@ -7087,7 +7097,7 @@ fn proc_drain_lines(pid: Int) -> [Str] [io, time]
     let text = str.builder_to_str(sb)
     str.builder_drop(sb)
     proc.close(pid)
-    str.split_lines(text)
+    file_lines(text)
 
 // Internal recursive file walk (the no-ripgrep fallback for `:files`) —
 // relative paths, skipping VCS/build dirs, bounded depth + count.
