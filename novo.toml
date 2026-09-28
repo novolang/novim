@@ -23,5 +23,11 @@ main        = "src/main.nv"
 [ffi.tree_sitter]
 pkg_config = "tree-sitter"
 
+# What `novo install` checks before it builds: the system library the
+# link step needs, and what to install when it is absent.
+[install]
+libs    = ["tree-sitter"]
+missing = "install libtree-sitter-dev (Debian, Ubuntu) or tree-sitter (Homebrew) first"
+
 [ffi.novo_treesitter_shim]
 linker = "-L/home/klajen/.novo/lib -lnovo_treesitter_shim -Wl,-rpath,/home/klajen/.novo/lib -ldl"
