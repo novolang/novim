@@ -11,15 +11,15 @@ main        = "src/main.nv"
 
 # Tree-sitter syntax highlighting (src/ts.nv).  Links the system libtree-sitter
 # plus the orbit/novo-treesitter shim, both installed to ~/.novo/lib by
-# orbit/novo-treesitter/bin/install-lib.sh.  The rpath is the absolute lib dir
+# orbit/novo-treesitter/bin/install-lib.sh.  The rpath is that absolute lib dir
 # so both the dev binary (orbit/novim/novim) and the installed ~/.novo/bin/novim
 # resolve the shim identically.  If the grammar .so isn't found at RUNTIME,
 # ts.ts_spans returns [] and the renderer falls back to the native tokenizer —
 # so highlighting degrades gracefully, but the shim .so must exist at link time
 # (run install-lib.sh first).
 #
-# The absolute /home path is machine-specific; novim is a local dogfood orbit.
-# A portable install would resolve $HOME at configure time.
+# `$HOME` in the linker value is the home directory of whoever runs the build;
+# the compiler expands it when it reads the manifest.
 [ffi.tree_sitter]
 pkg_config = "tree-sitter"
 
@@ -30,4 +30,4 @@ libs    = ["tree-sitter"]
 missing = "install libtree-sitter-dev (Debian, Ubuntu) or tree-sitter (Homebrew) first"
 
 [ffi.novo_treesitter_shim]
-linker = "-L/home/klajen/.novo/lib -lnovo_treesitter_shim -Wl,-rpath,/home/klajen/.novo/lib -ldl"
+linker = "-L$HOME/.novo/lib -lnovo_treesitter_shim -Wl,-rpath,$HOME/.novo/lib -ldl"
