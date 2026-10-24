@@ -211,7 +211,7 @@ fn layout_winids(lay: Layout, var acc: [Int]) -> [Int]
 @intent("""The next window id after `awin` in tree order, wrapping — the target
     for `Ctrl-W w`.  Returns `awin` unchanged when there is only one window.""")
 fn win_cycle_next(lay: Layout, awin: Int) -> Int
-    let ids = layout_winids(lay, var [])
+    let ids = layout_winids(lay, [])
     let nw = list.len(ids)
     if nw <= 1
         return awin

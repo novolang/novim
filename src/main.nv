@@ -21,6 +21,7 @@ use excmd
 use nvmap
 use fuzzy
 use throttle
+use tslang
 
 // Editor state.  The cursor is 0-based (line, col); the buffer is a line vector.
 struct Editor
@@ -6661,7 +6662,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                 let rem = wlayout.layout_remove(lay, awin)
                 if list.len(rem) > 0
                     lay = rem[0]
-                    let ids = wlayout.layout_winids(lay, var [])
+                    let ids = wlayout.layout_winids(lay, [])
                     let surv = ids[0]            // first surviving window takes focus
                     awin = surv
                     if win_buf[surv] == cur_buf
@@ -7135,7 +7136,7 @@ traversal.  The walk fallback is bounded the same way, by its own `cap`.""")
 fn files_candidates(cap: Int) -> [Str] [io, fs, time]
     match proc.spawn(["rg", "--files"])
         None =>
-            walk_files(".", "", 0, var [], cap)
+            walk_files(".", "", 0, [], cap)
         Some(pid) =>
             let raw = proc_take_lines(pid, cap)
             var out: [Str] = []
@@ -7147,7 +7148,7 @@ fn files_candidates(cap: Int) -> [Str] [io, fs, time]
             // let-bound, NOT a tail if/else: a statement-tail if returning a
             // push-rebound var reads its pre-push value under --llvm, so the
             // loop's appends to `out` would be invisible to the caller.
-            let r = if list.len(out) == 0 then walk_files(".", "", 0, var [], cap) else out
+            let r = if list.len(out) == 0 then walk_files(".", "", 0, [], cap) else out
             r
 
 // Recursively concatenate every `*.lua` under `dir` (newline-separated) into one
