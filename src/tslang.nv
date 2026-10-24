@@ -16,6 +16,8 @@
 
 // File extension → tree-sitter language id ("" when we have no grammar
 // mapping and the native tokenizer should handle it).
+use util
+
 fn ts_ext_of(p: Str) -> Str
     let e = path.ext(p)
     if str.len(e) >= 1 and (str.byte_at(e, 0) ?? 0) == '.'
