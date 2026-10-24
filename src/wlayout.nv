@@ -197,21 +197,21 @@ fn layout_winids(lay: Layout, var acc: [Int]) -> [Int]
             var a = acc
             var i = 0
             while i < list.len(parts)
-                a = layout_winids(parts[i], a)
+                a = layout_winids(parts[i], var a)
                 i = i + 1
             a
         LCol(parts) =>
             var a = acc
             var i = 0
             while i < list.len(parts)
-                a = layout_winids(parts[i], a)
+                a = layout_winids(parts[i], var a)
                 i = i + 1
             a
 
 @intent("""The next window id after `awin` in tree order, wrapping — the target
     for `Ctrl-W w`.  Returns `awin` unchanged when there is only one window.""")
 fn win_cycle_next(lay: Layout, awin: Int) -> Int
-    let ids = layout_winids(lay, [])
+    let ids = layout_winids(lay, var [])
     let nw = list.len(ids)
     if nw <= 1
         return awin

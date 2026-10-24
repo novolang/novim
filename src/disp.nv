@@ -279,7 +279,7 @@ fn syntax_colors(s: Str, kw: Int, strc: Int, cmt: Int, num: Int, d: Int) -> [Int
         else
             col = list.append(col, [0])
             i = i + 1
-    apply_effect_spans(col, s, d)
+    apply_effect_spans(var col, s, d)
 
 // ── Tree-sitter capture → colour ─────────────────────────────────────────────
 

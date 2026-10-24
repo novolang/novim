@@ -127,7 +127,7 @@ fn hist_parse(text: Str, kind: Int) -> [Str]
         if str.len(ln) > 0 and (str.byte_at(ln, 0) ?? 0) == pre
             out = list.push(out, str.slice(ln, 1, str.len(ln)))
         i = i + 1
-    hist_cap(out, 500)
+    hist_cap(var out, 500)
 
 // Load persisted history of one kind at startup.
 fn history_load(kind: Int) -> [Str] [io, fs]
@@ -3832,23 +3832,23 @@ fn edit_dot(ed: Editor, st: InputState, km: Keymap, var es: EditState) -> EditSt
 undo/redo bookkeeping: `u`/Ctrl-R restore from the snapshot stacks; any other
 byte runs the edit, and a snapshot is pushed onto the undo stack when the buffer
 actually changed.""")
-fn feed_edit_inner(ed: Editor, st: InputState, km: Keymap, es: EditState, b: Int) -> EditStep
+fn feed_edit_inner(ed: Editor, st: InputState, km: Keymap, var es: EditState, b: Int) -> EditStep
     if st.mode == 0 and st.pending == 0 and b == 'u'            // 'u' — undo
-        return edit_undo(ed, st, es)
+        return edit_undo(ed, st, var es)
     if st.mode == 0 and st.pending == 0 and b == '\x12'            // Ctrl-R — redo
-        return edit_redo(ed, st, es)
+        return edit_redo(ed, st, var es)
     if st.mode == 0 and st.pending == 0 and b == '.'            // '.' — repeat
-        return edit_dot(ed, st, km, es)
+        return edit_dot(ed, st, km, var es)
     if st.pending == 1 and b == 'v' and es.lvmode != 0         // `gv` — reselect last visual
         return edit_regv(ed, st, es)
     if st.pending == 1 and b == 'i' and es.giy >= 0            // `gi` — resume Insert at the last position
         return edit_gi(ed, st, es)
     if st.mode == 0 and st.pending == 0 and (b == ';' or b == ',') and es.findt >= 8   // ; / , — repeat find (count ok)
-        return edit_repeat_find(ed, st, es, b == ',')
+        return edit_repeat_find(ed, st, var es, b == ',')
     if es.active                                                // mid-command
-        return edit_record(ed, st, km, es, b)
+        return edit_record(ed, st, km, var es, b)
     if st.mode == 0 and st.pending == 0 and st.count == 0 and is_edit_start(b)
-        return edit_record(ed, st, km, edit_start(es, ed), b)
+        return edit_record(ed, st, km, edit_start(var es, ed), b)
     edit_pass(ed, st, km, es, b)
 
 // ── Named registers: `"a` selects register a for the next op ──────
@@ -3916,19 +3916,19 @@ fn edit_mark_op(ed: Editor, st: InputState, var es: EditState, b: Int) -> EditSt
     else
         EditStep { ed: ed, st: st, es: EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: 0, recording: es.recording, macrobuf: es.macrobuf, awaitmac: es.awaitmac, lastmacro: es.lastmacro, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt, giy: es.giy, gix: es.gix } }
 
-fn feed_edit_core(ed: Editor, st: InputState, km: Keymap, es: EditState, b: Int) -> EditStep
+fn feed_edit_core(ed: Editor, st: InputState, km: Keymap, var es: EditState, b: Int) -> EditStep
     if es.awaitmark != 0                                        // byte after m / ` / '
-        return edit_mark_op(ed, st, es, b)
+        return edit_mark_op(ed, st, var es, b)
     if st.mode == 0 and st.pending == 0 and b == 'm'           // 'm' — set mark
-        return edit_await_mark(ed, st, es, 1)
+        return edit_await_mark(ed, st, var es, 1)
     if st.mode == 0 and st.pending == 0 and b == '`'           // ` — jump to mark (exact)
-        return edit_await_mark(ed, st, es, 2)
+        return edit_await_mark(ed, st, var es, 2)
     if st.mode == 0 and st.pending == 0 and b == '\''           // ' — jump to mark (line)
-        return edit_await_mark(ed, st, es, 3)
+        return edit_await_mark(ed, st, var es, 3)
     if es.awaitreg                                              // byte after `"`
-        return edit_select_reg(ed, st, es, b)
+        return edit_select_reg(ed, st, var es, b)
     if st.mode == 0 and st.pending == 0 and b == '"'           // `"` — register prefix
-        return edit_await_reg(ed, st, es)
+        return edit_await_reg(ed, st, var es)
     edit_persist_reg(feed_edit_inner(ed, st, km, es, b))
 
 // ── Macros: q<reg> … q record, @<reg> / @@ replay ─────────────
@@ -3960,14 +3960,14 @@ fn macro_done_await(var es: EditState, last: Int) -> EditState
     EditState { last: es.last, cur: es.cur, snaptxt: es.snaptxt, active: es.active, snaped: es.snaped, undos: es.undos, redos: es.redos, regs: es.regs, reglw: es.reglw, rreg: es.rreg, awaitreg: es.awaitreg, marky: es.marky, markx: es.markx, awaitmark: es.awaitmark, recording: es.recording, macrobuf: es.macrobuf, awaitmac: 0, lastmacro: last, lvy: es.lvy, lvx: es.lvx, lvey: es.lvey, lvex: es.lvex, lvmode: es.lvmode, findc: es.findc, findt: es.findt, giy: es.giy, gix: es.gix }
 
 // The register letter after @ — replay it (`@@` = last) through feed_edit.
-fn macro_replay(ed: Editor, st: InputState, km: Keymap, es: EditState, b: Int) -> EditStep
+fn macro_replay(ed: Editor, st: InputState, km: Keymap, var es: EditState, b: Int) -> EditStep
     let idx = if b == '@' then es.lastmacro - 1 elif b >= 'a' and b <= 'z' then b - 'a' else 0 - 1
     if idx < 0
-        return EditStep { ed: ed, st: st, es: macro_done_await(es, es.lastmacro) }
+        return EditStep { ed: ed, st: st, es: macro_done_await(var es, es.lastmacro) }
     let seq = es.regs[idx]
     var e = ed
     var s = st
-    var ess = macro_done_await(es, idx + 1)
+    var ess = macro_done_await(var es, idx + 1)
     let m = str.len(seq)
     let mut j = 0
     while j < m
@@ -3982,46 +3982,46 @@ fn macro_replay(ed: Editor, st: InputState, km: Keymap, es: EditState, b: Int) -
 recording/replay (`q<reg>…q`, `@<reg>`) and remembers the last f/F/t/T target
 for `;`/`,`.  Returns an EditStep carrying the new editor, input state, and the
 session EditState (registers, marks, undo/redo, dot, macros).""")
-fn feed_edit(ed: Editor, st: InputState, km: Keymap, es: EditState, b: Int) -> EditStep
+fn feed_edit(ed: Editor, st: InputState, km: Keymap, var es: EditState, b: Int) -> EditStep
     if es.awaitmac == 1                                         // byte after q — register
-        return EditStep { ed: ed, st: st, es: macro_start(es, b) }
+        return EditStep { ed: ed, st: st, es: macro_start(var es, b) }
     if es.awaitmac == 2                                         // byte after @ — replay
         return macro_replay(ed, st, km, es, b)
     if st.mode == 0 and st.pending == 0 and b == 'q'          // 'q'
         if es.recording != 0
-            return EditStep { ed: ed, st: st, es: macro_stop(es) }
-        return EditStep { ed: ed, st: st, es: macro_await(es, 1) }
+            return EditStep { ed: ed, st: st, es: macro_stop(var es) }
+        return EditStep { ed: ed, st: st, es: macro_await(var es, 1) }
     if st.mode == 0 and st.pending == 0 and b == '@'          // '@'
-        return EditStep { ed: ed, st: st, es: macro_await(es, 2) }
-    let result = feed_edit_core(ed, st, km, es, b)
+        return EditStep { ed: ed, st: st, es: macro_await(var es, 2) }
+    var result = feed_edit_core(ed, st, km, es, b)
     // A completed f/F/t/T (pending 8-11 + a target byte) → remember for ; / ,.
-    let result1 = if st.pending >= 8 and st.pending <= 11 and b != '\e'
-        EditStep { ed: result.ed, st: result.st, es: edit_save_find(result.es, b, st.pending) }
+    var result1 = if st.pending >= 8 and st.pending <= 11 and b != '\e'
+        EditStep { ed: result.ed, st: result.st, es: edit_save_find(var result.es, b, st.pending) }
     else
         result
     // Leaving Visual mode → remember the selection for `gv`.
-    let result2 = if (st.mode == 2 or st.mode == 3) and result1.st.mode == 0
-        EditStep { ed: result1.ed, st: result1.st, es: edit_save_visual(result1.es, st, ed) }
+    var result2 = if (st.mode == 2 or st.mode == 3) and result1.st.mode == 0
+        EditStep { ed: result1.ed, st: result1.st, es: edit_save_visual(var result1.es, st, ed) }
     else
         result1
     // A completed yank → "0; a completed linewise delete → the "1-"9 ring.
     // (buf_text is only computed when the unnamed register actually changed.)
     let regchg = str.len(result2.st.reg) > 0 and result2.st.reg != st.reg and result2.st.mode == 0 and result2.st.pending == 0 and result2.st.count == 0
-    let result3 = if regchg and buf_text(result2.ed) == buf_text(ed)
-        EditStep { ed: result2.ed, st: result2.st, es: edit_numreg_yank(result2.es, result2.st.reg, result2.st.reg_lw) }
+    var result3 = if regchg and buf_text(result2.ed) == buf_text(ed)
+        EditStep { ed: result2.ed, st: result2.st, es: edit_numreg_yank(var result2.es, result2.st.reg, result2.st.reg_lw) }
     elif regchg and result2.st.reg_lw
-        EditStep { ed: result2.ed, st: result2.st, es: edit_numreg_del(result2.es, result2.st.reg) }
+        EditStep { ed: result2.ed, st: result2.st, es: edit_numreg_del(var result2.es, result2.st.reg) }
     elif regchg
-        EditStep { ed: result2.ed, st: result2.st, es: edit_numreg_small(result2.es, result2.st.reg) }
+        EditStep { ed: result2.ed, st: result2.st, es: edit_numreg_small(var result2.es, result2.st.reg) }
     else
         result2
     // Leaving Insert mode → remember the position for `gi` (ed = pre-Esc cursor).
-    let result4 = if st.mode == 1 and result3.st.mode == 0
-        EditStep { ed: result3.ed, st: result3.st, es: edit_save_gi(result3.es, ed) }
+    var result4 = if st.mode == 1 and result3.st.mode == 0
+        EditStep { ed: result3.ed, st: result3.st, es: edit_save_gi(var result3.es, ed) }
     else
         result3
     if es.recording != 0                                       // capture the keystroke
-        return EditStep { ed: result4.ed, st: result4.st, es: macro_capture(result4.es, b) }
+        return EditStep { ed: result4.ed, st: result4.st, es: macro_capture(var result4.es, b) }
     result4
 
 @intent("""`--batch <keys> <file>` entry point: load the file, feed each decoded
@@ -4121,23 +4121,23 @@ fn run_batch(keys: Str, cfg_path: Str, fpath: Str) [io, fs, time]
         elif cmd_mode
             if b == '\r' or b == '\n'            // Enter — run the command
                 if excmd.is_substitute(cmd_buf)
-                    es = edit_push_undo(es, ed)
+                    es = edit_push_undo(var es, ed)
                     ed = ex_substitute(ed, cmd_buf)
                     last_subst = cmd_buf
                 elif excmd.is_global(cmd_buf)
-                    es = edit_push_undo(es, ed)
+                    es = edit_push_undo(var es, ed)
                     ed = ex_global(ed, cmd_buf)
                 elif excmd.is_sort(cmd_buf)
-                    es = edit_push_undo(es, ed)
+                    es = edit_push_undo(var es, ed)
                     ed = ex_sort(ed, cmd_buf, rng_vlo, rng_vhi)
                 elif excmd.move_kind(cmd_buf) != 0
-                    es = edit_push_undo(es, ed)
+                    es = edit_push_undo(var es, ed)
                     ed = ex_linemove(ed, cmd_buf, excmd.move_kind(cmd_buf) == 2, rng_vlo, rng_vhi)
                 elif excmd.is_delete(cmd_buf)
-                    es = edit_push_undo(es, ed)
+                    es = edit_push_undo(var es, ed)
                     ed = ex_delete(ed, cmd_buf, rng_vlo, rng_vhi)
                 elif excmd.shift_amount(cmd_buf) != 0
-                    es = edit_push_undo(es, ed)
+                    es = edit_push_undo(var es, ed)
                     ed = ex_shift(ed, cmd_buf, rng_vlo, rng_vhi, opts.expandtab, opts.tabstop)
                 elif excmd.is_yank(cmd_buf)
                     let rs = excmd.parse_range(cmd_buf, rng_vlo, rng_vhi, ed.cy, list.len(ed.lines))
@@ -4145,10 +4145,10 @@ fn run_batch(keys: Str, cfg_path: Str, fpath: Str) [io, fs, time]
                     let yhi = if rs.has then rs.hi else ed.cy
                     let ytext = range_yank_text(ed.lines, ylo, yhi)
                     st = ist_set_reg(st, ytext, true)        // linewise → unnamed register
-                    es = edit_numreg_yank(es, ytext, true)
+                    es = edit_numreg_yank(var es, ytext, true)
                     ed = clamp(Editor { lines: ed.lines, cy: yhi, cx: 0 })
                 elif excmd.is_retab(cmd_buf)
-                    es = edit_push_undo(es, ed)
+                    es = edit_push_undo(var es, ed)
                     ed = ex_retab(ed, cmd_buf, rng_vlo, rng_vhi, opts.tabstop)
                 elif is_set(cmd_buf)
                     opts = apply_set(opts, cmd_buf)   // tabstop/expandtab affect edits in batch too
@@ -4280,7 +4280,7 @@ fn run_batch(keys: Str, cfg_path: Str, fpath: Str) [io, fs, time]
             let ty = screen_target(0, batch_rows, list.len(ed.lines), screen_kind(b))
             ed = clamp(Editor { lines: ed.lines, cy: ty, cx: first_nonblank(line_at(ed, ty)) })
         elif scroll_idle(st, es) and key_free(km, b) and b == '&' and str.len(last_subst) > 0   // & — repeat last :s on this line
-            es = edit_push_undo(es, ed)
+            es = edit_push_undo(var es, ed)
             ed = ex_substitute(ed, excmd.subst_current_line(last_subst))
         elif b == '\t' and (st.mode == 1 or st.mode == 4) and opts.expandtab
             // expandtab: Tab in Insert/Replace inserts `tabstop` spaces.
@@ -5593,7 +5593,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                                     if ins
                                         let ln = line_at(ed, ed.cy)
                                         if ed.cx < str.len(ln)
-                                            es = edit_push_undo(es, ed)
+                                            es = edit_push_undo(var es, ed)
                                             let newln = str.slice(ln, 0, ed.cx) + str.slice(ln, ed.cx + 1, str.len(ln))
                                             ed = Editor { lines: set_line(ed.lines, ed.cy, newln), cy: ed.cy, cx: ed.cx }
                                     else
@@ -5803,26 +5803,26 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                 elif cmd_mode
                     if b == '\r' or b == '\n'            // Enter — run command
                         if excmd.is_substitute(cmd_buf)
-                            es = edit_push_undo(es, ed)
+                            es = edit_push_undo(var es, ed)
                             ed = ex_substitute(ed, cmd_buf)
                             last_subst = cmd_buf
                         elif excmd.is_global(cmd_buf)
-                            es = edit_push_undo(es, ed)
+                            es = edit_push_undo(var es, ed)
                             ed = ex_global(ed, cmd_buf)
                         elif excmd.is_sort(cmd_buf)
-                            es = edit_push_undo(es, ed)
+                            es = edit_push_undo(var es, ed)
                             ed = ex_sort(ed, cmd_buf, rng_vlo, rng_vhi)
                         elif excmd.move_kind(cmd_buf) != 0
-                            es = edit_push_undo(es, ed)
+                            es = edit_push_undo(var es, ed)
                             ed = ex_linemove(ed, cmd_buf, excmd.move_kind(cmd_buf) == 2, rng_vlo, rng_vhi)
                         elif excmd.is_delete(cmd_buf)
-                            es = edit_push_undo(es, ed)
+                            es = edit_push_undo(var es, ed)
                             ed = ex_delete(ed, cmd_buf, rng_vlo, rng_vhi)
                         elif excmd.shift_amount(cmd_buf) != 0
-                            es = edit_push_undo(es, ed)
+                            es = edit_push_undo(var es, ed)
                             ed = ex_shift(ed, cmd_buf, rng_vlo, rng_vhi, opts.expandtab, opts.tabstop)
                         elif excmd.is_retab(cmd_buf)
-                            es = edit_push_undo(es, ed)
+                            es = edit_push_undo(var es, ed)
                             ed = ex_retab(ed, cmd_buf, rng_vlo, rng_vhi, opts.tabstop)
                         elif excmd.is_yank(cmd_buf)
                             let rs = excmd.parse_range(cmd_buf, rng_vlo, rng_vhi, ed.cy, list.len(ed.lines))
@@ -5830,7 +5830,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                             let yhi = if rs.has then rs.hi else ed.cy
                             let ytext = range_yank_text(ed.lines, ylo, yhi)
                             st = ist_set_reg(st, ytext, true)        // linewise → unnamed register
-                            es = edit_numreg_yank(es, ytext, true)
+                            es = edit_numreg_yank(var es, ytext, true)
                             ed = clamp(Editor { lines: ed.lines, cy: yhi, cx: 0 })
                             yflash = flash_lines(ylo, yhi)           // flash the yanked range
                             yflash_ticks = 3
@@ -5861,7 +5861,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                                     if str.len(nt) == 0
                                         lsp_info = "format: no changes"
                                     else
-                                        es = edit_push_undo(es, ed)
+                                        es = edit_push_undo(var es, ed)
                                         let nls = str.split_lines(nt)
                                         ed = clamp(Editor { lines: if list.len(nls) == 0 then [""] else nls, cy: ed.cy, cx: ed.cx })
                                         // refresh diagnostics for the reformatted buffer
@@ -5916,7 +5916,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                                             lsp_info = "rename: no occurrences"
                                         else
                                             let trips = lsp.lsp_rename_triples(rresp)
-                                            es = edit_push_undo(es, ed)
+                                            es = edit_push_undo(var es, ed)
                                             ed = clamp(apply_rename(ed, trips, nts))
                                             lsp_lasttext = buf_text(ed)
                                             lsp_ver = lsp_ver + 1
@@ -5928,7 +5928,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                                 lsp_info = "unsaved changes (:e! to override)"
                             else
                                 let fresh = file_to_text(curpath)
-                                es = edit_push_undo(es, ed)
+                                es = edit_push_undo(var es, ed)
                                 let fl = str.split_lines(fresh)
                                 ed = clamp(Editor { lines: if list.len(fl) == 0 then [""] else fl, cy: ed.cy, cx: ed.cx })
                                 disk_text = buf_text(ed)
@@ -5953,7 +5953,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                             if not excmd.is_substitute(sub)
                                 lsp_info = "bufdo: only :s/:%s supported"
                             else
-                                es = edit_push_undo(es, ed)   // active buffer
+                                es = edit_push_undo(var es, ed)   // active buffer
                                 ed = ex_substitute(ed, sub)
                                 var bi = 0                     // stored buffers
                                 while bi < list.len(bufs_text)
@@ -6381,7 +6381,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                             clo = para_bwd(ed, cnt)
                             chi = ed.cy
                         if clo >= 0
-                            es = edit_push_undo(es, ed)
+                            es = edit_push_undo(var es, ed)
                             ed = clamp(Editor { lines: comment_toggle(ed.lines[:], clo, chi, pfx), cy: ed.cy, cx: ed.cx })
                         st = ist_done(st)             // consume the count either way
                 elif cpend_obj                        // gc + a/i, awaiting the object char (p)
@@ -6389,7 +6389,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                     if b == 'p'                       // gcap / gcip — the current paragraph
                         let to = textobj_paragraph(ed, cpend_around)
                         if to.ok
-                            es = edit_push_undo(es, ed)
+                            es = edit_push_undo(var es, ed)
                             ed = clamp(Editor { lines: comment_toggle(ed.lines[:], to.vr.sy, to.vr.ey, comment_prefix(curpath)), cy: ed.cy, cx: ed.cx })
                     st = ist_done(st)                 // consume any count
                 elif vgc_pend                         // Visual `g` 2nd byte (gc on the selection)
@@ -6397,7 +6397,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                     if b == 'c'                       // gc — toggle-comment the selected lines, leave Visual
                         let vlo = if st.avy < ed.cy then st.avy else ed.cy
                         let vhi = if st.avy < ed.cy then ed.cy else st.avy
-                        es = edit_push_undo(es, ed)
+                        es = edit_push_undo(var es, ed)
                         ed = clamp(Editor { lines: comment_toggle(ed.lines[:], vlo, vhi, comment_prefix(curpath)), cy: vlo, cx: 0 })
                         st = ist_done(st)
                     else                              // not gc — replay g + this byte through Visual
@@ -6434,7 +6434,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                     let ty = screen_target(top, rows, list.len(ed.lines), screen_kind(b))
                     ed = clamp(Editor { lines: ed.lines, cy: ty, cx: first_nonblank(line_at(ed, ty)) })
                 elif scroll_idle(st, es) and key_free(km, b) and b == '&' and str.len(last_subst) > 0   // & — repeat last :s
-                    es = edit_push_undo(es, ed)
+                    es = edit_push_undo(var es, ed)
                     ed = ex_substitute(ed, excmd.subst_current_line(last_subst))
                 elif scroll_idle(st, es) and key_free(km, b) and (b == '\x05' or b == '\x19')   // Ctrl-E / Ctrl-Y — scroll one line
                     let body = rows - 1
@@ -6661,7 +6661,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                 let rem = wlayout.layout_remove(lay, awin)
                 if list.len(rem) > 0
                     lay = rem[0]
-                    let ids = wlayout.layout_winids(lay, [])
+                    let ids = wlayout.layout_winids(lay, var [])
                     let surv = ids[0]            // first surviving window takes focus
                     awin = surv
                     if win_buf[surv] == cur_buf
@@ -7113,7 +7113,7 @@ fn walk_files(dir: Str, prefix: Str, depth: Int, var acc: [Str], cap: Int) -> [S
             let full = path.join(dir, name)
             let rel = if str.len(prefix) == 0 then name else prefix + "/" + name
             if fs.is_dir(full)
-                a = walk_files(full, rel, depth + 1, a, cap)
+                a = walk_files(full, rel, depth + 1, var a, cap)
             else
                 a = list.push(a, rel)
         i = i + 1
@@ -7135,7 +7135,7 @@ traversal.  The walk fallback is bounded the same way, by its own `cap`.""")
 fn files_candidates(cap: Int) -> [Str] [io, fs, time]
     match proc.spawn(["rg", "--files"])
         None =>
-            walk_files(".", "", 0, [], cap)
+            walk_files(".", "", 0, var [], cap)
         Some(pid) =>
             let raw = proc_take_lines(pid, cap)
             var out: [Str] = []
@@ -7147,7 +7147,7 @@ fn files_candidates(cap: Int) -> [Str] [io, fs, time]
             // let-bound, NOT a tail if/else: a statement-tail if returning a
             // push-rebound var reads its pre-push value under --llvm, so the
             // loop's appends to `out` would be invisible to the caller.
-            let r = if list.len(out) == 0 then walk_files(".", "", 0, [], cap) else out
+            let r = if list.len(out) == 0 then walk_files(".", "", 0, var [], cap) else out
             r
 
 // Recursively concatenate every `*.lua` under `dir` (newline-separated) into one
