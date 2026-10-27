@@ -3930,7 +3930,7 @@ fn feed_edit_core(ed: Editor, st: InputState, km: Keymap, var es: EditState, b: 
         return edit_select_reg(ed, st, var es, b)
     if st.mode == 0 and st.pending == 0 and b == '"'           // `"` — register prefix
         return edit_await_reg(ed, st, var es)
-    edit_persist_reg(feed_edit_inner(ed, st, km, es, b))
+    edit_persist_reg(feed_edit_inner(ed, st, km, var es, b))
 
 // ── Macros: q<reg> … q record, @<reg> / @@ replay ─────────────
 // Recorded keystrokes are stored in the named-register slot (vim shares them),
@@ -3972,7 +3972,7 @@ fn macro_replay(ed: Editor, st: InputState, km: Keymap, var es: EditState, b: In
     let m = str.len(seq)
     let mut j = 0
     while j < m
-        let step = feed_edit(e, s, km, ess, str.byte_at(seq, j) ?? 0)
+        let step = feed_edit(e, s, km, var ess, str.byte_at(seq, j) ?? 0)
         e = step.ed
         s = step.st
         ess = step.es
@@ -3987,14 +3987,14 @@ fn feed_edit(ed: Editor, st: InputState, km: Keymap, var es: EditState, b: Int) 
     if es.awaitmac == 1                                         // byte after q — register
         return EditStep { ed: ed, st: st, es: macro_start(var es, b) }
     if es.awaitmac == 2                                         // byte after @ — replay
-        return macro_replay(ed, st, km, es, b)
+        return macro_replay(ed, st, km, var es, b)
     if st.mode == 0 and st.pending == 0 and b == 'q'          // 'q'
         if es.recording != 0
             return EditStep { ed: ed, st: st, es: macro_stop(var es) }
         return EditStep { ed: ed, st: st, es: macro_await(var es, 1) }
     if st.mode == 0 and st.pending == 0 and b == '@'          // '@'
         return EditStep { ed: ed, st: st, es: macro_await(var es, 2) }
-    var result = feed_edit_core(ed, st, km, es, b)
+    var result = feed_edit_core(ed, st, km, var es, b)
     // A completed f/F/t/T (pending 8-11 + a target byte) → remember for ; / ,.
     var result1 = if st.pending >= 8 and st.pending <= 11 and b != '\e'
         EditStep { ed: result.ed, st: result.st, es: edit_save_find(var result.es, b, st.pending) }
@@ -4287,13 +4287,13 @@ fn run_batch(keys: Str, cfg_path: Str, fpath: Str) [io, fs, time]
             // expandtab: Tab in Insert/Replace inserts `tabstop` spaces.
             var sp = 0
             while sp < opts.tabstop
-                let estep = feed_edit(ed, st, km, es, ' ')
+                let estep = feed_edit(ed, st, km, var es, ' ')
                 ed = estep.ed
                 st = estep.st
                 es = estep.es
                 sp = sp + 1
         else
-            let estep = feed_edit(ed, st, km, es, b)
+            let estep = feed_edit(ed, st, km, var es, b)
             ed = estep.ed
             st = estep.st
             es = estep.es
@@ -5598,7 +5598,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                                             let newln = str.slice(ln, 0, ed.cx) + str.slice(ln, ed.cx + 1, str.len(ln))
                                             ed = Editor { lines: set_line(ed.lines, ed.cy, newln), cy: ed.cy, cx: ed.cx }
                                     else
-                                        let dstep = feed_edit(ed, st, km, es, 'x')   // normal/visual: like `x`
+                                        let dstep = feed_edit(ed, st, km, var es, 'x')   // normal/visual: like `x`
                                         ed = dstep.ed
                                         st = dstep.st
                                         es = dstep.es
@@ -6341,11 +6341,11 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                     else                              // not `gd`/`gc` — replay g + this byte
                         let jy = ed.cy
                         let jx = ed.cx
-                        let g1 = feed_edit(ed, st, km, es, 'g')
+                        let g1 = feed_edit(ed, st, km, var es, 'g')
                         ed = g1.ed
                         st = g1.st
                         es = g1.es
-                        let g2 = feed_edit(ed, st, km, es, b)
+                        let g2 = feed_edit(ed, st, km, var es, b)
                         ed = g2.ed
                         st = g2.st
                         es = g2.es
@@ -6402,11 +6402,11 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                         ed = clamp(Editor { lines: comment_toggle(ed.lines[:], vlo, vhi, comment_prefix(curpath)), cy: vlo, cx: 0 })
                         st = ist_done(st)
                     else                              // not gc — replay g + this byte through Visual
-                        let v1 = feed_edit(ed, st, km, es, 'g')
+                        let v1 = feed_edit(ed, st, km, var es, 'g')
                         ed = v1.ed
                         st = v1.st
                         es = v1.es
-                        let v2 = feed_edit(ed, st, km, es, b)
+                        let v2 = feed_edit(ed, st, km, var es, b)
                         ed = v2.ed
                         st = v2.st
                         es = v2.es
@@ -6578,7 +6578,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                         binsert_append = b == 'A'
                         binsert_active = true
                     let pre_y0 = es.regs[26]              // "0 register — changes only on a yank
-                    let estep = feed_edit(ed, st, km, es, b)
+                    let estep = feed_edit(ed, st, km, var es, b)
                     ed = estep.ed
                     st = estep.st
                     es = estep.es
