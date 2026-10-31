@@ -18,6 +18,7 @@ use wlayout
 use colorscheme
 use disp
 use excmd
+use exhelp
 use nvmap
 use fuzzy
 use throttle
@@ -2551,15 +2552,18 @@ fn draw_picker(cands: [Str], marks: [Str], top_idx: [Int], sel: Int, query: Str,
 
 fn draw_buflist(paths: [Str], cur: Int, rows: Int) [io]
     var bi = 0
+    var shown = 0                       // the `[help]` buffer is unlisted
     let maxn = if rows - 2 > 0 then rows - 2 else 1
-    while bi < list.len(paths) and bi < maxn
-        cup(bi + 1, 1)
-        csi()
-        emit("K")
-        let mark = if bi == cur then "> " else "  "
-        emit(mark + str.from_int(bi + 1) + "  " + util.basename_of(paths[bi]))
+    while bi < list.len(paths) and shown < maxn
+        if paths[bi] != exhelp.help_path()
+            cup(shown + 1, 1)
+            csi()
+            emit("K")
+            let mark = if bi == cur then "> " else "  "
+            emit(mark + str.from_int(bi + 1) + "  " + util.basename_of(paths[bi]))
+            shown = shown + 1
         bi = bi + 1
-    cup(bi + 1, 1)
+    cup(shown + 1, 1)
     csi()
     emit("K")
     emit("-- :b <n> to switch · any key to dismiss --")
@@ -4069,6 +4073,14 @@ fn run_batch(keys: Str, cfg_path: Str, fpath: Str) [io, fs, time]
     var blast = now_ms()
     var bmoved = false
     let decoded = decode_escapes(keys)
+    // `:help` in --batch: the batch has one buffer and no windows, so the help
+    // buffer replaces it (and `q` / `:close` puts it back) instead of splitting.
+    var hb_on = false
+    var hb_text = ""                      // the help text, to keep the buffer read-only
+    var hb_lines: [Str] = []              // the buffer set aside while help is shown
+    var hb_path = ""
+    var hb_cy = 0
+    var hb_cx = 0
     var cmd_mode = false
     var cmd_buf = ""
     var rng_vlo = 0 - 1                   // visual-selection line bounds for `'<,'>`
@@ -4155,6 +4167,20 @@ fn run_batch(keys: Str, cfg_path: Str, fpath: Str) [io, fs, time]
                     opts = apply_set(opts, cmd_buf)   // tabstop/expandtab affect edits in batch too
                 elif excmd.is_goto(cmd_buf)
                     ed = ex_goto(ed, cmd_buf)
+                elif exhelp.is_help(cmd_buf)         // :help [topic] — the Ex command cheat sheet
+                    hb_text = exhelp.help_text(exhelp.help_topic(cmd_buf), 74)
+                    if not hb_on
+                        hb_on = true
+                        hb_lines = ed.lines[:]
+                        hb_path = curpath
+                        hb_cy = ed.cy
+                        hb_cx = ed.cx
+                    curpath = exhelp.help_path()
+                    ed = Editor { lines: str.split_lines(hb_text), cy: 0, cx: 0 }
+                elif hb_on and excmd.is_winclose(cmd_buf)   // :close / :q in the help window
+                    hb_on = false
+                    curpath = hb_path
+                    ed = clamp(Editor { lines: hb_lines, cy: hb_cy, cx: hb_cx })
                 elif excmd.is_files(cmd_buf)         // :files [query] — the file picker
                     picker_active = true
                     picker_src = 1
@@ -4227,7 +4253,9 @@ fn run_batch(keys: Str, cfg_path: Str, fpath: Str) [io, fs, time]
                         pnote = "pinned [" + str.from_int(pslot + 1) + "] " + util.basename_of(curpath)
                 else
                     let r = excmd.exec_ex(cmd_buf)
-                    if r.save
+                    if r.save and curpath == exhelp.help_path()
+                        pnote = "E382: cannot write, the help buffer is not a file"
+                    elif r.save
                         if not save_buf(curpath, ed.lines)
                             pnote = write_failed_msg(curpath)
                     if r.quit
@@ -4256,6 +4284,10 @@ fn run_batch(keys: Str, cfg_path: Str, fpath: Str) [io, fs, time]
                     search_buf = str.slice(search_buf, 0, str.len(search_buf) - 1)
             elif b >= ' ' and b < '\x7f'
                 search_buf = search_buf + str.from_byte(b)
+        elif hb_on and st.mode == 0 and b == 'q' and scroll_idle(st, es)   // q in the help buffer closes it
+            hb_on = false
+            curpath = hb_path
+            ed = clamp(Editor { lines: hb_lines, cy: hb_cy, cx: hb_cx })
         elif b == 58 and st.mode == 0        // ':' — open the Ex line
             cmd_mode = true
             cmd_buf = ""
@@ -4297,6 +4329,10 @@ fn run_batch(keys: Str, cfg_path: Str, fpath: Str) [io, fs, time]
             ed = estep.ed
             st = estep.st
             es = estep.es
+        if hb_on and buf_text(ed) != hb_text   // the help buffer is not modifiable
+            ed = clamp(Editor { lines: str.split_lines(hb_text), cy: ed.cy, cx: ed.cx })
+            st = ist_done(st)
+            pnote = "E21: read-only"
         // Ask the throttle the same question the interactive drain asks: with
         // more keys still queued and the picker moved, has the budget run out?
         if picker_active and throttle.should_render(now_ms(), blast, bbudget, i + 1 < n, bmoved)
@@ -5341,6 +5377,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
     // Deferred focus change to this window id (Ctrl-W w / h / j / k / l); -1 none.
     var pending_focus = 0 - 1
     var buflist = false                  // `:ls` — show the buffer-list overlay until the next key
+    var help_fill = ""                   // text of the `[help]` buffer while it is being created
     // ── Picker overlay (picker-and-pins): modal prompt + fuzzy-ranked list ──
     var picker_active = false
     var picker_src = 0                   // 0 = :bufs; no other source is wired
@@ -5848,6 +5885,45 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                         elif is_set(cmd_buf)
                             opts = apply_set(opts, cmd_buf)
                             left = hscroll_for(left, ed, opts, cols)
+                        elif exhelp.is_help(cmd_buf)             // :help [topic] — the Ex command cheat sheet in a read-only split
+                            let htext = exhelp.help_text(exhelp.help_topic(cmd_buf), cols - 6)
+                            let hix = buf_index_of(bufs_path, exhelp.help_path())
+                            var hwin = 0 - 1                       // a window already showing it
+                            if hix >= 0
+                                let hids = wlayout.layout_winids(lay, [])
+                                var hwi = 0
+                                while hwi < list.len(hids)
+                                    if win_buf[hids[hwi]] == hix
+                                        hwin = hids[hwi]
+                                    hwi = hwi + 1
+                            if hwin < 0
+                                help_fill = htext                  // no help window: split, then show the buffer
+                                if hix >= 0
+                                    bufs_text = util.set_str_at(bufs_text, hix, htext)
+                                    bufs_disk = util.set_str_at(bufs_disk, hix, htext)
+                                    bufs_cy = util.set_int_at(bufs_cy, hix, 0)
+                                    bufs_cx = util.set_int_at(bufs_cx, hix, 0)
+                                    bufs_top = util.set_int_at(bufs_top, hix, 0)
+                                pending_wcmd = 1
+                                want_path = exhelp.help_path()
+                                want_y = 0 - 1
+                            else                                   // reuse it: new content, cursor home, focus
+                                bufs_text = util.set_str_at(bufs_text, hix, htext)
+                                bufs_disk = util.set_str_at(bufs_disk, hix, htext)
+                                bufs_cy = util.set_int_at(bufs_cy, hix, 0)
+                                bufs_cx = util.set_int_at(bufs_cx, hix, 0)
+                                bufs_top = util.set_int_at(bufs_top, hix, 0)
+                                win_cy = util.set_int_at(win_cy, hwin, 0)
+                                win_cx = util.set_int_at(win_cx, hwin, 0)
+                                win_top = util.set_int_at(win_top, hwin, 0)
+                                win_left = util.set_int_at(win_left, hwin, 0)
+                                if hix == cur_buf
+                                    ed = Editor { lines: str.split_lines(htext), cy: 0, cx: 0 }
+                                    disk_text = htext
+                                    top = 0
+                                    left = 0
+                                else
+                                    pending_focus = hwin
                         elif excmd.is_noh(cmd_buf)
                             hl_off = true                 // hide the highlight; keep the pattern for n/N
                         elif excmd.is_fmt(cmd_buf)
@@ -5958,7 +6034,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                                 ed = ex_substitute(ed, sub)
                                 var bi = 0                     // stored buffers
                                 while bi < list.len(bufs_text)
-                                    if bi != cur_buf
+                                    if bi != cur_buf and bufs_path[bi] != exhelp.help_path()
                                         let pre = bufs_text[bi]
                                         let nt = sub_text(pre, sub)
                                         if nt != pre
@@ -6039,9 +6115,10 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                             picker_meta = []
                             var pbi = 0
                             while pbi < list.len(bufs_path)
-                                picker_cands = list.push(picker_cands, bufs_path[pbi])
-                                picker_marks = list.push(picker_marks, if pbi == cur_buf then "% " elif pbi == alt_buf then "# " else "  ")
-                                picker_meta = list.push(picker_meta, bufs_path[pbi])
+                                if bufs_path[pbi] != exhelp.help_path()      // unlisted
+                                    picker_cands = list.push(picker_cands, bufs_path[pbi])
+                                    picker_marks = list.push(picker_marks, if pbi == cur_buf then "% " elif pbi == alt_buf then "# " else "  ")
+                                    picker_meta = list.push(picker_meta, bufs_path[pbi])
                                 pbi = pbi + 1
                         elif excmd.is_files(cmd_buf)         // :files [query] — the file picker
                             picker_active = true
@@ -6145,7 +6222,9 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                                     want_y = 0 - 1
                                     want_x = 0
                             else                          // navigation: bn/bp/bfirst/blast
-                                let tgt2 = if bk == 1 then (cur_buf + 1) % nb elif bk == 2 then (cur_buf + nb - 1) % nb elif bk == 4 then 0 else nb - 1
+                                var tgt2 = if bk == 1 then (cur_buf + 1) % nb elif bk == 2 then (cur_buf + nb - 1) % nb elif bk == 4 then 0 else nb - 1
+                                if bufs_path[tgt2] == exhelp.help_path()      // unlisted: step past it
+                                    tgt2 = if bk == 2 or bk == 5 then (tgt2 + nb - 1) % nb else (tgt2 + 1) % nb
                                 jback = list.push(jback, jentry(curpath, ed.cy, ed.cx))
                                 jfwd = []
                                 want_path = bufs_path[tgt2]
@@ -6209,6 +6288,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                                 // would create a file literally named "".
                                 if curpath == ""
                                     lsp_info = "E32: no file name"
+                                elif curpath == exhelp.help_path()
+                                    lsp_info = "E382: cannot write, the help buffer is not a file"
                                 else
                                     if save_buf(curpath, ed.lines)
                                         disk_text = buf_text(ed)
@@ -6412,6 +6493,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                         es = v2.es
                 elif (st.mode == 2 or st.mode == 3 or st.mode == 5) and b == 'g' and key_free(km, 'g')   // Visual `g` — await c (gc)
                     vgc_pend = true
+                elif scroll_idle(st, es) and st.mode == 0 and b == 'q' and curpath == exhelp.help_path() and wlayout.layout_count(lay) > 1   // q in the help window closes it
+                    pending_wcmd = 3
                 elif scroll_idle(st, es) and key_free(km, 23) and b == 23   // Ctrl-W — window command prefix
                     wpend = true
                 elif g_idle(st, es) and key_free(km, 'g') and b == 'g'   // 'g' — await 2nd byte (gd / gc / gg / gu / gv / gi…), count-carrying
@@ -6659,6 +6742,8 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
             changed = true
         elif pending_wcmd == 3                // Ctrl-W c / Ctrl-W q / :close / :q — close active window
             if wlayout.layout_count(lay) > 1
+                if curpath == exhelp.help_path()     // the help buffer goes with its window
+                    want_close = curpath
                 let rem = wlayout.layout_remove(lay, awin)
                 if list.len(rem) > 0
                     lay = rem[0]
@@ -6715,7 +6800,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
             var idx = buf_index_of(bufs_path, want_path)
             let creating = idx < 0
             if creating                        // open a new buffer from disk
-                bufs_text = list.push(bufs_text, file_to_text(want_path))
+                bufs_text = list.push(bufs_text, if want_path == exhelp.help_path() then help_fill else file_to_text(want_path))
                 bufs_path = list.push(bufs_path, want_path)
                 bufs_cy = list.push(bufs_cy, 0)
                 bufs_cx = list.push(bufs_cx, 0)
@@ -6884,6 +6969,12 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                             diag_li = dli
                             diag_msgs = dmsgs
                             changed = true
+        if curpath == exhelp.help_path() and buf_text(ed) != disk_text   // the help buffer is not modifiable
+            let hro = str.split_lines(disk_text)
+            ed = clamp(Editor { lines: if list.len(hro) == 0 then [""] else hro, cy: ed.cy, cx: ed.cx })
+            st = ist_done(st)
+            lsp_info = "E21: read-only"
+            changed = true
         if changed
             top = scroll_to(top, ed.cy, rows - 1)
             left = hscroll_for(left, ed, opts, cols)

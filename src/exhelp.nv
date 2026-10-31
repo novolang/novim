@@ -1,0 +1,315 @@
+// exhelp.nv — the Ex command table and the `:help` cheat sheet for novim.
+//
+// ONE table lists every Ex command the editor implements.  The `[help]`
+// buffer (a read-only split window) is rendered from it; tests/orbit/test_novim_help.sh compares it with the
+// command literals in excmd.nv, so a command added to the dispatcher without
+// a row here fails the gate.  Pure — no [io]: main.nv owns the window and the
+// buffer.
+//
+// A row is one string, `group|names|args|description|hidden`:
+//   group        the heading the row is listed under
+//   names        comma-separated; the first is the canonical name, the rest are
+//                aliases shown beside it
+//   args         the argument synopsis ("" for none)
+//   description  one line of plain prose
+//   hidden       comma-separated spellings the dispatcher also accepts (the
+//                abbreviations `de`, `del`, ...) that are not worth a column
+
+use util
+use disp
+
+// The groups, in display order.
+fn groups() -> [Str]
+    ["Files and buffers", "Windows", "Search and replace", "Lines", "Options", "Pickers", "LSP", "Misc"]
+
+fn table() -> [Str]
+    [
+        "Files and buffers|w||write the buffer to its file|",
+        "Files and buffers|wq,x|[!]|write the buffer and quit|wq!",
+        "Files and buffers|q,quit|[!]|quit; closes the window when the screen is split; refuses unsaved changes unless !|q!",
+        "Files and buffers|wa,wall||write every modified buffer|",
+        "Files and buffers|wqa,wqall,xa,xall||write every modified buffer and quit|",
+        "Files and buffers|qa,qall|[!]|quit all buffers; ! discards unsaved changes|qa!,qall!",
+        "Files and buffers|e,edit|[!] [file]|open a file; with no file, reload the current one from disk; ! discards unsaved changes|e!,edit!",
+        "Files and buffers|badd|<file>|add a buffer without switching to it|",
+        "Files and buffers|ls,buffers||list the open buffers; any key dismisses the list|",
+        "Files and buffers|b,buffer|<n, name or #>|switch to buffer number n, the buffer whose name matches, or the alternate buffer (#)|b#,buffer#",
+        "Files and buffers|bn,bnext||next buffer|",
+        "Files and buffers|bp,bprev,bprevious||previous buffer|",
+        "Files and buffers|bf,bfirst||first buffer|",
+        "Files and buffers|bl,blast||last buffer|",
+        "Files and buffers|bd,bdelete||close the current buffer (not the last one)|",
+        "Files and buffers|bufdo|<:s command>|run a substitution in every buffer|",
+        "Files and buffers|args,ar||show the argument list (the files named on the command line)|",
+        "Files and buffers|next,n||next file of the argument list|n!,next!",
+        "Files and buffers|prev,previous,N||previous file of the argument list|Next,prev!",
+        "Files and buffers|first,rewind||first file of the argument list|fir",
+        "Files and buffers|last||last file of the argument list|la",
+        "Files and buffers|wnext,wn||write the buffer, then go to the next file of the argument list|",
+        "Files and buffers|wprev,wN||write the buffer, then go to the previous file of the argument list|wp",
+        "Windows|split,sp,new||split the window; the new window is below the old one|",
+        "Windows|vsplit,vs,vnew||split the window; the new window sits beside the old one|vsp",
+        "Windows|close,clo||close the current window|",
+        "Windows|only,on||close every window except the current one|",
+        "Search and replace|s|/pat/repl/[g]|replace pat with repl on the current line; g replaces every match; pat is a Vim-style regex|",
+        "Search and replace|%s|/pat/repl/[g]|the same over the whole buffer; a range (:2,5s/...) limits it|",
+        "Search and replace|g|/pat/d|delete every line that matches pat|",
+        "Search and replace|v,g!|/pat/d|delete every line that does not match pat|",
+        "Search and replace|noh,nohlsearch||clear the search highlight; n and N still find the pattern|nohl",
+        "Lines|d,delete|[range]|delete the lines of the range, or the current line|de,del",
+        "Lines|y,yank|[range]|yank the lines of the range, or the current line|ya,yan",
+        "Lines|m,move|<address>|move the current line (or range) below the address|mo,mov",
+        "Lines|t,co,copy|<address>|copy the current line (or range) below the address|cop",
+        "Lines|>,<|[range]|indent or dedent the lines; repeat the sign to repeat the shift (:>>)|",
+        "Lines|sort|[!][u][n][i]|sort the lines; ! descending, u drop duplicates, n by number, i ignore case|",
+        "Lines|retab|[range]|turn the leading tabs of each line into spaces at the current tabstop|ret,reta",
+        "Lines|{number},$||go to that line; $ is the last line|",
+        "Options|set|<option>...|set options for this session; several may follow one :set. no<opt> turns an option off, <opt>! toggles it|",
+        "Options|set number,set nu||line numbers in the gutter|",
+        "Options|set relativenumber,set rnu||line numbers relative to the cursor line|",
+        "Options|set hlsearch,set hls||highlight the matches of the last search|",
+        "Options|set wrap||wrap long lines at the window edge|",
+        "Options|set syntax,set syn||syntax colours|",
+        "Options|set expandtab,set et||Tab in Insert mode inserts tabstop spaces|",
+        "Options|set tabstop=N,set ts=N||the width of a tab, in columns|",
+        "Options|set treesitter,set ts||tree-sitter highlighting; set nots or set ts! switches it off or toggles it|",
+        "Options|colorscheme,colo|<name>|switch the colourscheme|",
+        "Pickers|files,findfiles|[query]|pick a file from the project, fuzzy-ranked; Enter opens it|",
+        "Pickers|grep,livegrep|[query]|search the project with ripgrep as you type; Enter jumps to the match|",
+        "Pickers|bufs||pick among the open buffers|",
+        "Pickers|pins||pick among the pinned files|",
+        "Pickers|pin|[N]|pin the current file to the lowest free slot, or to slot N|",
+        "Pickers|unpin|[N]|remove the pin of the current file, or of slot N|",
+        "Pickers|pinjump|<N>|jump to the file pinned in slot N|",
+        "LSP|fmt,format||reformat the buffer through the language server|",
+        "LSP|sym|[name]|jump to the first document symbol whose name contains name|",
+        "LSP|rename|<newname>|rename the symbol under the cursor across the file|",
+        "Misc|help,h,commands|[topic]|show this list; a topic narrows it to the commands that mention the topic|"
+    ]
+
+// Notes printed after the commands (when the list is not narrowed to a
+// command), as plain lines.
+fn notes() -> [Str]
+    [
+        "Configuration",
+        "The defaults for the options above go in the [options] table of",
+        "~/.config/novim/config.toml (number, relativenumber, hlsearch, wrap,",
+        "syntax, tabstop, expandtab). :set changes them for this session only.",
+        "A range goes before a command: :%, :N,M, :., :$, :'<,'> (from Visual mode)."
+    ]
+
+// Field `k` (0..4) of a row.
+fn field(row: Str, k: Int) -> Str
+    let parts = str.split(row, "|")
+    if k < list.len(parts)
+        parts[k]
+    else
+        ""
+
+fn row_group(row: Str) -> Str
+    field(row, 0)
+
+fn row_names(row: Str) -> [Str]
+    str.split(field(row, 1), ",")
+
+fn row_hidden(row: Str) -> [Str]
+    let h = field(row, 4)
+    if str.len(h) == 0
+        []
+    else
+        str.split(h, ",")
+
+// Does the dispatcher-side spelling `word` (a `bang`-less command word) appear
+// in the table, as a shown name or a hidden spelling?  `:set number` rows list
+// their words with the leading `set `; only the first word is compared.
+fn has_word(word: Str) -> Bool
+    let t = table()
+    var i = 0
+    while i < list.len(t)
+        let names = row_names(t[i])
+        var j = 0
+        while j < list.len(names)
+            if first_word(names[j]) == word
+                return true
+            j = j + 1
+        let hid = row_hidden(t[i])
+        j = 0
+        while j < list.len(hid)
+            if hid[j] == word or strip_bang(hid[j]) == word
+                return true
+            j = j + 1
+        i = i + 1
+    false
+
+fn first_word(s: Str) -> Str
+    let sp = util.index_of_byte(s, ' ')
+    if sp < 0
+        s
+    else
+        str.slice(s, 0, sp)
+
+fn strip_bang(s: Str) -> Str
+    let n = str.len(s)
+    if n > 0 and (str.byte_at(s, n - 1) ?? 0) == '!'
+        str.slice(s, 0, n - 1)
+    else
+        s
+
+// The usage column of a row: `:name, :alias <args>`.
+fn usage(row: Str) -> Str
+    let names = row_names(row)
+    var s = ""
+    var i = 0
+    while i < list.len(names)
+        if i > 0
+            s = s + ", "
+        s = s + ":" + names[i]
+        i = i + 1
+    let a = field(row, 2)
+    if str.len(a) > 0
+        s = s + " " + a
+    s
+
+// ── `:help` argument ─────────────────────────────────────────────────────
+
+// `:help`, `:h`, `:commands`, with an optional topic (`:help set`, `:h grep`).
+fn is_help(cmd: Str) -> Bool
+    let w = first_word(str.trim(cmd))
+    w == "help" or w == "h" or w == "commands"
+
+// The topic of a help command: "" lists everything; `:help commands` and
+// `:h commands` are the full list too.
+fn help_topic(cmd: Str) -> Str
+    let c = str.trim(cmd)
+    let sp = util.index_of_byte(c, ' ')
+    let t = if sp < 0 then "" else str.lower(str.trim(str.slice(c, sp + 1, str.len(c))))
+    if t == "commands" or t == "ex"
+        ""
+    else
+        t
+
+// Does `row` mention `topic` (case-insensitive) in a name, its group, its
+// arguments or its description?  A leading `:` on the topic is ignored.
+fn row_matches(row: Str, topic: Str) -> Bool
+    if str.len(topic) == 0
+        return true
+    let tp = if (str.byte_at(topic, 0) ?? 0) == ':' then str.slice(topic, 1, str.len(topic)) else topic
+    let hay = str.lower(row_group(row) + " " + field(row, 1) + " " + field(row, 2) + " " + field(row, 3) + " " + field(row, 4))
+    str.contains(hay, tp)
+
+// ── Layout ───────────────────────────────────────────────────────────────
+
+// Word-wrap `s` to `w` columns (a word longer than `w` is cut).  Text is ASCII.
+fn wrap(s: Str, w: Int) -> [Str]
+    let width = if w < 1 then 1 else w
+    var out: [Str] = []
+    let words = str.split(s, " ")
+    var cur = ""
+    var i = 0
+    while i < list.len(words)
+        var wd = words[i]
+        if str.len(wd) > 0
+            while str.len(wd) > width
+                if str.len(cur) > 0
+                    out = list.push(out, cur)
+                    cur = ""
+                out = list.push(out, str.slice(wd, 0, width))
+                wd = str.slice(wd, width, str.len(wd))
+            if str.len(cur) == 0
+                cur = wd
+            elif str.len(cur) + 1 + str.len(wd) <= width
+                cur = cur + " " + wd
+            else
+                out = list.push(out, cur)
+                cur = wd
+        i = i + 1
+    if str.len(cur) > 0
+        out = list.push(out, cur)
+    if list.len(out) == 0
+        out = [""]
+    out
+
+fn clip(s: Str, w: Int) -> Str
+    if str.len(s) > w
+        str.slice(s, 0, w)
+    else
+        s
+
+// Lines of one row at `w` columns.  Wide terminal: usage in a left column,
+// the description wrapped beside it.  Narrow terminal (or a usage too long for
+// the column): the usage on one line and the description wrapped below it.
+fn row_lines(row: Str, w: Int) -> [Str]
+    let u = usage(row)
+    let d = field(row, 3)
+    let col = if w >= 60 then 30 else (if w >= 48 then 24 else 0)
+    var out: [Str] = []
+    if col > 0 and str.len(u) + 3 <= col
+        let ds = wrap(d, w - 2 - col)
+        var i = 0
+        while i < list.len(ds)
+            let lead = if i == 0 then "  " + u + disp.nspaces(col - str.len(u)) else "  " + disp.nspaces(col)
+            out = list.push(out, clip(lead + ds[i], w))
+            i = i + 1
+    else
+        out = list.push(out, clip("  " + u, w))
+        let ds = wrap(d, w - 6)
+        var i = 0
+        while i < list.len(ds)
+            out = list.push(out, clip("      " + ds[i], w))
+            i = i + 1
+    out
+
+// The full help text for `topic` ("" = all) at `w` columns.  The first line is
+// the title; scrolling happens below it in the driver.
+fn help_lines(topic: Str, w: Int) -> [Str]
+    let t = table()
+    var out: [Str] = []
+    var shown = 0
+    var gi = 0
+    let gs = groups()
+    while gi < list.len(gs)
+        var head = false
+        var i = 0
+        while i < list.len(t)
+            if row_group(t[i]) == gs[gi] and row_matches(t[i], topic)
+                if not head
+                    if list.len(out) > 0
+                        out = list.push(out, "")
+                    out = list.push(out, clip(gs[gi], w))
+                    head = true
+                out = concat(out, row_lines(t[i], w))
+                shown = shown + 1
+            i = i + 1
+        gi = gi + 1
+    if shown == 0
+        out = list.push(out, clip("No Ex command matches '" + topic + "'. :help lists them all.", w))
+    let show_notes = str.len(topic) == 0 or str.contains("configuration config options option toml", topic)
+    if show_notes
+        out = list.push(out, "")
+        var n = 0
+        let ns = notes()
+        while n < list.len(ns)
+            out = list.push(out, clip(ns[n], w))
+            n = n + 1
+    out
+
+fn concat(a: [Str], b: [Str]) -> [Str]
+    var r = a[:]
+    var i = 0
+    while i < list.len(b)
+        r = list.push(r, b[i])
+        i = i + 1
+    r
+
+// The name of the help buffer.  It is never a file: main.nv keeps it
+// read-only, leaves it out of the buffer list and never writes it.
+fn help_path() -> Str
+    "[help]"
+
+// The text of the help buffer for `topic` ("" = all), wrapped for a window `w`
+// columns wide: a title, a line on how to close it, then `help_lines`.
+fn help_text(topic: Str, w: Int) -> Str
+    let title = if str.len(topic) == 0 then "Ex commands" else "Ex commands: " + topic
+    var lines = [clip(title, w), clip("q or :close closes this window", w), ""]
+    lines = concat(lines, help_lines(topic, w))
+    str.join(lines, str.from_char('\n'))
