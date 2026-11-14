@@ -8,6 +8,12 @@
 //
 // An unrepresentable notation (an F-key, `<S-Tab>`, a Lua-function RHS) marks the
 // mapping with a NUL byte (`\x00`); the caller drops any LHS/RHS containing one.
+//
+// `<M-x>` and `<A-x>` expand to ESC and the key: the two bytes a terminal sends
+// for Alt and that key.  The mode of a call may be a table (`{ "i", "c" }`), the
+// LHS a concatenation (`"<M-" .. key .. ">"`), and one loop shape is expanded
+// (`for key, letter in pairs(tbl) do vim.keymap.set(...) end`); see
+// scrape_mode_maps.
 
 use util
 
@@ -94,8 +100,24 @@ fn translate_token(tok: Str, leader: Str) -> Str
         ctrl_str(str.byte_at(tok, 2) ?? 0)
     else if n == 3 and (str.byte_at(low, 0) ?? 0) == 's' and (str.byte_at(low, 1) ?? 0) == '-'
         shift_str(str.byte_at(tok, 2) ?? 0)
+    else if n >= 3 and ((str.byte_at(low, 0) ?? 0) == 'm' or (str.byte_at(low, 0) ?? 0) == 'a') and (str.byte_at(low, 1) ?? 0) == '-'
+        meta_str(str.slice(tok, 2, n))
     else
         nul()
+
+// `<M-x>` / `<A-x>`: the Alt chord a terminal sends as ESC and then the key.
+// `x` is one character (its own case: `<M-A>` is ESC `A`) or a named key or
+// modified key, which is translated the same way as outside a chord.
+fn meta_str(inner: Str) -> Str
+    let esc = str.from_byte('\x1b')
+    if str.len(inner) == 1
+        esc + inner
+    else
+        let k = translate_token(inner, "")
+        if has_nul(k)
+            nul()
+        else
+            esc + k
 
 fn ctrl_str(c: Int) -> Str
     let b = ctrl_byte(c)
@@ -237,10 +259,66 @@ fn vimcmd_alias(name: Str) -> Str
     else
         name
 
+// The value bound to `name` in the parallel lists `names` / `vals` (the loop
+// variables of an enclosing `for … in pairs(…)`); ok=false when it is unbound.
+fn lookup_var(names: [Str], vals: [Str], name: Str) -> Scan
+    var i = 0
+    while i < list.len(names)
+        if names[i] == name
+            return Scan { val: vals[i], next: 0, ok: true }
+        i = i + 1
+    Scan { val: "", next: 0, ok: false }
+
+fn is_ident_start(b: Int) -> Bool
+    b >= 'a' and b <= 'z' or b >= 'A' and b <= 'Z' or b == '_'
+
+// A Lua string expression at `from`: double-quoted strings and bound loop
+// variables joined by `..` (`"<M-" .. key .. ">"`).  The value is the
+// concatenation, before key-notation expansion; ok=false for any other term.
+fn read_str_expr(s: Str, from: Int, names: [Str], vals: [Str]) -> Scan
+    var acc = ""
+    var i = skip_ws(s, from)
+    var ok = true
+    var done = false
+    var terms = 0
+    while not done
+        let b = str.byte_at(s, i) ?? 0
+        if b == '"'
+            let q = read_dquote(s, i)
+            if q.ok
+                acc = acc + q.val
+                i = q.next
+                terms = terms + 1
+            else
+                ok = false
+                done = true
+        elif is_ident_start(b)
+            let id = read_ident(s, i)
+            let v = lookup_var(names, vals, id.val)
+            if v.ok
+                acc = acc + v.val
+                i = id.next
+                terms = terms + 1
+            else
+                ok = false
+                done = true
+        else
+            ok = false
+            done = true
+        if ok and not done
+            let j = skip_ws(s, i)
+            if str_at_is(s, j, "..")
+                i = skip_ws(s, j + 2)
+            else
+                i = j
+                done = true
+    Scan { val: acc, next: i, ok: ok and terms > 0 }
+
 // The third `vim.keymap.set` argument starting at `from`: a quoted/long string is
-// its notation; `vim.cmd.X` / `vim.cmd("X")` becomes `:X\r`; anything else
-// (a function, a table) returns ok=false → the map is skipped.
-fn read_rhs(s: Str, from: Int, leader: Str) -> Scan
+// its notation; a bound loop variable is its value's notation; `vim.cmd.X` /
+// `vim.cmd("X")` becomes `:X\r`; anything else (a function, a table) returns
+// ok=false → the map is skipped.
+fn read_rhs(s: Str, from: Int, leader: Str, names: [Str], vals: [Str]) -> Scan
     let i = skip_ws(s, from)
     let b = str.byte_at(s, i) ?? 0
     if b == '"'
@@ -258,6 +336,13 @@ fn read_rhs(s: Str, from: Int, leader: Str) -> Scan
     else if str_at_is(s, i, "vim.cmd(")
         let q = read_dquote(s, skip_ws(s, i + 8))
         Scan { val: ":" + q.val + str.from_char('\r'), next: q.next, ok: q.ok }
+    else if is_ident_start(b)
+        let id = read_ident(s, i)
+        let v = lookup_var(names, vals, id.val)
+        if v.ok
+            Scan { val: parse_notation(v.val, leader), next: id.next, ok: true }
+        else
+            Scan { val: "", next: i, ok: false }
     else
         Scan { val: "", next: i, ok: false }
 
@@ -301,33 +386,248 @@ fn find_mapleader(text: Str) -> Str
 fn scrape_n_maps(text: Str, leader: Str) -> [Str]
     scrape_mode_maps(text, leader, "n")
 
-// Like scrape_n_maps but for an arbitrary single-char vim mode (`"n"`, `"v"`,
-// `"x"`, `"i"`), so the importer can pull visual / insert maps too.
+// The mode argument of a `vim.keymap.set` call: one quoted mode (`"i"`) or a
+// table of them (`{ "i", "c" }`).
+struct Modes
+    items: [Str]
+    next: Int
+    ok: Bool
+
+fn read_modes(s: Str, from: Int) -> Modes
+    let p = skip_ws(s, from)
+    let b = str.byte_at(s, p) ?? 0
+    if b == '"'
+        let q = read_dquote(s, p)
+        return Modes { items: [q.val], next: q.next, ok: q.ok }
+    if b != '{'
+        return Modes { items: [], next: p, ok: false }
+    var out: [Str] = []
+    var i = p + 1
+    var ok = false
+    var done = false
+    while not done
+        i = skip_ws(s, i)
+        let c = str.byte_at(s, i) ?? 0
+        if c == '}'
+            ok = true
+            done = true
+            i = i + 1
+        elif c == '"'
+            let q = read_dquote(s, i)
+            if q.ok
+                out = list.push(out, q.val)
+                i = q.next
+            else
+                done = true
+        elif c == ','
+            i = i + 1
+        else
+            done = true
+    Modes { items: out, next: i, ok: ok }
+
+fn has_mode(modes: [Str], want: Str) -> Bool
+    var i = 0
+    while i < list.len(modes)
+        if modes[i] == want
+            return true
+        i = i + 1
+    false
+
+// The `[lhs, rhs]` pair of the `vim.keymap.set(` call that starts at `at` in
+// `raw`, or [] when the call is not for `want_mode`, an argument is not a
+// shape the importer reads, or the notation does not expand.  `names` / `vals`
+// bind the variables of an enclosing `for … in pairs(…)` loop.
+fn scrape_set_call(raw: Str, at: Int, leader: Str, want_mode: Str, names: [Str], vals: [Str]) -> [Str]
+    let modes = read_modes(raw, at + 15)
+    if not modes.ok or not has_mode(modes.items, want_mode)
+        return []
+    let c1 = util.index_of_byte_from(raw, ',', modes.next)
+    if c1 < 0
+        return []
+    let lhsq = read_str_expr(raw, c1 + 1, names, vals)
+    if not lhsq.ok
+        return []
+    let c2 = util.index_of_byte_from(raw, ',', lhsq.next)
+    if c2 < 0
+        return []
+    let lhs = parse_notation(lhsq.val, leader)
+    let rhs = read_rhs(raw, c2 + 1, leader, names, vals)
+    if rhs.ok and str.len(lhs) > 0 and not has_nul(lhs) and not has_nul(rhs.val)
+        return [lhs, rhs.val]
+    []
+
+fn is_comment_line(raw: Str) -> Bool
+    str.len(raw) >= 2 and (str.byte_at(raw, 0) ?? 0) == '-' and (str.byte_at(raw, 1) ?? 0) == '-'
+
+// A trailing `-- note` cut off a line, unless a quote follows the dashes (then
+// the dashes are inside a string).
+fn strip_line_comment(raw: Str) -> Str
+    let at = util.index_of_str(raw, "--")
+    if at >= 0 and util.index_of_byte_from(raw, '"', at) < 0
+        str.trim(str.slice(raw, 0, at))
+    else
+        raw
+
+// `[k0, v0, k1, v1, …]` from the inside of a Lua table constructor whose
+// entries are `key = "value"` or `["key"] = "value"`, separated by `,` or `;`.
+// Reading stops at the first entry of any other shape and keeps what it read.
+fn table_pairs(body: Str) -> [Str]
+    var out: [Str] = []
+    var i = 0
+    let n = str.len(body)
+    var done = false
+    while not done and i < n
+        let c = str.byte_at(body, i) ?? 0
+        if c == ' ' or c == '\t' or c == ',' or c == ';'
+            i = i + 1
+        else
+            var key = ""
+            var ok = false
+            if c == '['
+                let q = read_dquote(body, skip_ws(body, i + 1))
+                let j = skip_ws(body, q.next)
+                if q.ok and (str.byte_at(body, j) ?? 0) == ']'
+                    key = q.val
+                    i = j + 1
+                    ok = true
+            elif is_ident_start(c)
+                let id = read_ident(body, i)
+                key = id.val
+                i = id.next
+                ok = true
+            if ok
+                i = skip_ws(body, i)
+                if (str.byte_at(body, i) ?? 0) == '='
+                    let v = read_dquote(body, skip_ws(body, i + 1))
+                    if v.ok
+                        out = list.push(out, key)
+                        out = list.push(out, v.val)
+                        i = v.next
+                    else
+                        done = true
+                else
+                    done = true
+            else
+                done = true
+    out
+
+// `for K, V in pairs(NAME) do` → [K, V, NAME] (V is "" for a one-variable loop),
+// or [] when the line is not that shape.
+fn parse_for_pairs(raw: Str) -> [Str]
+    if not str_at_is(raw, 0, "for ")
+        return []
+    let inat = util.index_of_str(raw, " in pairs(")
+    if inat < 0
+        return []
+    let close = util.index_of_byte_from(raw, ')', inat + 10)
+    if close < 0
+        return []
+    let vars = str.slice(raw, 4, inat)
+    let comma = util.index_of_byte(vars, ',')
+    let k = if comma < 0 then str.trim(vars) else str.trim(str.slice(vars, 0, comma))
+    let v = if comma < 0 then "" else str.trim(str.slice(vars, comma + 1, str.len(vars)))
+    [k, v, str.trim(str.slice(raw, inat + 10, close))]
+
+// Flat `[lhs0, rhs0, lhs1, rhs1, …]` for an arbitrary single-char vim mode
+// (`"n"`, `"v"`, `"x"`, `"i"`, `"c"`), so the importer can pull the visual,
+// insert and command-line maps too.  A call's mode may be a table
+// (`{ "i", "c" }`), and its LHS a `..` concatenation of strings.
+//
+// One loop shape is expanded, because it is how a set of related maps is
+// written in a config:
+//
+//     local danish = { a = "å", o = "ø" }
+//     for key, letter in pairs(danish) do
+//         vim.keymap.set({ "i", "c" }, "<M-" .. key .. ">", letter)
+//     end
+//
+// The table is a `local NAME = { … }` constructor of string values, on one line
+// or several, defined before the loop in the scanned text.  Each
+// `vim.keymap.set(` line between the `for` line and the next line that is just
+// `end` is read once per entry with the loop variables bound.  Any other Lua
+// is skipped.
 fn scrape_mode_maps(text: Str, leader: Str, want_mode: Str) -> [Str]
     var out: [Str] = []
     let lines = str.split_lines(text)
     var li = 0
     let nl = list.len(lines)
+    // The tables seen so far: names, and the entries as parallel lists keyed by table.
+    var tab_names: [Str] = []
+    var ent_tab: [Int] = []
+    var ent_key: [Str] = []
+    var ent_val: [Str] = []
+    var open_tab = 0 - 1                  // a multi-line table being read
+    var open_buf = ""
+    var loop_tab = 0 - 1                  // the table of the loop being read
+    var loop_k = ""
+    var loop_v = ""
     while li < nl
         let raw = str.trim(lines[li])
-        let is_comment = str.len(raw) >= 2 and (str.byte_at(raw, 0) ?? 0) == '-' and (str.byte_at(raw, 1) ?? 0) == '-'
-        let at = util.index_of_str(raw, "vim.keymap.set(")
-        if at >= 0 and not is_comment
-            // arg1: mode
-            let p0 = skip_ws(raw, at + 15)
-            let mode = read_dquote(raw, p0)
-            if mode.ok and mode.val == want_mode
-                let c1 = util.index_of_byte_from(raw, ',', mode.next)
-                if c1 >= 0
-                    let p1 = skip_ws(raw, c1 + 1)
-                    let lhsq = read_dquote(raw, p1)
-                    if lhsq.ok
-                        let c2 = util.index_of_byte_from(raw, ',', lhsq.next)
-                        if c2 >= 0
-                            let lhs = parse_notation(lhsq.val, leader)
-                            let rhs = read_rhs(raw, c2 + 1, leader)
-                            if rhs.ok and str.len(lhs) > 0 and not has_nul(lhs) and not has_nul(rhs.val)
-                                out = list.push(out, lhs)
-                                out = list.push(out, rhs.val)
+        // A `vim.keymap.set(` on a comment line is not a call.
+        let at = if is_comment_line(raw) then 0 - 1 else util.index_of_str(raw, "vim.keymap.set(")
+        if loop_tab >= 0 and raw == "end"
+            loop_tab = 0 - 1
+        elif loop_tab >= 0 and at >= 0
+            var e = 0
+            while e < list.len(ent_tab)
+                if ent_tab[e] == loop_tab
+                    let pr = scrape_set_call(raw, at, leader, want_mode, [loop_k, loop_v], [ent_key[e], ent_val[e]])
+                    if list.len(pr) == 2
+                        out = list.push(out, pr[0])
+                        out = list.push(out, pr[1])
+                e = e + 1
+        elif at >= 0
+            // Read even inside a table that is still open: a plugin spec is a
+            // `local` table with calls in its function bodies.
+            let pr = scrape_set_call(raw, at, leader, want_mode, [], [])
+            if list.len(pr) == 2
+                out = list.push(out, pr[0])
+                out = list.push(out, pr[1])
+        elif open_tab >= 0
+            if not is_comment_line(raw)
+                let line = strip_line_comment(raw)
+                let cl = util.index_of_byte(line, '}')
+                if cl >= 0
+                    let body = open_buf + str.slice(line, 0, cl)
+                    let tp = table_pairs(body)
+                    var e = 0
+                    while e + 1 < list.len(tp)
+                        ent_tab = list.push(ent_tab, open_tab)
+                        ent_key = list.push(ent_key, tp[e])
+                        ent_val = list.push(ent_val, tp[e + 1])
+                        e = e + 2
+                    open_tab = 0 - 1
+                    open_buf = ""
+                else
+                    open_buf = open_buf + line + " "
+        elif str_at_is(raw, 0, "local ") and util.index_of_str(raw, "= {") > 6
+            let eq = util.index_of_str(raw, "= {")
+            let tname = str.trim(str.slice(raw, 6, eq))
+            let tid = list.len(tab_names)
+            tab_names = list.push(tab_names, tname)
+            let rest = strip_line_comment(str.slice(raw, eq + 3, str.len(raw)))
+            let cl = util.index_of_byte(rest, '}')
+            if cl >= 0
+                let tp = table_pairs(str.slice(rest, 0, cl))
+                var e = 0
+                while e + 1 < list.len(tp)
+                    ent_tab = list.push(ent_tab, tid)
+                    ent_key = list.push(ent_key, tp[e])
+                    ent_val = list.push(ent_val, tp[e + 1])
+                    e = e + 2
+            else
+                open_tab = tid
+                open_buf = rest + " "
+        else
+            let fp = parse_for_pairs(raw)
+            if list.len(fp) == 3
+                // The latest table of that name; no table → the loop is not read.
+                var t = list.len(tab_names) - 1
+                while t >= 0 and tab_names[t] != fp[2]
+                    t = t - 1
+                if t >= 0
+                    loop_tab = t
+                    loop_k = fp[0]
+                    loop_v = fp[1]
         li = li + 1
     out

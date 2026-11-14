@@ -325,13 +325,18 @@ fn clamp(ed: Editor) -> Editor
         cy = n - 1
     if cy < 0
         cy = 0
-    let ll = if cy >= 0 and cy < n then str.len(ed.lines[cy]) else 0
-    let maxx = if ll > 0 then ll - 1 else 0
+    let cl = if cy >= 0 and cy < n then ed.lines[cy] else ""
+    let ll = str.len(cl)
+    // The last glyph starts at the start of the last character, which is not
+    // `ll - 1` when that byte continues a multi-byte sequence.
+    let maxx = if ll > 0 then util.u8_start(cl, ll - 1) else 0
     var cx = ed.cx
     if cx < 0
         cx = 0
     if cx > maxx
         cx = maxx
+    else
+        cx = util.u8_start(cl, cx)       // never inside a multi-byte character
     Editor { lines: ed.lines, cy: cy, cx: cx }
 
 // ── Input ───────────────────────────────────────────────────────
@@ -361,10 +366,10 @@ fn leading_ws(line: Str) -> Str
 
 // One h/j/k/l step (clamped).
 fn motion_hjkl(ed: Editor, b: Int) -> Editor
-    if b == 'h'          // 'h' — left
-        clamp(Editor { lines: ed.lines, cy: ed.cy, cx: ed.cx - 1 })
-    elif b == 'l'        // 'l' — right
-        clamp(Editor { lines: ed.lines, cy: ed.cy, cx: ed.cx + 1 })
+    if b == 'h'          // 'h' — left, one character
+        clamp(Editor { lines: ed.lines, cy: ed.cy, cx: util.u8_prev(line_at(ed, ed.cy), ed.cx) })
+    elif b == 'l'        // 'l' — right, one character
+        clamp(Editor { lines: ed.lines, cy: ed.cy, cx: util.u8_next(line_at(ed, ed.cy), ed.cx) })
     elif b == 'j'        // 'j' — down
         clamp(Editor { lines: ed.lines, cy: ed.cy + 1, cx: ed.cx })
     elif b == 'k'        // 'k' — up
@@ -603,8 +608,9 @@ fn insert_newline(ed: Editor) -> Editor
 fn backspace(ed: Editor) -> Editor
     if ed.cx > 0
         let line = line_at(ed, ed.cy)
-        let merged = str.slice(line, 0, ed.cx - 1) + str.slice(line, ed.cx, str.len(line))
-        Editor { lines: set_line(ed.lines, ed.cy, merged), cy: ed.cy, cx: ed.cx - 1 }
+        let from = util.u8_prev(line, ed.cx)         // the whole character, not its last byte
+        let merged = str.slice(line, 0, from) + str.slice(line, ed.cx, str.len(line))
+        Editor { lines: set_line(ed.lines, ed.cy, merged), cy: ed.cy, cx: from }
     elif ed.cy > 0
         let prev = line_at(ed, ed.cy - 1)
         let cur = line_at(ed, ed.cy)
@@ -650,7 +656,7 @@ fn delete_char_at(ed: Editor) -> Editor
     if str.len(line) == 0
         ed
     else
-        let merged = str.slice(line, 0, ed.cx) + str.slice(line, ed.cx + 1, str.len(line))
+        let merged = str.slice(line, 0, ed.cx) + str.slice(line, util.u8_next(line, ed.cx), str.len(line))
         clamp(Editor { lines: set_line(ed.lines, ed.cy, merged), cy: ed.cy, cx: ed.cx })
 
 fn repeat_delete_char(ed: Editor, times: Int) -> Editor
@@ -1164,9 +1170,9 @@ fn motion_target(ed: Editor, b: Int, rawcount: Int) -> MTarget
     let line = line_at(ed, ed.cy)
     let llen = str.len(line)
     if b == 'l'                                  // l
-        return mt(ed.cy, if ed.cx + count > llen then llen else ed.cx + count, false, false)
+        return mt(ed.cy, util.u8_fwd(line, ed.cx, count), false, false)
     if b == 'h'                                  // h
-        return mt(ed.cy, if ed.cx - count < 0 then 0 else ed.cx - count, false, false)
+        return mt(ed.cy, util.u8_back(line, ed.cx, count), false, false)
     if b == '0'                                  // 0
         return mt(ed.cy, 0, false, false)
     if b == '$'                                  // $
@@ -2051,14 +2057,23 @@ fn feed_insert(ed: Editor, st: InputState, b: Int) -> Step
         return Step { ed: backspace(ed), st: st }
     if b == '\t' or (b >= ' ' and b < '\x7f') // printable (+ tab) → insert
         return Step { ed: insert_char(ed, b), st: st }
+    if b >= 128 and b < 256                  // a byte of a UTF-8 character: the terminal sends them one at a time
+        return Step { ed: insert_char(ed, b), st: st }
     Step { ed: ed, st: st }            // ignore other control bytes
 
 // Overtype the char at the cursor (Replace mode), advancing one column;
-// appends when already at end-of-line.
+// appends when already at end-of-line.  The character replaced is the whole
+// one at the cursor, which is more than one byte when it is multi-byte.  A
+// continuation byte (10xxxxxx) of the character being typed replaces nothing:
+// its lead byte already took the place of the old character, so it goes in
+// beside it.
 fn overtype_char(ed: Editor, b: Int) -> Editor
     let line = line_at(ed, ed.cy)
     let n = str.len(line)
-    let newline = if ed.cx < n then str.slice(line, 0, ed.cx) + str.from_byte(b) + str.slice(line, ed.cx + 1, n) else line + str.from_byte(b)
+    if util.u8_cont(b)
+        return insert_char(ed, b)
+    let hi = util.u8_next(line, ed.cx)
+    let newline = if ed.cx < n then str.slice(line, 0, ed.cx) + str.from_byte(b) + str.slice(line, hi, n) else line + str.from_byte(b)
     clamp_insert(Editor { lines: set_line(ed.lines, ed.cy, newline), cy: ed.cy, cx: ed.cx + 1 })
 
 @intent("""Handle one byte in Replace mode (`R`): printables overwrite the char
@@ -2070,8 +2085,10 @@ fn feed_replace(ed: Editor, st: InputState, b: Int) -> Step
     if b == '\r' or b == '\n'              // Enter → split line
         return Step { ed: insert_newline(ed), st: st }
     if b == '\x7f' or b == '\b'              // Backspace → step left
-        return Step { ed: clamp_insert(Editor { lines: ed.lines, cy: ed.cy, cx: ed.cx - 1 }), st: st }
+        return Step { ed: clamp_insert(Editor { lines: ed.lines, cy: ed.cy, cx: util.u8_prev(line_at(ed, ed.cy), ed.cx) }), st: st }
     if b == '\t' or (b >= ' ' and b < '\x7f') // printable → overwrite
+        return Step { ed: overtype_char(ed, b), st: st }
+    if b >= 128 and b < 256                  // a byte of a UTF-8 character
         return Step { ed: overtype_char(ed, b), st: st }
     Step { ed: ed, st: st }
 
@@ -2239,8 +2256,8 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
     if b == 'i'                       // 'i' — insert before cursor
         return Step { ed: ed, st: ist_insert(st) }
     if b == 'a'                       // 'a' — append after cursor
-        return Step { ed: clamp_insert(Editor { lines: ed.lines, cy: ed.cy, cx: ed.cx + 1 }), st: ist_insert(st) }
-    if b == 'I'                       // 'I' — insert at first non-blank
+        return Step { ed: clamp_insert(Editor { lines: ed.lines, cy: ed.cy, cx: util.u8_next(line_at(ed, ed.cy), ed.cx) }), st: ist_insert(st) }
+    if b == 'I'                     // 'I' — insert at first non-blank
         return Step { ed: Editor { lines: ed.lines, cy: ed.cy, cx: first_nonblank(line_at(ed, ed.cy)) }, st: ist_insert(st) }
     if b == 'A'                       // 'A' — append at end of line
         return Step { ed: Editor { lines: ed.lines, cy: ed.cy, cx: str.len(line_at(ed, ed.cy)) }, st: ist_insert(st) }
@@ -2251,14 +2268,14 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
     // Deletes.
     if b == 'x'                       // 'x' — delete char(s) under cursor (→ register)
         let xl = line_at(ed, ed.cy)
-        let xhi = if ed.cx + cnt > str.len(xl) then str.len(xl) else ed.cx + cnt
+        let xhi = util.u8_fwd(xl, ed.cx, cnt)
         return Step { ed: repeat_delete_char(ed, cnt), st: ist_reg_cw(st, str.slice(xl, ed.cx, xhi), false) }
     if b == 'D'                       // 'D' — delete to end of line (→ register)
         let dl = line_at(ed, ed.cy)
         return Step { ed: delete_to_eol(ed), st: ist_reg_cw(st, str.slice(dl, ed.cx, str.len(dl)), false) }
     if b == 'X'                       // 'X' — delete char(s) before the cursor (→ register)
         let xline = line_at(ed, ed.cy)
-        let lo = if ed.cx - cnt < 0 then 0 else ed.cx - cnt
+        let lo = util.u8_back(xline, ed.cx, cnt)
         let nls = set_line(ed.lines, ed.cy, str.slice(xline, 0, lo) + str.slice(xline, ed.cx, str.len(xline)))
         return Step { ed: clamp(Editor { lines: nls, cy: ed.cy, cx: lo }), st: ist_reg_cw(st, str.slice(xline, lo, ed.cx), false) }
     if b == 'Y'                       // 'Y' — yank line(s) (= yy)
@@ -3006,6 +3023,33 @@ fn decode_escapes(s: Str) -> Str
             i = i + 1
     out
 
+// `--batch` has no clock, so it cannot tell an Alt chord from an Escape followed
+// by a key by how soon the key comes.  It takes the spelling `\M<key>` for the
+// chord (`\Ma` is Alt-a) and rewrites it to `\xff<key>`; the batch loop reads
+// the 0xFF byte, which never occurs in UTF-8 text, and resolves the pair.  A
+// plain `\e` followed by a key stays two keys.  An escaped backslash (`\\M`)
+// is a backslash and an M.
+fn batch_meta_marks(keys: Str) -> Str
+    let sb = str.builder_new()
+    let n = str.len(keys)
+    var i = 0
+    while i < n
+        let b = str.byte_at(keys, i) ?? 0
+        if b == '\\' and i + 1 < n
+            let nx = str.byte_at(keys, i + 1) ?? 0
+            if nx == 'M'
+                str.builder_append(sb, "\\xff")
+            else
+                str.builder_append_char(sb, b)
+                str.builder_append_char(sb, nx)
+            i = i + 2
+        else
+            str.builder_append_char(sb, b)
+            i = i + 1
+    let out = str.builder_to_str(sb)
+    str.builder_drop(sb)
+    out
+
 // A user keymap: the Normal-mode key sequence `lhs[i]` (a byte string — one
 // byte for a single-key remap, several for a multi-key one like `<leader>w`,
 // `vv`, `;p`) is replaced by the already-decoded `rhs[i]`.  Single-byte LHS are
@@ -3040,19 +3084,91 @@ fn keymap_lookup(km: Keymap, b: Int) -> Str
 fn keymap_seq_idx(km: Keymap, s: Str, mclass: Int) -> Int
     var i = 0
     while i < list.len(km.lhs)
-        if km.kmode[i] == mclass and km.lhs[i] == s
+        if km.kmode[i] == mclass and km.lhs[i] == s and not is_chord_lhs(km.lhs[i])
             return i
         i = i + 1
     0 - 1
 
 // True if `s` is a strict prefix of some LHS in mode class `mclass` (more keys
-// could still complete a mapping) — the signal to keep buffering.
+// could still complete a mapping) — the signal to keep buffering.  An Alt chord
+// is not a sequence typed over time, so its ESC does not count as a prefix: a
+// lone Escape must not wait for a key.
 fn keymap_is_prefix(km: Keymap, s: Str, mclass: Int) -> Bool
     let sn = str.len(s)
     var i = 0
     while i < list.len(km.lhs)
         let l = km.lhs[i]
-        if km.kmode[i] == mclass and str.len(l) > sn and str.slice(l, 0, sn) == s
+        if km.kmode[i] == mclass and not is_chord_lhs(l)
+            if str.len(l) > sn and str.slice(l, 0, sn) == s
+                return true
+        i = i + 1
+    false
+
+// True for the LHS of an Alt chord: ESC and one more byte, which is not `[`
+// (that starts a cursor or function key sequence).  `ESC O` is a chord too,
+// though it starts a function-key sequence as well; the loop tells them apart.
+fn is_chord_lhs(l: Str) -> Bool
+    str.len(l) == 2 and (str.byte_at(l, 0) ?? 0) == '\e' and (str.byte_at(l, 1) ?? 0) != '['
+
+// ── Alt chords ──────────────────────────────────────────────────────────────
+// A terminal sends Alt and a key as ESC followed by the key (xterm's
+// metaSendsEscape, the default in the other terminals as well).  The same two
+// bytes are also an Escape followed by a command, typed fast.  Vim tells them
+// apart by time (`ttimeoutlen`); so does the interactive loop: a second byte
+// that is there at once, or within `ttimeoutlen` milliseconds, makes a chord
+// when a map for it exists, and otherwise nothing changes.  Maps are matched by
+// the class of the mode the chord arrives in.
+
+// The map class a lookup uses: 0 Normal, 1 Visual, 2 Insert and Replace, 3 the
+// `:` and `/` lines; -1 where maps do not apply.
+fn map_class(mode: Int, line_input: Bool) -> Int
+    if line_input
+        3
+    elif mode == 0
+        0
+    elif mode == 2 or mode == 3 or mode == 5
+        1
+    elif mode == 1 or mode == 4
+        2
+    else
+        0 - 1
+
+// `base` with the Alt-chord maps of `more` appended (see is_chord_lhs).
+fn keymap_with_chords(base: Keymap, more: Keymap) -> Keymap
+    var lhs = base.lhs[:]
+    var rhs = base.rhs[:]
+    var kmode = base.kmode[:]
+    var i = 0
+    while i < list.len(more.lhs)
+        let l = more.lhs[i]
+        if is_chord_lhs(l)
+            lhs = list.push(lhs, l)
+            rhs = list.push(rhs, more.rhs[i])
+            kmode = list.push(kmode, more.kmode[i])
+        i = i + 1
+    Keymap { lhs: lhs, rhs: rhs, kmode: kmode }
+
+// True when `b`, read after `ESC O`, continues a function-key sequence: the
+// finals of F1-F4 (`P`-`S`) and of the application-mode cursor keys (`A`-`D`,
+// `F`, `H`), or the digits and `;` of a modified key.
+fn ss3_continues(b: Int) -> Bool
+    (b >= 'A' and b <= 'D') or b == 'F' or b == 'H' or (b >= 'P' and b <= 'S') or (b >= '0' and b <= '9') or b == ';'
+
+// Index of the map in class `mc` whose LHS is the Alt chord ESC `c`, or -1.
+fn meta_idx(km: Keymap, mc: Int, c: Int) -> Int
+    let want = str.from_byte('\e') + str.from_byte(c)
+    var i = 0
+    while i < list.len(km.lhs)
+        if km.kmode[i] == mc and km.lhs[i] == want and is_chord_lhs(km.lhs[i])
+            return i
+        i = i + 1
+    0 - 1
+
+// True when a map in class `mc` has an Alt chord for its whole LHS.
+fn has_meta_map(km: Keymap, mc: Int) -> Bool
+    var i = 0
+    while i < list.len(km.lhs)
+        if km.kmode[i] == mc and is_chord_lhs(km.lhs[i])
             return true
         i = i + 1
     false
@@ -3111,6 +3227,38 @@ fn keymaps_import_nvim(cfg_path: Str) -> Bool [fs]
         i = i + 1
     on
 
+// How long, in milliseconds, the loop waits after an ESC for the key of an Alt
+// chord (Vim's `ttimeoutlen`, whose Neovim default is 50).  `[options]
+// ttimeoutlen = N`; 0 never waits, so a chord counts only when its second byte
+// is already there.  The wait happens only in a mode where a map for an Alt
+// chord exists; everywhere else a lone ESC is delivered at once.  A chord's two
+// bytes leave a terminal in one write, so the window matters over a slow link,
+// and for terminals (novoterm among them) that write the two bytes separately.
+// The cost: ESC followed by a command key within this time, in a mode with such
+// a map, is read as the chord and not as Escape and the command.
+fn load_ttimeoutlen(cfg_path: Str) -> Int [fs]
+    let Some(content) = fs.read(cfg_path) else return 50
+    let lines = str.split_lines(content)
+    var in_opt = false
+    var ms = 50
+    var i = 0
+    let n = list.len(lines)
+    while i < n
+        let raw = str.trim(lines[i])
+        if str.len(raw) > 0 and (str.byte_at(raw, 0) ?? 0) != 35
+            if (str.byte_at(raw, 0) ?? 0) == 91
+                in_opt = raw == "[options]"
+            elif in_opt
+                let eq = util.index_of_byte(raw, 61)
+                if eq > 0
+                    let key = str.trim(str.slice(raw, 0, eq))
+                    if key == "ttimeoutlen" or key == "ttm"
+                        let v = util.parse_color_val(util.strip_inline_comment(str.slice(raw, eq + 1, str.len(raw))))
+                        if v >= 0
+                            ms = v
+        i = i + 1
+    ms
+
 // Assemble a Keymap from the nvim config dir: find the leader (default `\`), then
 // scrape the Normal-mode maps (kmode 0) and the Visual-mode `v`/`x` maps
 // (kmode 1), appended onto `base` (the TOML-loaded keymaps).
@@ -3152,7 +3300,30 @@ fn import_nvim_keymaps(dir: Str, base: Keymap) -> Keymap [fs]
         rhs = list.push(rhs, ip[m + 1])
         kmode = list.push(kmode, 2)
         m = m + 2
+    // Command-line (mode class 3): `:` and `/` have no map matcher, so the only
+    // maps that can fire there are Alt chords, which the loop looks up directly.
+    // A `"c"` map with any other LHS is not imported.
+    let cp = cmdline_chord_maps(text, leader)
+    var q = 0
+    while q + 1 < list.len(cp)
+        lhs = list.push(lhs, cp[q])
+        rhs = list.push(rhs, cp[q + 1])
+        kmode = list.push(kmode, 3)
+        q = q + 2
     Keymap { lhs: lhs, rhs: rhs, kmode: kmode }
+
+// The `"c"` maps of `text` whose whole LHS is an Alt chord (ESC and one key), as
+// `[lhs0, rhs0, …]`; the rest have nothing in novim to fire them.
+fn cmdline_chord_maps(text: Str, leader: Str) -> [Str]
+    var out: [Str] = []
+    let cp = nvmap.scrape_mode_maps(text, leader, "c")
+    var q = 0
+    while q + 1 < list.len(cp)
+        if str.len(cp[q]) == 2 and (str.byte_at(cp[q], 0) ?? 0) == '\e'
+            out = list.push(out, cp[q])
+            out = list.push(out, cp[q + 1])
+        q = q + 2
+    out
 
 // ── Options ──────────────────────────────────────────
 @intent("""Editor settings, loaded from the `[options]` config section and
@@ -3387,7 +3558,8 @@ fn find_next(ed: Editor, pattern: Str, forward: Bool) -> Editor
 // followed by `cursor=<line>:<col>` and exit.  Fully deterministic.
 // Decodes `\e`=Esc, `\n`/`\r`=Enter, `\t`=Tab, `\b`=Backspace,
 // `\\`=backslash so test sequences embed control keys in ASCII
-// (e.g. `iHello\e`, `:w\n`).  `:` opens the Ex command line.
+// (e.g. `iHello\e`, `:w\n`).  `:` opens the Ex command line.  `\M<key>` is an
+// Alt chord (see batch_meta_marks).
 @intent("""Feed one already-decoded byte through `feed`, first expanding any
 Normal-mode keymap remap of `b` into its byte sequence (replayed through `feed`
 so remapped sequences behave exactly like typed ones).""")
@@ -4047,7 +4219,11 @@ fn run_batch(keys: Str, cfg_path: Str, fpath: Str) [io, fs, time]
     var curpath = fpath
     var st = ist_new()
     var es = edit_new()
-    let km = load_keymaps(cfg_path)
+    // The TOML `[keymaps]`, plus, when `[keymaps] import_nvim = true`, the Alt
+    // chords scraped from the Neovim config.  The other imported maps have
+    // `:` commands and multi-key sequences for right-hand sides, which the
+    // interactive driver runs and this loop does not, so they stay out.
+    let km = if keymaps_import_nvim(cfg_path) then keymap_with_chords(load_keymaps(cfg_path), import_nvim_keymaps(default_nvim_dir(), keymap_empty())) else load_keymaps(cfg_path)
     var opts = load_options(cfg_path)    // tabstop/expandtab drive edits, not just render
     let batch_rows = term_rows()         // 24 off-tty — makes paging deterministic
     let pins_root = project_root()
@@ -4072,7 +4248,7 @@ fn run_batch(keys: Str, cfg_path: Str, fpath: Str) [io, fs, time]
     var bframes = 0
     var blast = now_ms()
     var bmoved = false
-    let decoded = decode_escapes(keys)
+    var decoded = decode_escapes(batch_meta_marks(keys))
     // `:help` in --batch: the batch has one buffer and no windows, so the help
     // buffer replaces it (and `q` / `:close` puts it back) instead of splitting.
     var hb_on = false
@@ -4090,10 +4266,20 @@ fn run_batch(keys: Str, cfg_path: Str, fpath: Str) [io, fs, time]
     var search_back = false
     var last_subst = ""
     var quit = false
-    let n = str.len(decoded)
+    var n = str.len(decoded)
     let mut i = 0
     while i < n and not quit
-        let b = str.byte_at(decoded, i) ?? 0
+        var b = str.byte_at(decoded, i) ?? 0
+        if b == 255 and i + 1 < n                // `\M<key>`: an Alt chord, ESC and the key arriving together
+            let cb = str.byte_at(decoded, i + 1) ?? 0
+            let mcb = if picker_active then 0 - 1 else map_class(st.mode, cmd_mode or search_mode)
+            let mi = meta_idx(km, mcb, cb)
+            // A mapped chord becomes its RHS; an unmapped one becomes ESC and the
+            // key, as two keys, which is what the interactive loop does with it.
+            let rep = if mi >= 0 then km.rhs[mi] else str.from_byte('\e') + str.from_byte(cb)
+            decoded = str.slice(decoded, 0, i) + rep + str.slice(decoded, i + 2, n)
+            n = str.len(decoded)
+            b = str.byte_at(decoded, i) ?? 0     // an empty RHS (`<Nop>`) leaves byte 0, which nothing reads
         if picker_active                         // modal picker input, as in the TUI
             if b == '\r'                         // Enter — act on the selection
                 // Rank only as deep as the selection: the acted-on row is the
@@ -4267,8 +4453,8 @@ fn run_batch(keys: Str, cfg_path: Str, fpath: Str) [io, fs, time]
                 cmd_buf = ""
             elif b == '\x7f' or b == '\b'          // Backspace
                 if str.len(cmd_buf) > 0
-                    cmd_buf = str.slice(cmd_buf, 0, str.len(cmd_buf) - 1)
-            elif b >= ' ' and b < '\x7f'
+                    cmd_buf = str.slice(cmd_buf, 0, util.u8_prev(cmd_buf, str.len(cmd_buf)))
+            elif (b >= ' ' and b < '\x7f') or (b >= 128 and b < 256)
                 cmd_buf = cmd_buf + str.from_byte(b)
         elif search_mode
             if b == '\r' or b == '\n'            // Enter — run the search
@@ -4281,8 +4467,8 @@ fn run_batch(keys: Str, cfg_path: Str, fpath: Str) [io, fs, time]
                 search_buf = ""
             elif b == '\x7f' or b == '\b'
                 if str.len(search_buf) > 0
-                    search_buf = str.slice(search_buf, 0, str.len(search_buf) - 1)
-            elif b >= ' ' and b < '\x7f'
+                    search_buf = str.slice(search_buf, 0, util.u8_prev(search_buf, str.len(search_buf)))
+            elif (b >= ' ' and b < '\x7f') or (b >= 128 and b < 256)
                 search_buf = search_buf + str.from_byte(b)
         elif hb_on and st.mode == 0 and b == 'q' and scroll_idle(st, es)   // q in the help buffer closes it
             hb_on = false
@@ -5202,6 +5388,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
     // the Normal-mode maps scraped from the user's Neovim config.
     let km = if keymaps_import_nvim(cfg_path) then import_nvim_keymaps(default_nvim_dir(), load_keymaps(cfg_path)) else load_keymaps(cfg_path)
     let km_active = list.len(km.lhs) > 0          // any maps → run the prefix matcher
+    let ttm = load_ttimeoutlen(cfg_path)          // ms to wait after ESC for the key of an Alt chord
     var map_pending = ""                          // buffered multi-key LHS prefix
     var map_replay = ""                           // RHS / flushed bytes to re-feed through the driver
     // var: `:colorscheme <name>` switches it live — and still does under
@@ -5550,8 +5737,37 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                 // not the start of a CSI to read more (its rest is in map_replay).
                 var esc_skip = false
                 if b == '\e' and not from_replay
-                    let nx = novo_pty_stdin_read_byte_h()
-                    if nx == '[' or nx == 'O'
+                    var nx = novo_pty_stdin_read_byte_h()
+                    // An Alt chord is ESC and a key sent together.  Where a map
+                    // for one exists (`meta_live`), a key that is not there yet
+                    // is waited for up to `ttm` ms, since the two bytes may reach
+                    // us in separate reads; where none exists the ESC goes on at
+                    // once, as before.
+                    let mcl = map_class(st.mode, cmd_mode or search_mode)
+                    let meta_live = km_active and mcl >= 0 and not picker_active and not zpend and not wpend and not gpend and not cpend and not cpend_obj and not vgc_pend and not comp_active and has_meta_map(km, mcl)
+                    if nx == 0 - 2 and meta_live and ttm > 0
+                        if novo_pty_poll_h(0, ttm) % 2 == 1
+                            nx = novo_pty_stdin_read_byte_h()
+                    // `ESC O` opens a function-key sequence (`ESC O P` is F1) and
+                    // is also Alt-Shift-o.  With a map for it, the byte after is
+                    // looked at, with the same wait: nothing, or anything that
+                    // does not continue a function-key sequence, makes it the
+                    // chord, and that byte is delivered after the chord's RHS.
+                    var o_chord = false
+                    var o_next = 0 - 2
+                    if nx == 'O' and meta_live and meta_idx(km, mcl, 'O') >= 0
+                        o_next = novo_pty_stdin_read_byte_h()
+                        if o_next == 0 - 2 and ttm > 0
+                            if novo_pty_poll_h(0, ttm) % 2 == 1
+                                o_next = novo_pty_stdin_read_byte_h()
+                        if o_next == 0 - 2 or not ss3_continues(o_next)
+                            o_chord = true
+                    if o_chord
+                        map_replay = km.rhs[meta_idx(km, mcl, 'O')]
+                        esc_skip = true
+                        if o_next >= 0
+                            esc_pushback = o_next
+                    elif nx == '[' or nx == 'O'
                         // Peek one byte after a CSI `[` to detect an SGR mouse
                         // report (`ESC[<button;col;rowM`); SS3 `O` never is.
                         var c1 = 0 - 1
@@ -5601,7 +5817,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                                             ed = clamp(Editor { lines: ed.lines, cy: ncy, cx: ncx })
                             esc_skip = true
                         else
-                            let packed = if nx == '[' then csi_finish(c1) else csi_seq()
+                            let packed = if nx == '[' then csi_finish(c1) elif o_next >= 0 then csi_finish(o_next) else csi_seq()
                             // Picker: Up/Down move the selection (visual
                             // directions — bottom-up list, so Up = rank+1).
                             if packed >= 0 and picker_active
@@ -5668,11 +5884,11 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                                         changed = true
                                 elif cfin == 'D'                          // ← left
                                     if cmd_cx > 0
-                                        cmd_cx = cmd_cx - 1
+                                        cmd_cx = util.u8_prev(cmd_buf, cmd_cx)
                                         changed = true
                                 elif cfin == 'C'                          // → right
                                     if cmd_cx < str.len(cmd_buf)
-                                        cmd_cx = cmd_cx + 1
+                                        cmd_cx = util.u8_next(cmd_buf, cmd_cx)
                                         changed = true
                                 elif cfin == 'H' or (cfin == '~' and (cprm == 1 or cprm == 7))   // Home
                                     cmd_cx = 0
@@ -5682,7 +5898,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                                     changed = true
                                 elif cfin == '~' and cprm == 3            // Delete — remove at the cursor
                                     if cmd_cx < str.len(cmd_buf)
-                                        cmd_buf = str.slice(cmd_buf, 0, cmd_cx) + str.slice(cmd_buf, cmd_cx + 1, str.len(cmd_buf))
+                                        cmd_buf = str.slice(cmd_buf, 0, cmd_cx) + str.slice(cmd_buf, util.u8_next(cmd_buf, cmd_cx), str.len(cmd_buf))
                                         changed = true
                             // Search line: Up/Down history, Left/Right/Home/End
                             // move the insertion point, Delete removes at it.
@@ -5707,11 +5923,11 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                                         changed = true
                                 elif sfin == 'D'                          // ← left
                                     if search_cx > 0
-                                        search_cx = search_cx - 1
+                                        search_cx = util.u8_prev(search_buf, search_cx)
                                         changed = true
                                 elif sfin == 'C'                          // → right
                                     if search_cx < str.len(search_buf)
-                                        search_cx = search_cx + 1
+                                        search_cx = util.u8_next(search_buf, search_cx)
                                         changed = true
                                 elif sfin == 'H' or (sfin == '~' and (sprm == 1 or sprm == 7))   // Home
                                     search_cx = 0
@@ -5721,11 +5937,16 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                                     changed = true
                                 elif sfin == '~' and sprm == 3            // Delete — remove at the cursor
                                     if search_cx < str.len(search_buf)
-                                        search_buf = str.slice(search_buf, 0, search_cx) + str.slice(search_buf, search_cx + 1, str.len(search_buf))
+                                        search_buf = str.slice(search_buf, 0, search_cx) + str.slice(search_buf, util.u8_next(search_buf, search_cx), str.len(search_buf))
                                         changed = true
                             esc_skip = true
                     elif nx >= 0
-                        esc_pushback = nx
+                        let mi = if meta_live then meta_idx(km, mcl, nx) else 0 - 1
+                        if mi >= 0
+                            map_replay = km.rhs[mi]       // the chord's RHS, re-fed as typed bytes
+                            esc_skip = true
+                        else
+                            esc_pushback = nx
                 // Multi-key keymap matcher: a fresh Normal-mode key (not a replay,
                 // not an escape sequence) extends the pending LHS prefix.  Exact
                 // match → queue the RHS for replay; still-a-prefix → buffer and
@@ -6323,11 +6544,12 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                     elif b == '\e'                     // Esc — cancel
                         cmd_mode = false
                         cmd_buf = ""
-                    elif b == '\x7f' or b == '\b'      // Backspace — delete before the cursor
+                    elif b == '\x7f' or b == '\b'      // Backspace — delete the character before the cursor
                         if cmd_cx > 0
-                            cmd_buf = str.slice(cmd_buf, 0, cmd_cx - 1) + str.slice(cmd_buf, cmd_cx, str.len(cmd_buf))
-                            cmd_cx = cmd_cx - 1
-                    elif b >= ' ' and b < '\x7f'       // insert the typed char at the cursor
+                            let cfrom = util.u8_prev(cmd_buf, cmd_cx)
+                            cmd_buf = str.slice(cmd_buf, 0, cfrom) + str.slice(cmd_buf, cmd_cx, str.len(cmd_buf))
+                            cmd_cx = cfrom
+                    elif (b >= ' ' and b < '\x7f') or (b >= 128 and b < 256)   // insert the typed byte at the cursor
                         cmd_buf = str.slice(cmd_buf, 0, cmd_cx) + str.from_byte(b) + str.slice(cmd_buf, cmd_cx, str.len(cmd_buf))
                         cmd_cx = cmd_cx + 1
                 elif search_mode
@@ -6345,11 +6567,12 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                     elif b == '\e'
                         search_mode = false
                         search_buf = ""
-                    elif b == '\x7f' or b == '\b'      // Backspace — delete before the cursor
+                    elif b == '\x7f' or b == '\b'      // Backspace — delete the character before the cursor
                         if search_cx > 0
-                            search_buf = str.slice(search_buf, 0, search_cx - 1) + str.slice(search_buf, search_cx, str.len(search_buf))
-                            search_cx = search_cx - 1
-                    elif b >= ' ' and b < '\x7f'       // insert the typed char at the cursor
+                            let sfrom = util.u8_prev(search_buf, search_cx)
+                            search_buf = str.slice(search_buf, 0, sfrom) + str.slice(search_buf, search_cx, str.len(search_buf))
+                            search_cx = sfrom
+                    elif (b >= ' ' and b < '\x7f') or (b >= 128 and b < 256)   // insert the typed byte at the cursor
                         search_buf = str.slice(search_buf, 0, search_cx) + str.from_byte(b) + str.slice(search_buf, search_cx, str.len(search_buf))
                         search_cx = search_cx + 1
                 elif zpend                            // 2nd byte of a `z` command
@@ -6997,13 +7220,13 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                 csi()
                 emit("K")
                 emit(":" + cmd_buf)
-                cup(rows, 2 + cmd_cx)            // park the cursor at the insertion point
+                cup(rows, 2 + disp.vis_col(cmd_buf, cmd_cx, 8))   // park the cursor at the insertion point (a column per character, not per byte)
             if search_mode
                 cup(rows, 1)
                 csi()
                 emit("K")
                 emit("/" + search_buf)
-                cup(rows, 2 + search_cx)         // park the cursor at the insertion point
+                cup(rows, 2 + disp.vis_col(search_buf, search_cx, 8))   // park the cursor at the insertion point (a column per character, not per byte)
             if buflist
                 draw_buflist(bufs_path, cur_buf, rows)
             if picker_active
@@ -7291,6 +7514,19 @@ fn show_bytes(s: Str) -> Str
         i = i + 1
     o
 
+// An LHS for `--dump-keymaps`: an Alt chord reads `<M-x>` (`<M-CR>` for a named
+// key), anything else as show_bytes spells it.
+fn show_lhs(s: Str) -> Str
+    if is_chord_lhs(s)
+        let inner = show_bytes(str.slice(s, 1, 2))
+        let n = str.len(inner)
+        if n > 2 and (str.byte_at(inner, 0) ?? 0) == '<' and (str.byte_at(inner, n - 1) ?? 0) == '>'
+            "<M-" + str.slice(inner, 1, n)
+        else
+            "<M-" + inner + ">"
+    else
+        show_bytes(s)
+
 @intent("""`--dump-keymaps` debug entry point: resolve the nvim config dir, scrape
 its leader + Normal-mode maps, and print each `lhs -> rhs` with control bytes
 shown printably — no TUI.  The headless test hook for the importer.""")
@@ -7319,8 +7555,24 @@ fn run_dump_keymaps() [io, fs]
     println("maps: " + str.from_int(list.len(pairs) / 2))
     var i = 0
     while i + 1 < list.len(pairs)
-        println("  " + show_bytes(pairs[i]) + " -> " + show_bytes(pairs[i + 1]))
+        println("  " + show_lhs(pairs[i]) + " -> " + show_bytes(pairs[i + 1]))
         i = i + 2
+    // The other classes are listed only when the config has some, so a config
+    // with Normal-mode maps alone prints what it always did.
+    let ipairs = nvmap.scrape_mode_maps(text, leader, "i")
+    if list.len(ipairs) > 0
+        println("insert maps: " + str.from_int(list.len(ipairs) / 2))
+        var j = 0
+        while j + 1 < list.len(ipairs)
+            println("  " + show_lhs(ipairs[j]) + " -> " + show_bytes(ipairs[j + 1]))
+            j = j + 2
+    let cpairs = cmdline_chord_maps(text, leader)
+    if list.len(cpairs) > 0
+        println("command-line maps: " + str.from_int(list.len(cpairs) / 2))
+        var k = 0
+        while k + 1 < list.len(cpairs)
+            println("  " + show_lhs(cpairs[k]) + " -> " + show_bytes(cpairs[k + 1]))
+            k = k + 2
 
 // ── LSP (novols) client — JSON-RPC transport ───────────────────────────────
 // novim talks JSON-RPC over stdio to `novols`.  All of this lives outside the

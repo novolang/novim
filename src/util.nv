@@ -139,6 +139,63 @@ fn char_class_of(c: Int) -> Int
     else
         2
 
+// ── UTF-8 character boundaries ─────────────────────────────────────────────
+// The buffer holds bytes and the cursor column `cx` is a byte index.  These
+// three functions move an index between the starts of characters, so a cursor
+// or a deletion never lands inside a multi-byte sequence.  A byte of the form
+// 10xxxxxx continues the character before it.
+
+fn u8_cont(b: Int) -> Bool
+    b >= 128 and b < 192
+
+// The start of the character that contains byte `x` of `s`; `x` itself when it
+// already starts one, and 0 or the line length at the ends.
+fn u8_start(s: Str, x: Int) -> Int
+    let n = str.len(s)
+    var i = x
+    if i >= n
+        return n
+    if i < 0
+        return 0
+    while i > 0 and u8_cont(str.byte_at(s, i) ?? 0)
+        i = i - 1
+    i
+
+// The start of the character after the one that begins at `x`; the line length
+// when there is none.
+fn u8_next(s: Str, x: Int) -> Int
+    let n = str.len(s)
+    if x >= n
+        return n
+    var i = x + 1
+    while i < n and u8_cont(str.byte_at(s, i) ?? 0)
+        i = i + 1
+    i
+
+// The start of the character before position `x`; 0 at the front.
+fn u8_prev(s: Str, x: Int) -> Int
+    if x <= 0
+        return 0
+    u8_start(s, x - 1)
+
+// `k` characters forward from `x` (stops at the line length).
+fn u8_fwd(s: Str, x: Int, k: Int) -> Int
+    var i = x
+    var c = 0
+    while c < k and i < str.len(s)
+        i = u8_next(s, i)
+        c = c + 1
+    i
+
+// `k` characters back from `x` (stops at 0).
+fn u8_back(s: Str, x: Int, k: Int) -> Int
+    var i = x
+    var c = 0
+    while c < k and i > 0
+        i = u8_prev(s, i)
+        c = c + 1
+    i
+
 // The basename (last `/`-separated component) of a path.
 fn basename_of(p: Str) -> Str
     var last = 0
