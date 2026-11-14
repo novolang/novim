@@ -3027,8 +3027,10 @@ fn decode_escapes(s: Str) -> Str
 // by a key by how soon the key comes.  It takes the spelling `\M<key>` for the
 // chord (`\Ma` is Alt-a) and rewrites it to `\xff<key>`; the batch loop reads
 // the 0xFF byte, which never occurs in UTF-8 text, and resolves the pair.  A
-// plain `\e` followed by a key stays two keys.  An escaped backslash (`\\M`)
-// is a backslash and an M.
+// plain `\e` followed by a key stays two keys.  `\T` is the same kind of mark
+// for time: 'timeoutlen' passes with no key typed, so Insert-mode keys held as
+// the start of a map (`a` of `aa`) are typed as they are; it is rewritten to
+// `\xfe`.  An escaped backslash (`\\M`) is a backslash and an M.
 fn batch_meta_marks(keys: Str) -> Str
     let sb = str.builder_new()
     let n = str.len(keys)
@@ -3039,6 +3041,8 @@ fn batch_meta_marks(keys: Str) -> Str
             let nx = str.byte_at(keys, i + 1) ?? 0
             if nx == 'M'
                 str.builder_append(sb, "\\xff")
+            elif nx == 'T'
+                str.builder_append(sb, "\\xfe")
             else
                 str.builder_append_char(sb, b)
                 str.builder_append_char(sb, nx)
@@ -3049,6 +3053,38 @@ fn batch_meta_marks(keys: Str) -> Str
     let out = str.builder_to_str(sb)
     str.builder_drop(sb)
     out
+
+// `--batch` reads the kitty keyboard protocol's key report too, spelled as the
+// terminal sends it (`\e[91;3u` is Alt-[, `\e[27u` is Escape).  At `i`, an ESC
+// of `s`, the report that starts there as `[code, mods, length]` (mods is 1 when
+// the report has none), or `[]` when what follows is not `[ digits (; digits) u`.
+fn batch_csi_u(s: Str, i: Int) -> [Int]
+    var j = i + 1
+    if (str.byte_at(s, j) ?? 0) != '['
+        return []
+    j = j + 1
+    var cp = 0
+    var digits = 0
+    while (str.byte_at(s, j) ?? 0) >= '0' and (str.byte_at(s, j) ?? 0) <= '9'
+        cp = cp * 10 + ((str.byte_at(s, j) ?? 0) - '0')
+        digits = digits + 1
+        j = j + 1
+    if digits == 0
+        return []
+    var mods = 1
+    if (str.byte_at(s, j) ?? 0) == ';'
+        j = j + 1
+        mods = 0
+        digits = 0
+        while (str.byte_at(s, j) ?? 0) >= '0' and (str.byte_at(s, j) ?? 0) <= '9'
+            mods = mods * 10 + ((str.byte_at(s, j) ?? 0) - '0')
+            digits = digits + 1
+            j = j + 1
+        if digits == 0
+            return []
+    if (str.byte_at(s, j) ?? 0) != 'u'
+        return []
+    [cp, mods, j + 1 - i]
 
 // A user keymap: the Normal-mode key sequence `lhs[i]` (a byte string — one
 // byte for a single-key remap, several for a multi-key one like `<leader>w`,
@@ -3084,7 +3120,7 @@ fn keymap_lookup(km: Keymap, b: Int) -> Str
 fn keymap_seq_idx(km: Keymap, s: Str, mclass: Int) -> Int
     var i = 0
     while i < list.len(km.lhs)
-        if km.kmode[i] == mclass and km.lhs[i] == s and not is_chord_lhs(km.lhs[i])
+        if km.kmode[i] == mclass and km.lhs[i] == s and not is_alt_lhs(km.lhs[i])
             return i
         i = i + 1
     0 - 1
@@ -3092,13 +3128,15 @@ fn keymap_seq_idx(km: Keymap, s: Str, mclass: Int) -> Int
 // True if `s` is a strict prefix of some LHS in mode class `mclass` (more keys
 // could still complete a mapping) — the signal to keep buffering.  An Alt chord
 // is not a sequence typed over time, so its ESC does not count as a prefix: a
-// lone Escape must not wait for a key.
+// lone Escape must not wait for a key.  That holds for `ESC [` too (Alt-[, which
+// only a terminal with the kitty keyboard protocol can send apart from a cursor
+// key): counted as a prefix, it would hold every Escape typed in Insert mode.
 fn keymap_is_prefix(km: Keymap, s: Str, mclass: Int) -> Bool
     let sn = str.len(s)
     var i = 0
     while i < list.len(km.lhs)
         let l = km.lhs[i]
-        if km.kmode[i] == mclass and not is_chord_lhs(l)
+        if km.kmode[i] == mclass and not is_alt_lhs(l)
             if str.len(l) > sn and str.slice(l, 0, sn) == s
                 return true
         i = i + 1
@@ -3109,6 +3147,13 @@ fn keymap_is_prefix(km: Keymap, s: Str, mclass: Int) -> Bool
 // though it starts a function-key sequence as well; the loop tells them apart.
 fn is_chord_lhs(l: Str) -> Bool
     str.len(l) == 2 and (str.byte_at(l, 0) ?? 0) == '\e' and (str.byte_at(l, 1) ?? 0) != '['
+
+// True for any two-byte LHS made of ESC and one key, `ESC [` included.  `ESC [`
+// is not matched as an ESC-led chord (it opens a cursor-key sequence), but it is
+// the Alt-[ chord all the same, which a terminal with the kitty keyboard
+// protocol reports unambiguously.
+fn is_alt_lhs(l: Str) -> Bool
+    str.len(l) == 2 and (str.byte_at(l, 0) ?? 0) == '\e'
 
 // ── Alt chords ──────────────────────────────────────────────────────────────
 // A terminal sends Alt and a key as ESC followed by the key (xterm's
@@ -3133,7 +3178,34 @@ fn map_class(mode: Int, line_input: Bool) -> Int
     else
         0 - 1
 
-// `base` with the Alt-chord maps of `more` appended (see is_chord_lhs).
+// True when every byte of `s` is a printable ASCII character (0x20-0x7e).
+fn all_printable(s: Str) -> Bool
+    var i = 0
+    while i < str.len(s)
+        let b = str.byte_at(s, i) ?? 0
+        if b < 32 or b > 126
+            return false
+        i = i + 1
+    true
+
+// True when `s` holds no control byte: text a user could type, UTF-8 included.
+fn no_control(s: Str) -> Bool
+    var i = 0
+    while i < str.len(s)
+        let b = str.byte_at(s, i) ?? 0
+        if b < 32 or b == 127
+            return false
+        i = i + 1
+    true
+
+// An Insert-mode map that types text: two or more printable keys on the left
+// (`aa`), text without a control byte on the right (`å`).  Such a map needs no
+// Ex command and no Normal-mode command to run, so `--batch` can take it.
+fn is_text_pair(l: Str, r: Str, mode: Int) -> Bool
+    mode == 2 and str.len(l) >= 2 and all_printable(l) and no_control(r)
+
+// `base` with the Alt-chord maps of `more` appended (see is_chord_lhs), and the
+// Insert-mode maps that type text (see is_text_pair).
 fn keymap_with_chords(base: Keymap, more: Keymap) -> Keymap
     var lhs = base.lhs[:]
     var rhs = base.rhs[:]
@@ -3141,7 +3213,7 @@ fn keymap_with_chords(base: Keymap, more: Keymap) -> Keymap
     var i = 0
     while i < list.len(more.lhs)
         let l = more.lhs[i]
-        if is_chord_lhs(l)
+        if is_alt_lhs(l) or is_text_pair(l, more.rhs[i], more.kmode[i])
             lhs = list.push(lhs, l)
             rhs = list.push(rhs, more.rhs[i])
             kmode = list.push(kmode, more.kmode[i])
@@ -3156,13 +3228,99 @@ fn ss3_continues(b: Int) -> Bool
 
 // Index of the map in class `mc` whose LHS is the Alt chord ESC `c`, or -1.
 fn meta_idx(km: Keymap, mc: Int, c: Int) -> Int
-    let want = str.from_byte('\e') + str.from_byte(c)
+    meta_idx_str(km, mc, str.from_byte(c))
+
+// Index of the map in class `mc` whose LHS is ESC and the bytes `key` (one
+// character, UTF-8 when it is not ASCII), or -1.  Alt-[ is found here too,
+// though the ESC form of it is never delivered as a chord.
+fn meta_idx_str(km: Keymap, mc: Int, key: Str) -> Int
+    let want = str.from_byte('\e') + key
     var i = 0
     while i < list.len(km.lhs)
-        if km.kmode[i] == mc and km.lhs[i] == want and is_chord_lhs(km.lhs[i])
+        if km.kmode[i] == mc and km.lhs[i] == want
             return i
         i = i + 1
     0 - 1
+
+// ── The kitty keyboard protocol ─────────────────────────────────────────────
+// novim pushes flag 1 on start (term_enter).  A terminal that has the protocol
+// then sends Escape and the Alt and Ctrl chords as `CSI code ; mods u`, where
+// `code` is the Unicode value of the key as it is on the keyboard without Shift
+// and `mods` is 1 plus Shift 1, Alt 2, Ctrl 4, Super 8 (Caps and Num Lock are
+// 64 and 128 and are ignored).  The sequence is read as the key it stands for,
+// so `<M-[>` and `<M-{>` match without the wait the ESC form needs, and Escape
+// is delivered at once.
+
+// The character a key makes with Shift held, on a US keyboard, for the keys
+// whose shifted form is not a capital: the inverse of what a terminal does to
+// name the key.  A character that is not an unshifted key is returned as it is.
+fn kitty_shifted(cp: Int) -> Int
+    if cp >= 'a' and cp <= 'z'
+        cp - 32
+    elif cp == '1'
+        '!'
+    elif cp == '2'
+        '@'
+    elif cp == '3'
+        '#'
+    elif cp == '4'
+        '$'
+    elif cp == '5'
+        '%'
+    elif cp == '6'
+        '^'
+    elif cp == '7'
+        '&'
+    elif cp == '8'
+        '*'
+    elif cp == '9'
+        '('
+    elif cp == '0'
+        ')'
+    elif cp == '-'
+        '_'
+    elif cp == '='
+        '+'
+    elif cp == '['
+        '{'
+    elif cp == ']'
+        '}'
+    elif cp == '\\'
+        '|'
+    elif cp == ';'
+        ':'
+    elif cp == '\''
+        '"'
+    elif cp == ','
+        '<'
+    elif cp == '.'
+        '>'
+    elif cp == '/'
+        '?'
+    elif cp == '`'
+        '~'
+    else
+        cp
+
+// True when the modifier value of a key report has Alt.
+fn kitty_alt(mods: Int) -> Bool
+    mods > 1 and (mods - 1) / 2 % 2 == 1
+
+// The bytes the key of a report stands for, without the ESC an Alt adds: the
+// character (UTF-8) with Shift applied, or the control byte with Ctrl; "" for a
+// key with Super or Hyper held or no character at all.
+fn kitty_keybytes(cp: Int, mods: Int) -> Str
+    let m = if mods > 1 then mods - 1 else 0
+    if m / 8 % 2 == 1 or cp <= 0 or (cp >= 57344 and cp <= 63743)   // Super or Hyper; no character; a functional key
+        return ""
+    let shifted = if m % 2 == 1 then kitty_shifted(cp) else cp
+    if m / 4 % 2 == 1
+        let cb = nvmap.ctrl_byte(cp)
+        if cb >= 0
+            return str.from_byte(cb)
+        if cp == ' '
+            return ""              // Ctrl-Space is a NUL, which nothing here reads
+    str.from_char(shifted)
 
 // True when a map in class `mc` has an Alt chord for its whole LHS.
 fn has_meta_map(km: Keymap, mc: Int) -> Bool
@@ -3258,6 +3416,50 @@ fn load_ttimeoutlen(cfg_path: Str) -> Int [fs]
                             ms = v
         i = i + 1
     ms
+
+// Vim's 'timeoutlen' when neither the config nor the Neovim config sets it.
+fn timeoutlen_default() -> Int
+    1000
+
+// How long, in milliseconds, the loop holds the keys typed so far when they are
+// the start of a longer map (Vim's 'timeoutlen').  `[options] timeoutlen = N` in
+// the novim config; -1 when it is not set there.  load_timeoutlen below is the
+// whole rule.
+fn config_timeoutlen(cfg_path: Str) -> Int [fs]
+    let Some(content) = fs.read(cfg_path) else return 0 - 1
+    let lines = str.split_lines(content)
+    var in_opt = false
+    var ms = 0 - 1
+    var i = 0
+    let n = list.len(lines)
+    while i < n
+        let raw = str.trim(lines[i])
+        if str.len(raw) > 0 and (str.byte_at(raw, 0) ?? 0) != 35
+            if (str.byte_at(raw, 0) ?? 0) == 91
+                in_opt = raw == "[options]"
+            elif in_opt
+                let eq = util.index_of_byte(raw, 61)
+                if eq > 0
+                    let key = str.trim(str.slice(raw, 0, eq))
+                    if key == "timeoutlen" or key == "tm"
+                        let v = util.parse_color_val(util.strip_inline_comment(str.slice(raw, eq + 1, str.len(raw))))
+                        if v >= 0
+                            ms = v
+        i = i + 1
+    ms
+
+// The 'timeoutlen' to use: `[options] timeoutlen` of the novim config if set,
+// else, when `[keymaps] import_nvim = true`, the `vim.o.timeoutlen` of the
+// Neovim config (the owner's is 250), else Vim's 1000.
+fn load_timeoutlen(cfg_path: Str, nvim_dir: Str) -> Int [fs]
+    let own = config_timeoutlen(cfg_path)
+    if own >= 0
+        return own
+    if keymaps_import_nvim(cfg_path)
+        let nv = nvmap.find_timeoutlen(collect_lua(nvim_dir, 0))
+        if nv >= 0
+            return nv
+    timeoutlen_default()
 
 // Assemble a Keymap from the nvim config dir: find the leader (default `\`), then
 // scrape the Normal-mode maps (kmode 0) and the Visual-mode `v`/`x` maps
@@ -4220,9 +4422,10 @@ fn run_batch(keys: Str, cfg_path: Str, fpath: Str) [io, fs, time]
     var st = ist_new()
     var es = edit_new()
     // The TOML `[keymaps]`, plus, when `[keymaps] import_nvim = true`, the Alt
-    // chords scraped from the Neovim config.  The other imported maps have
-    // `:` commands and multi-key sequences for right-hand sides, which the
-    // interactive driver runs and this loop does not, so they stay out.
+    // chords and the Insert-mode maps that type text (`aa` → å) scraped from the
+    // Neovim config.  The other imported maps have `:` commands and multi-key
+    // sequences for right-hand sides, which the interactive driver runs and this
+    // loop does not, so they stay out.
     let km = if keymaps_import_nvim(cfg_path) then keymap_with_chords(load_keymaps(cfg_path), import_nvim_keymaps(default_nvim_dir(), keymap_empty())) else load_keymaps(cfg_path)
     var opts = load_options(cfg_path)    // tabstop/expandtab drive edits, not just render
     let batch_rows = term_rows()         // 24 off-tty — makes paging deterministic
@@ -4267,20 +4470,71 @@ fn run_batch(keys: Str, cfg_path: Str, fpath: Str) [io, fs, time]
     var last_subst = ""
     var quit = false
     var n = str.len(decoded)
+    var bq = ""                                  // bytes to feed before the next key of `decoded`: a map's RHS, flushed keys
+    var bpend = ""                               // Insert-mode keys held as the start of a longer map
     let mut i = 0
-    while i < n and not quit
-        var b = str.byte_at(decoded, i) ?? 0
-        if b == 255 and i + 1 < n                // `\M<key>`: an Alt chord, ESC and the key arriving together
-            let cb = str.byte_at(decoded, i + 1) ?? 0
-            let mcb = if picker_active then 0 - 1 else map_class(st.mode, cmd_mode or search_mode)
-            let mi = meta_idx(km, mcb, cb)
-            // A mapped chord becomes its RHS; an unmapped one becomes ESC and the
-            // key, as two keys, which is what the interactive loop does with it.
-            let rep = if mi >= 0 then km.rhs[mi] else str.from_byte('\e') + str.from_byte(cb)
-            decoded = str.slice(decoded, 0, i) + rep + str.slice(decoded, i + 2, n)
-            n = str.len(decoded)
-            b = str.byte_at(decoded, i) ?? 0     // an empty RHS (`<Nop>`) leaves byte 0, which nothing reads
-        if picker_active                         // modal picker input, as in the TUI
+    while (i < n or str.len(bq) > 0 or str.len(bpend) > 0) and not quit
+        var b = 0
+        var from_q = false                       // b came from bq: typed text, not matched again
+        var skip = false                         // this step consumed its key without feeding it
+        if str.len(bq) > 0
+            b = str.byte_at(bq, 0) ?? 0
+            bq = str.slice(bq, 1, str.len(bq))
+            from_q = true
+        elif i >= n                              // no keys left with some held: the wait never ends
+            bq = bpend
+            bpend = ""
+            skip = true
+        else
+            b = str.byte_at(decoded, i) ?? 0
+            let rep: [Int] = if b == 27 and not picker_active then batch_csi_u(decoded, i) else []
+            if b == 255 and i + 1 < n                // `\M<key>`: an Alt chord, ESC and the key arriving together
+                let cb = str.byte_at(decoded, i + 1) ?? 0
+                let mcb = if picker_active then 0 - 1 else map_class(st.mode, cmd_mode or search_mode)
+                let mi = meta_idx(km, mcb, cb)
+                // A mapped chord becomes its RHS; an unmapped one becomes ESC and the
+                // key, as two keys, which is what the interactive loop does with it.
+                // Keys held as the start of a map are typed first.
+                bq = bpend + (if mi >= 0 then km.rhs[mi] else str.from_byte('\e') + str.from_byte(cb))
+                bpend = ""
+                i = i + 1
+                skip = true
+            elif b == 254                            // `\T`: 'timeoutlen' passes with no key
+                bq = bpend
+                bpend = ""
+                skip = true
+            elif list.len(rep) == 3
+                // A kitty key report: the key it stands for, typed after any held keys.
+                let kmods = rep[1]
+                let kbytes = kitty_keybytes(rep[0], kmods)
+                var typed = kbytes
+                if kitty_alt(kmods) and str.len(kbytes) > 0
+                    let mcb = map_class(st.mode, cmd_mode or search_mode)
+                    let mi = meta_idx_str(km, mcb, kbytes)
+                    typed = if mi >= 0 then km.rhs[mi] else str.from_byte('\e') + kbytes
+                bq = bpend + typed
+                bpend = ""
+                i = i + rep[2] - 1
+                skip = true
+        // Insert-mode maps of two or more keys, held and matched as the interactive
+        // loop does it (the timeout is the `\T` mark).
+        if not skip and not from_q and st.mode == 1 and not picker_active and not cmd_mode and not search_mode
+            let cand = bpend + str.from_byte(b)
+            let ei = keymap_seq_idx(km, cand, 2)
+            if ei >= 0
+                bq = km.rhs[ei]
+                bpend = ""
+                skip = true
+            elif keymap_is_prefix(km, cand, 2)
+                bpend = cand
+                skip = true
+            elif str.len(bpend) > 0
+                bq = cand
+                bpend = ""
+                skip = true
+        if skip
+            quit = quit                          // consumed by the matcher or a mark; nothing is fed
+        elif picker_active                       // modal picker input, as in the TUI
             if b == '\r'                         // Enter — act on the selection
                 // Rank only as deep as the selection: the acted-on row is the
                 // LAST of that prefix, whatever the window shows.
@@ -4525,7 +4779,8 @@ fn run_batch(keys: Str, cfg_path: Str, fpath: Str) [io, fs, time]
             bframes = bframes + 1
             blast = now_ms()
             bmoved = false
-        i = i + 1
+        if not from_q
+            i = i + 1
     let mut li = 0
     let nl = list.len(ed.lines)
     while li < nl
@@ -4686,6 +4941,14 @@ fn term_enter(want_color: Bool) [io]
     emit("?1000h")        // mouse button tracking (covers the wheel)
     csi()
     emit("?1006h")        // SGR extended mouse coordinates
+    // The kitty keyboard protocol: push flag 1 (Alt and Ctrl chords and Escape
+    // come as `CSI code ; mods u`), then ask what is in force.  A terminal that
+    // does not know it drops both and sends no answer; the loop then keeps
+    // reading the ESC form of a chord.
+    csi()
+    emit(">1u")
+    csi()
+    emit("?u")
     if want_color
         cursor_color_set()
 
@@ -4694,6 +4957,8 @@ fn term_enter(want_color: Bool) [io]
 fn term_leave(want_color: Bool) [io]
     if want_color
         cursor_color_reset()
+    csi()
+    emit("<u")            // give back the keyboard-protocol flags pushed in term_enter
     csi()
     emit("?1000l")
     csi()
@@ -5174,16 +5439,44 @@ fn csi_seq() -> Int [io]
 // dispatcher peeked one byte to detect an SGR mouse `<`).  Returns
 // param*256 + finalByte, or the (negative) read error.
 fn csi_finish(first: Int) -> Int [io]
-    var param = 0
+    let r = csi_read(first)
+    if r[0] < 0 then r[0] else r[1] * 256 + r[0]
+
+// Read the rest of a CSI sequence given its already-read first byte, and return
+// `[final, p1, p2, marker]`: the final byte (negative when the stream ended
+// mid-sequence), the first two decimal parameters (0 when absent; anything after
+// a `:` inside a parameter is skipped), and the private-parameter prefix byte
+// (`<` `=` `>` `?`) or 0.  The kitty keyboard protocol's `CSI code ; mods u` and
+// its query reply `CSI ? flags u` are read through this.
+fn csi_read(first: Int) -> [Int] [io]
     var b = first
+    var marker = 0
     if b == '<' or b == '=' or b == '>' or b == '?'   // private-parameter prefix
+        marker = b
         b = novo_pty_stdin_read_byte_h()
-    while b >= '0' and b <= '9'                 // leading decimal parameter
-        param = param * 10 + (b - '0')
+    var p1 = 0
+    var p2 = 0
+    var cur = 0
+    var idx = 0                                 // which parameter `cur` belongs to
+    var sub = false                             // inside a `:` sub-parameter, skipped
+    while b >= ' ' and b <= '?'                 // parameters / intermediates
+        if b >= '0' and b <= '9'
+            if not sub
+                cur = cur * 10 + (b - '0')
+        elif b == ';'
+            if idx == 0
+                p1 = cur
+            idx = idx + 1
+            cur = 0
+            sub = false
+        elif b == ':'
+            sub = true
         b = novo_pty_stdin_read_byte_h()
-    while b >= ' ' and b <= '?'                 // further params / intermediates
-        b = novo_pty_stdin_read_byte_h()
-    if b < 0 then b else param * 256 + b
+    if idx == 0
+        p1 = cur
+    elif idx == 1
+        p2 = cur
+    [b, p1, p2, marker]
 
 // Parse an SGR mouse report after the `ESC[<` prefix is consumed.  Returns
 // [button, col, row, final] (col/row 1-based; final 'M' press / 'm' release).
@@ -5389,7 +5682,9 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
     let km = if keymaps_import_nvim(cfg_path) then import_nvim_keymaps(default_nvim_dir(), load_keymaps(cfg_path)) else load_keymaps(cfg_path)
     let km_active = list.len(km.lhs) > 0          // any maps → run the prefix matcher
     let ttm = load_ttimeoutlen(cfg_path)          // ms to wait after ESC for the key of an Alt chord
+    let tmo = load_timeoutlen(cfg_path, default_nvim_dir())   // ms a held map prefix waits for its next key
     var map_pending = ""                          // buffered multi-key LHS prefix
+    var map_at = 0                                // now_ms() when the last key joined map_pending
     var map_replay = ""                           // RHS / flushed bytes to re-feed through the driver
     // var: `:colorscheme <name>` switches it live — and still does under
     // --no-color, because typing the command IS asking for those colours.
@@ -5419,6 +5714,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
     var hl_off = false                   // `:noh` — suppress search highlight until the next search
     var zpend = false                    // awaiting the 2nd byte of a `z` scroll command
     var esc_pushback = 0 - 99            // one-byte pushback: the key after a lone ESC
+    var kitty_on = false                 // the terminal answered `CSI ? u` with flag 1: chords come as `CSI … u`
     var last_subst = ""                  // last :s command, for `&`
     // ── LSP (novols) live state.  All async I/O lives here in the
     // driver, never in the pure `feed` path.  `lsp_pid < 0` means no server.
@@ -5636,7 +5932,19 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
     while running
         // Short stdin poll keeps the editor responsive while leaving slack to
         // drain novols' stdout each iteration (combined two-fd poll).
-        let m = novo_pty_poll_h(0, 50)       // poll host stdin (fd 0)
+        // While keys are held as the start of a longer map, the poll ends when
+        // 'timeoutlen' runs out (at most one 50 ms tick late otherwise).
+        var pwait = 50
+        if str.len(map_pending) > 0
+            let left_ms = tmo - (now_ms() - map_at)
+            pwait = if left_ms < 1 then 1 elif left_ms < 50 then left_ms else 50
+        var m = novo_pty_poll_h(0, pwait)    // poll host stdin (fd 0)
+        // 'timeoutlen' ran out with no further key: the held keys are typed text.
+        // They are replayed raw, so the matcher does not see them again.
+        if m % 2 == 0 and str.len(map_pending) > 0 and now_ms() - map_at >= tmo
+            map_replay = map_pending
+            map_pending = ""
+            m = 1
         var changed = false
         // Yank flash (vim's on_yank): hold the highlight for ~3 poll cycles
         // (~150ms), then clear it and repaint.
@@ -5736,7 +6044,15 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                 // Replayed bytes are literal — a remapped `<Esc>` is one ESC byte,
                 // not the start of a CSI to read more (its rest is in map_replay).
                 var esc_skip = false
-                if b == '\e' and not from_replay
+                // An ESC ends the wait of held map keys: they are typed first, then
+                // the ESC is read again (as a pushback) with nothing held.
+                let esc_hold = b == '\e' and not from_replay and str.len(map_pending) > 0
+                if esc_hold
+                    map_replay = map_pending
+                    map_pending = ""
+                    esc_pushback = b
+                    esc_skip = true
+                if b == '\e' and not from_replay and not esc_hold
                     var nx = novo_pty_stdin_read_byte_h()
                     // An Alt chord is ESC and a key sent together.  Where a map
                     // for one exists (`meta_live`), a key that is not there yet
@@ -5744,8 +6060,12 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                     // us in separate reads; where none exists the ESC goes on at
                     // once, as before.
                     let mcl = map_class(st.mode, cmd_mode or search_mode)
-                    let meta_live = km_active and mcl >= 0 and not picker_active and not zpend and not wpend and not gpend and not cpend and not cpend_obj and not vgc_pend and not comp_active and has_meta_map(km, mcl)
-                    if nx == 0 - 2 and meta_live and ttm > 0
+                    let chord_ok = km_active and mcl >= 0 and not picker_active and not zpend and not wpend and not gpend and not cpend and not cpend_obj and not vgc_pend and not comp_active
+                    let meta_live = chord_ok and has_meta_map(km, mcl)
+                    // With the keyboard protocol on, an Alt chord is never ESC and
+                    // a key, so a lone ESC is an Escape key already and nothing
+                    // is waited for.
+                    if nx == 0 - 2 and meta_live and ttm > 0 and not kitty_on
                         if novo_pty_poll_h(0, ttm) % 2 == 1
                             nx = novo_pty_stdin_read_byte_h()
                     // `ESC O` opens a function-key sequence (`ESC O P` is F1) and
@@ -5757,7 +6077,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                     var o_next = 0 - 2
                     if nx == 'O' and meta_live and meta_idx(km, mcl, 'O') >= 0
                         o_next = novo_pty_stdin_read_byte_h()
-                        if o_next == 0 - 2 and ttm > 0
+                        if o_next == 0 - 2 and ttm > 0 and not kitty_on
                             if novo_pty_poll_h(0, ttm) % 2 == 1
                                 o_next = novo_pty_stdin_read_byte_h()
                         if o_next == 0 - 2 or not ss3_continues(o_next)
@@ -5817,7 +6137,11 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                                             ed = clamp(Editor { lines: ed.lines, cy: ncy, cx: ncx })
                             esc_skip = true
                         else
-                            let packed = if nx == '[' then csi_finish(c1) elif o_next >= 0 then csi_finish(o_next) else csi_seq()
+                            let cr = if nx == '[' then csi_read(c1) elif o_next >= 0 then csi_read(o_next) else csi_read(novo_pty_stdin_read_byte_h())
+                            // `CSI … u` is a key report or the answer to the protocol
+                            // query, not a cursor or function key (handled at the end).
+                            let ufin = nx == '[' and cr[0] == 'u'
+                            let packed = if cr[0] < 0 then cr[0] elif ufin then 0 - 1 else cr[1] * 256 + cr[0]
                             // Picker: Up/Down move the selection (visual
                             // directions — bottom-up list, so Up = rank+1).
                             if packed >= 0 and picker_active
@@ -5940,6 +6264,29 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                                         search_buf = str.slice(search_buf, 0, search_cx) + str.slice(search_buf, util.u8_next(search_buf, search_cx), str.len(search_buf))
                                         changed = true
                             esc_skip = true
+                            if ufin and cr[3] == '?'
+                                // The answer to `CSI ? u`: the flags in force.  Flag 1
+                                // on means the terminal reports chords as `CSI … u`.
+                                kitty_on = cr[1] % 2 == 1
+                            elif ufin and cr[3] == 0
+                                // A key report.  Its key becomes the bytes it stands
+                                // for and goes through the matcher and the editor as
+                                // if typed; an Alt chord with a map runs the map.
+                                let kmods = if cr[2] > 0 then cr[2] else 1
+                                let kbytes = kitty_keybytes(cr[1], kmods)
+                                if str.len(kbytes) > 0
+                                    if kitty_alt(kmods)
+                                        let kmi = if chord_ok then meta_idx_str(km, mcl, kbytes) else 0 - 1
+                                        if kmi >= 0
+                                            map_replay = km.rhs[kmi]
+                                        else
+                                            b = '\e'                // no map: Escape, then the key
+                                            map_replay = kbytes
+                                            esc_skip = false
+                                    else
+                                        b = str.byte_at(kbytes, 0) ?? 0
+                                        map_replay = str.slice(kbytes, 1, str.len(kbytes))
+                                        esc_skip = false
                     elif nx >= 0
                         let mi = if meta_live then meta_idx(km, mcl, nx) else 0 - 1
                         if mi >= 0
@@ -5960,15 +6307,18 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                 if km_active and mclass >= 0 and not from_replay and not esc_skip and b >= 0 and not cmd_mode and not search_mode and not picker_active and not zpend and not wpend and not gpend and not cpend and not cpend_obj and not vgc_pend and not comp_active and esc_pushback == 0 - 99
                     let cand = map_pending + str.from_byte(b)
                     let ei = keymap_seq_idx(km, cand, mclass)
+                    // A key report that stands for more than one byte left the rest in
+                    // map_replay; what the matcher queues goes in front of it.
                     if ei >= 0
-                        map_replay = km.rhs[ei]
+                        map_replay = km.rhs[ei] + map_replay
                         map_pending = ""
                         map_eat = true
                     elif keymap_is_prefix(km, cand, mclass)
                         map_pending = cand
+                        map_at = now_ms()
                         map_eat = true
                     elif str.len(map_pending) > 0     // buffered prefix hit a dead end → flush it + b
-                        map_replay = cand
+                        map_replay = cand + map_replay
                         map_pending = ""
                         map_eat = true
                 if map_eat
@@ -7517,7 +7867,7 @@ fn show_bytes(s: Str) -> Str
 // An LHS for `--dump-keymaps`: an Alt chord reads `<M-x>` (`<M-CR>` for a named
 // key), anything else as show_bytes spells it.
 fn show_lhs(s: Str) -> Str
-    if is_chord_lhs(s)
+    if is_alt_lhs(s)
         let inner = show_bytes(str.slice(s, 1, 2))
         let n = str.len(inner)
         if n > 2 and (str.byte_at(inner, 0) ?? 0) == '<' and (str.byte_at(inner, n - 1) ?? 0) == '>'
@@ -7544,13 +7894,20 @@ fn run_fuzzy_rank(query: Str, path: Str) [io, fs]
         i = i + 1
     println("matches: " + str.from_int(fuzzy.match_count(query, cands)) + "/" + str.from_int(list.len(cands)))
 
-fn run_dump_keymaps() [io, fs]
+fn run_dump_keymaps(cfg_path: Str) [io, fs]
     let dir = default_nvim_dir()
     let text = collect_lua(dir, 0)
     let ml = nvmap.find_mapleader(text)
     let leader = if str.len(ml) > 0 then ml else str.from_char('\\')
     println("nvim-dir: " + dir)
+    // The dump reads the Neovim config whether or not the editor will: the maps
+    // below load only when `[keymaps] import_nvim = true` is in the novim config.
+    if not keymaps_import_nvim(cfg_path)
+        println("import: off (no `[keymaps] import_nvim = true` in " + cfg_path + "); the editor loads none of these")
     println("leader: " + show_bytes(leader))
+    let tl = nvmap.find_timeoutlen(text)
+    if tl >= 0
+        println("timeoutlen: " + str.from_int(tl))
     let pairs = nvmap.scrape_n_maps(text, leader)
     println("maps: " + str.from_int(list.len(pairs) / 2))
     var i = 0
@@ -7827,7 +8184,7 @@ fn main() [io, fs, time, ffi]
         i = i + 1
     let cfg_path = if cfg != "" then cfg else default_config_path()
     if dump_keymaps
-        run_dump_keymaps()
+        run_dump_keymaps(cfg_path)
     elif fuzzy_rank and file != ""
         run_fuzzy_rank(fuzzy_query, file)
     elif file == "" and (is_batch or lsp_diag or lsp_resolve or fuzzy_rank)

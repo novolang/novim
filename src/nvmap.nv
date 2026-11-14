@@ -184,10 +184,17 @@ fn skip_ws(s: Str, from: Int) -> Int
         i = i + 1
     i
 
-// Read a Lua double-quoted string starting at `from` (which must be `"`),
-// resolving `\\` `\"` `\t` `\n` `\r`.  ok=false if `from` isn't a quote.
+// True for the byte that opens a Lua quoted string: `"` or `'`.
+fn is_quote(b: Int) -> Bool
+    b == '"' or b == '\''
+
+// Read a Lua quoted string starting at `from` (which must be `"` or `'`; the
+// string ends at the same quote), resolving `\\` `\"` `\'` `\t` `\n` `\r`.
+// ok=false if `from` isn't a quote.  A single-quoted string is how a Lua file
+// writes a table key that is itself a double quote: `['"']`.
 fn read_dquote(s: Str, from: Int) -> Scan
-    if (str.byte_at(s, from) ?? 0) != '"'
+    let q = str.byte_at(s, from) ?? 0
+    if not is_quote(q)
         return Scan { val: "", next: from, ok: false }
     let sb = str.builder_new()
     var i = from + 1
@@ -206,7 +213,7 @@ fn read_dquote(s: Str, from: Int) -> Scan
             else
                 str.builder_append_char(sb, nx)
             i = i + 2
-        else if b == '"'
+        else if b == q
             done = true
             i = i + 1
         else
@@ -283,7 +290,7 @@ fn read_str_expr(s: Str, from: Int, names: [Str], vals: [Str]) -> Scan
     var terms = 0
     while not done
         let b = str.byte_at(s, i) ?? 0
-        if b == '"'
+        if is_quote(b)
             let q = read_dquote(s, i)
             if q.ok
                 acc = acc + q.val
@@ -321,7 +328,7 @@ fn read_str_expr(s: Str, from: Int, names: [Str], vals: [Str]) -> Scan
 fn read_rhs(s: Str, from: Int, leader: Str, names: [Str], vals: [Str]) -> Scan
     let i = skip_ws(s, from)
     let b = str.byte_at(s, i) ?? 0
-    if b == '"'
+    if is_quote(b)
         let q = read_dquote(s, i)
         Scan { val: parse_notation(q.val, leader), next: q.next, ok: q.ok }
     else if b == '['
@@ -379,6 +386,43 @@ fn find_mapleader(text: Str) -> Str
         i = i + 1
     out
 
+// The 'timeoutlen' a config sets, in milliseconds, or -1 when it sets none.  The
+// forms read are `vim.o.timeoutlen = N`, `vim.opt.timeoutlen = N` and
+// `vim.go.timeoutlen = N` with a whole number N, on a line that is not a comment;
+// when several lines set it the last one wins, as in Neovim.
+fn find_timeoutlen(text: Str) -> Int
+    let lines = str.split_lines(text)
+    var out = 0 - 1
+    var i = 0
+    let n = list.len(lines)
+    while i < n
+        let raw = str.trim(lines[i])
+        if not is_comment_line(raw)
+            var at = util.index_of_str(raw, "vim.o.timeoutlen")
+            var klen = 16
+            if at < 0
+                at = util.index_of_str(raw, "vim.opt.timeoutlen")
+                klen = 18
+            if at < 0
+                at = util.index_of_str(raw, "vim.go.timeoutlen")
+                klen = 17
+            if at >= 0
+                var p = skip_ws(raw, at + klen)
+                if (str.byte_at(raw, p) ?? 0) == '='
+                    p = skip_ws(raw, p + 1)
+                    var v = 0
+                    var digits = 0
+                    var c = str.byte_at(raw, p) ?? 0
+                    while c >= '0' and c <= '9'
+                        v = v * 10 + (c - '0')
+                        digits = digits + 1
+                        p = p + 1
+                        c = str.byte_at(raw, p) ?? 0
+                    if digits > 0
+                        out = v
+        i = i + 1
+    out
+
 // Flat `[lhs0, rhs0, lhs1, rhs1, …]` of the Normal-mode maps in one Lua file's
 // `text`.  Each `vim.keymap.set("n", "<lhs>", <rhs>, …)` whose LHS and RHS both
 // expand cleanly (no NUL sentinel, non-empty LHS) contributes a pair; everything
@@ -396,7 +440,7 @@ struct Modes
 fn read_modes(s: Str, from: Int) -> Modes
     let p = skip_ws(s, from)
     let b = str.byte_at(s, p) ?? 0
-    if b == '"'
+    if is_quote(b)
         let q = read_dquote(s, p)
         return Modes { items: [q.val], next: q.next, ok: q.ok }
     if b != '{'
@@ -412,7 +456,7 @@ fn read_modes(s: Str, from: Int) -> Modes
             ok = true
             done = true
             i = i + 1
-        elif c == '"'
+        elif is_quote(c)
             let q = read_dquote(s, i)
             if q.ok
                 out = list.push(out, q.val)
