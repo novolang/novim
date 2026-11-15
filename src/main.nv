@@ -364,6 +364,19 @@ fn leading_ws(line: Str) -> Str
         i = i + 1
     str.slice(line, 0, i)
 
+// Move to row `ny` (clamped into the buffer), keeping the cursor's column in
+// characters: the byte index differs between two lines when either holds a
+// multi-byte character.  The cursor clamps onto the last character of a
+// shorter line.
+fn move_rows(ed: Editor, ny: Int) -> Editor
+    let n = list.len(ed.lines)
+    var cy = ny
+    if cy >= n
+        cy = n - 1
+    if cy < 0
+        cy = 0
+    clamp(Editor { lines: ed.lines, cy: cy, cx: util.u8_same_col(line_at(ed, ed.cy), ed.cx, line_at(ed, cy)) })
+
 // One h/j/k/l step (clamped).
 fn motion_hjkl(ed: Editor, b: Int) -> Editor
     if b == 'h'          // 'h' — left, one character
@@ -371,9 +384,9 @@ fn motion_hjkl(ed: Editor, b: Int) -> Editor
     elif b == 'l'        // 'l' — right, one character
         clamp(Editor { lines: ed.lines, cy: ed.cy, cx: util.u8_next(line_at(ed, ed.cy), ed.cx) })
     elif b == 'j'        // 'j' — down
-        clamp(Editor { lines: ed.lines, cy: ed.cy + 1, cx: ed.cx })
+        move_rows(ed, ed.cy + 1)
     elif b == 'k'        // 'k' — up
-        clamp(Editor { lines: ed.lines, cy: ed.cy - 1, cx: ed.cx })
+        move_rows(ed, ed.cy - 1)
     else
         ed
 
@@ -392,14 +405,12 @@ fn repeat_hjkl(ed: Editor, b: Int, times: Int) -> Editor
 
 // char_class_of moved to util.nv (shared by word motions + Ex-command parsing).
 
-// Class of the glyph at (y,x); out-of-range / past end-of-line reads as
-// whitespace (the inter-line / trailing gap).
+// Class of the character that starts at byte x of line y; out-of-range / past
+// end-of-line reads as whitespace (the inter-line / trailing gap).  Positions
+// are byte indexes of character starts; every step below moves by `u8_next` /
+// `u8_prev`, so a position is never inside a multi-byte character.
 fn class_at(ed: Editor, y: Int, x: Int) -> Int
-    let line = line_at(ed, y)
-    if x >= 0 and x < str.len(line)
-        util.char_class_of(str.byte_at(line, x) ?? ' ')
-    else
-        0
+    util.class_at_u8(line_at(ed, y), x)
 
 // Like `class_at`, but for WORD motions (`W`/`E`/`B`): `big` collapses
 // punctuation into the word class, so a WORD is any whitespace-delimited run.
@@ -421,7 +432,7 @@ fn motion_w(ed: Editor, big: Bool) -> Editor
         while go and g < 1000000
             g = g + 1
             if x < str.len(line_at(ed, y)) and class_at_w(ed, y, x, big) == cc0
-                x = x + 1
+                x = util.u8_next(line_at(ed, y), x)
             else
                 go = false
     var done = false
@@ -431,14 +442,14 @@ fn motion_w(ed: Editor, big: Bool) -> Editor
         let ll = str.len(line_at(ed, y))
         if x < ll
             if class_at_w(ed, y, x, big) == 0
-                x = x + 1
+                x = util.u8_next(line_at(ed, y), x)
             else
                 done = true
         elif y + 1 < nlines
             y = y + 1
             x = 0
         else
-            x = if ll > 0 then ll - 1 else 0
+            x = util.u8_last(line_at(ed, y))
             done = true
     clamp(Editor { lines: ed.lines, cy: y, cx: x })
 
@@ -448,8 +459,8 @@ fn motion_e(ed: Editor, big: Bool) -> Editor
     var y = ed.cy
     var x = ed.cx
     // step one position forward
-    if x + 1 < str.len(line_at(ed, y))
-        x = x + 1
+    if util.u8_next(line_at(ed, y), x) < str.len(line_at(ed, y))
+        x = util.u8_next(line_at(ed, y), x)
     elif y + 1 < nlines
         y = y + 1
         x = 0
@@ -461,7 +472,7 @@ fn motion_e(ed: Editor, big: Bool) -> Editor
         let ll = str.len(line_at(ed, y))
         if x < ll
             if class_at_w(ed, y, x, big) == 0
-                x = x + 1
+                x = util.u8_next(line_at(ed, y), x)
             else
                 done = true
         elif y + 1 < nlines
@@ -476,8 +487,9 @@ fn motion_e(ed: Editor, big: Bool) -> Editor
         var g2 = 0
         while go and g2 < 1000000
             g2 = g2 + 1
-            if x + 1 < str.len(line_at(ed, y)) and class_at_w(ed, y, x + 1, big) == cc
-                x = x + 1
+            let nx = util.u8_next(line_at(ed, y), x)
+            if nx < str.len(line_at(ed, y)) and class_at_w(ed, y, nx, big) == cc
+                x = nx
             else
                 go = false
     clamp(Editor { lines: ed.lines, cy: y, cx: x })
@@ -488,11 +500,10 @@ fn motion_b(ed: Editor, big: Bool) -> Editor
     var x = ed.cx
     // step one position back
     if x > 0
-        x = x - 1
+        x = util.u8_prev(line_at(ed, y), x)
     elif y > 0
         y = y - 1
-        let pl = str.len(line_at(ed, y))
-        x = if pl > 0 then pl - 1 else 0
+        x = util.u8_last(line_at(ed, y))
     // skip whitespace backward
     var done = false
     var g = 0
@@ -500,11 +511,10 @@ fn motion_b(ed: Editor, big: Bool) -> Editor
         g = g + 1
         if class_at_w(ed, y, x, big) == 0 and not (y == 0 and x == 0)
             if x > 0
-                x = x - 1
+                x = util.u8_prev(line_at(ed, y), x)
             elif y > 0
                 y = y - 1
-                let pl = str.len(line_at(ed, y))
-                x = if pl > 0 then pl - 1 else 0
+                x = util.u8_last(line_at(ed, y))
             else
                 done = true
         else
@@ -516,8 +526,9 @@ fn motion_b(ed: Editor, big: Bool) -> Editor
         var g2 = 0
         while go and g2 < 1000000
             g2 = g2 + 1
-            if x > 0 and class_at_w(ed, y, x - 1, big) == cc
-                x = x - 1
+            let px = util.u8_prev(line_at(ed, y), x)
+            if x > 0 and class_at_w(ed, y, px, big) == cc
+                x = px
             else
                 go = false
     clamp(Editor { lines: ed.lines, cy: y, cx: x })
@@ -743,24 +754,47 @@ fn paste(ed: Editor, st: InputState, after: Bool) -> Editor
         clamp(Editor { lines: ls, cy: at, cx: 0 })
     else
         let line = line_at(ed, ed.cy)
-        let want = if after then ed.cx + 1 else ed.cx
+        let want = if after then util.u8_after(line, ed.cx) else ed.cx
         let col = if want > str.len(line) then str.len(line) else want
         let merged = str.slice(line, 0, col) + st.reg + str.slice(line, col, str.len(line))
         clamp(Editor { lines: set_line(ed.lines, ed.cy, merged), cy: ed.cy, cx: col + str.len(st.reg) - 1 })
 
 // ── Char-level edits: ~ toggle case, r replace, J join ───────
 
-// ASCII case toggle: A-Z ↔ a-z, other bytes unchanged.
-fn toggle_case_byte(b: Int) -> Int
-    if b >= 'A' and b <= 'Z'
-        b + 32
-    elif b >= 'a' and b <= 'z'
-        b - 32
+// The case map of one character, by code point: kind 0 = toggle, 1 = lower,
+// 2 = upper.  The letters of ASCII and of Latin-1 (À-Þ and à-þ, which holds
+// å ø æ and their capitals) change; every other character is left as it is.
+fn case_cp(cp: Int, kind: Int) -> Int
+    let is_up = (cp >= 'A' and cp <= 'Z') or (cp >= 192 and cp <= 222 and cp != 215)
+    let is_lo = (cp >= 'a' and cp <= 'z') or (cp >= 224 and cp <= 254 and cp != 247)
+    if is_up and kind != 2
+        cp + 32
+    elif is_lo and kind != 1
+        cp - 32
     else
-        b
+        cp
 
-// `~` / `N~` — toggle the case of `n` chars from the cursor, advancing the
-// cursor past the last one (vim).  Stops at end of line.
+// The text of `s` with the case map applied to the characters that start in the
+// bytes `[lo, hi)`.  A character is replaced as a whole, so a two-byte letter
+// stays two bytes.
+fn case_text(s: Str, lo: Int, hi: Int, kind: Int) -> Str
+    let n = str.len(s)
+    var out = ""
+    var i = 0
+    while i < n
+        let nx = util.u8_next(s, i)
+        if i >= lo and i < hi
+            let cp = util.u8_decode(s, i)
+            let m = case_cp(cp, kind)
+            if m != cp
+                out = out + str.from_char(m)
+            else
+                out = out + str.slice(s, i, nx)
+        else
+            out = out + str.slice(s, i, nx)
+        i = nx
+    out
+
 // `Ctrl-A` / `Ctrl-X` — increment / decrement the (decimal) number at or after
 // the cursor on the current line by `delta`; cursor lands on its last digit.
 fn op_incdec(ed: Editor, delta: Int) -> Editor
@@ -787,37 +821,31 @@ fn op_incdec(ed: Editor, delta: Int) -> Editor
     let newline = str.slice(line, 0, numstart) + newstr + str.slice(line, endd, n)
     clamp(Editor { lines: set_line(ed.lines, ed.cy, newline), cy: ed.cy, cx: numstart + str.len(newstr) - 1 })
 
+// `~` / `N~` — toggle the case of `n` characters from the cursor, advancing the
+// cursor past the last one (vim).  Stops at end of line.
 fn op_toggle_case(ed: Editor, n: Int) -> Editor
     let line = line_at(ed, ed.cy)
-    let ll = str.len(line)
-    if ll == 0
+    if str.len(line) == 0
         return ed
-    var s = line
-    var col = ed.cx
-    var k = 0
-    while k < n and col < ll
-        let b = str.byte_at(s, col) ?? 0
-        s = str.slice(s, 0, col) + str.from_byte(toggle_case_byte(b)) + str.slice(s, col + 1, str.len(s))
-        col = col + 1
-        k = k + 1
-    clamp(Editor { lines: set_line(ed.lines, ed.cy, s), cy: ed.cy, cx: col })
+    let hi = util.u8_fwd(line, ed.cx, n)
+    clamp(Editor { lines: set_line(ed.lines, ed.cy, case_text(line, ed.cx, hi, 0)), cy: ed.cy, cx: hi })
 
-// `r<c>` / `Nr<c>` — replace `n` chars under/after the cursor with byte `rb`.
-// Vim no-ops when fewer than `n` chars remain on the line; cursor ends on the
-// last replaced char.
-fn op_replace_char(ed: Editor, rb: Int, n: Int) -> Editor
+// `r<c>` / `Nr<c>` — replace `n` characters under/after the cursor with the
+// character of code point `rc`.  Vim no-ops when fewer than `n` characters
+// remain on the line; cursor ends on the last replaced character.
+fn op_replace_char(ed: Editor, rc: Int, n: Int) -> Editor
     let line = line_at(ed, ed.cy)
     let ll = str.len(line)
-    if ll == 0 or ed.cx + n > ll
+    if ll == 0 or util.u8_count(line, ed.cx, ll) < n
         return ed
-    var s = line
-    var col = ed.cx
+    let one = str.from_char(rc)
+    var rep = ""
     var k = 0
     while k < n
-        s = str.slice(s, 0, col) + str.from_byte(rb) + str.slice(s, col + 1, str.len(s))
-        col = col + 1
+        rep = rep + one
         k = k + 1
-    clamp(Editor { lines: set_line(ed.lines, ed.cy, s), cy: ed.cy, cx: ed.cx + n - 1 })
+    let s = str.slice(line, 0, ed.cx) + rep + str.slice(line, util.u8_fwd(line, ed.cx, n), ll)
+    clamp(Editor { lines: set_line(ed.lines, ed.cy, s), cy: ed.cy, cx: ed.cx + (n - 1) * str.len(one) })
 
 // `J` / `NJ` — join the current line with the following line(s): `NJ` joins
 // `n` lines (so `J` and `2J` both join 2).  With `space` (plain `J`) each
@@ -985,41 +1013,43 @@ fn feed_indent(ed: Editor, st: InputState, right: Bool, b: Int) -> Step
 
 // ── Find-char motions f/F/t/T ───────────────────────────────
 
-// Index of the `count`-th `ch` strictly after `from` in `line`, or -1.
+// Index of the start of the `count`-th character of code point `ch` strictly
+// after `from` in `line`, or -1.
 fn find_char_fwd(line: Str, ch: Int, from: Int, count: Int) -> Int
     let n = str.len(line)
     var found = 0
-    var i = from + 1
+    var i = util.u8_after(line, from)
     while i < n
-        if (str.byte_at(line, i) ?? 0) == ch
+        if util.u8_decode(line, i) == ch
             found = found + 1
             if found == count
                 return i
-        i = i + 1
+        i = util.u8_next(line, i)
     -1
 
-// Index of the `count`-th `ch` strictly before `from` in `line`, or -1.
+// Index of the start of the `count`-th character of code point `ch` strictly
+// before `from` in `line`, or -1.
 fn find_char_bwd(line: Str, ch: Int, from: Int, count: Int) -> Int
     var found = 0
-    var i = from - 1
-    while i >= 0
-        if (str.byte_at(line, i) ?? 0) == ch
+    var i = from
+    while i > 0
+        i = util.u8_prev(line, i)
+        if util.u8_decode(line, i) == ch
             found = found + 1
             if found == count
                 return i
-        i = i - 1
     -1
 
-// Move the cursor to a found char.  forward/back; `till` stops one short
-// (t/T vs f/F).  No move when the char isn't found on the line.
+// Move the cursor to a found char.  forward/back; `till` stops one character
+// short (t/T vs f/F).  No move when the char isn't found on the line.
 fn move_find(ed: Editor, ch: Int, forward: Bool, till: Bool, count: Int) -> Editor
     let line = line_at(ed, ed.cy)
     if forward
         let idx = find_char_fwd(line, ch, ed.cx, count)
-        if idx < 0 then ed else clamp(Editor { lines: ed.lines, cy: ed.cy, cx: if till then idx - 1 else idx })
+        if idx < 0 then ed else clamp(Editor { lines: ed.lines, cy: ed.cy, cx: if till then util.u8_prev(line, idx) else idx })
     else
         let idx = find_char_bwd(line, ch, ed.cx, count)
-        if idx < 0 then ed else clamp(Editor { lines: ed.lines, cy: ed.cy, cx: if till then idx + 1 else idx })
+        if idx < 0 then ed else clamp(Editor { lines: ed.lines, cy: ed.cy, cx: if till then util.u8_after(line, idx) else idx })
 
 // ── % matching pair ──────────────────────────────────────────
 
@@ -1081,7 +1111,7 @@ fn scan_match_bwd(ed: Editor, sy: Int, sx: Int, open_ch: Int, close_ch: Int) -> 
 fn word_under_cursor(ed: Editor) -> Str
     let to = textobj_word(ed, false, false)
     if to.ok and to.vr.sy == to.vr.ey
-        str.slice(line_at(ed, to.vr.sy), to.vr.sx, to.vr.ex + 1)
+        str.slice(line_at(ed, to.vr.sy), to.vr.sx, util.u8_after(line_at(ed, to.vr.sy), to.vr.ex))
     else
         ""
 
@@ -1129,10 +1159,10 @@ fn find_target(ed: Editor, ch: Int, forward: Bool, till: Bool, count: Int) -> MT
     let line = line_at(ed, ed.cy)
     if forward
         let idx = find_char_fwd(line, ch, ed.cx, count)
-        if idx < 0 then mt_none(ed) else mt(ed.cy, if till then idx - 1 else idx, false, true)
+        if idx < 0 then mt_none(ed) else mt(ed.cy, if till then util.u8_prev(line, idx) else idx, false, true)
     else
         let idx = find_char_bwd(line, ch, ed.cx, count)
-        if idx < 0 then mt_none(ed) else mt(ed.cy, if till then idx + 1 else idx, false, false)
+        if idx < 0 then mt_none(ed) else mt(ed.cy, if till then util.u8_after(line, idx) else idx, false, false)
 
 // Row of the `count`-th paragraph boundary (an empty line) below the cursor.
 // Stops at the last line when the buffer ends first.
@@ -1184,7 +1214,7 @@ fn motion_target(ed: Editor, b: Int, rawcount: Int) -> MTarget
         return mt(ed.cy, if e.cy > ed.cy then llen else e.cx, false, false)
     if b == 'e'                                  // e (inclusive)
         let e = repeat_word(ed, 2, count)
-        return mt(ed.cy, if e.cy > ed.cy then (if llen > 0 then llen - 1 else 0) else e.cx, false, true)
+        return mt(ed.cy, if e.cy > ed.cy then util.u8_last(line) else e.cx, false, true)
     if b == 'b'                                  // b
         let e = repeat_word(ed, 1, count)
         return mt(ed.cy, if e.cy < ed.cy then 0 else e.cx, false, false)
@@ -1193,7 +1223,7 @@ fn motion_target(ed: Editor, b: Int, rawcount: Int) -> MTarget
         return mt(ed.cy, if e.cy > ed.cy then llen else e.cx, false, false)
     if b == 'E'                                  // E (inclusive)
         let e = repeat_word(ed, 5, count)
-        return mt(ed.cy, if e.cy > ed.cy then (if llen > 0 then llen - 1 else 0) else e.cx, false, true)
+        return mt(ed.cy, if e.cy > ed.cy then util.u8_last(line) else e.cx, false, true)
     if b == 'B'                                  // B
         let e = repeat_word(ed, 4, count)
         return mt(ed.cy, if e.cy < ed.cy then 0 else e.cx, false, false)
@@ -1267,7 +1297,7 @@ fn apply_motion_op(ed: Editor, st: InputState, opb: Int, tgt: MTarget) -> Step
     var lo = if ed.cx < tgt.tx then ed.cx else tgt.tx
     var hi = if ed.cx < tgt.tx then tgt.tx else ed.cx
     if tgt.inclusive
-        hi = hi + 1
+        hi = util.u8_after(line, hi)              // through the whole last character
     if hi > llen
         hi = llen
     if lo < 0
@@ -1345,7 +1375,7 @@ fn visual_range(st: InputState, ed: Editor) -> VRange
 fn vyank_char_text(ed: Editor, vr: VRange) -> Str
     if vr.sy == vr.ey
         let line = line_at(ed, vr.sy)
-        let hi = if vr.ex + 1 > str.len(line) then str.len(line) else vr.ex + 1
+        let hi = util.u8_after(line, vr.ex)
         str.slice(line, vr.sx, hi)
     else
         let first = line_at(ed, vr.sy)
@@ -1355,7 +1385,7 @@ fn vyank_char_text(ed: Editor, vr: VRange) -> Str
             acc = acc + str.from_char('\n') + line_at(ed, i)
             i = i + 1
         let last = line_at(ed, vr.ey)
-        let hi = if vr.ex + 1 > str.len(last) then str.len(last) else vr.ex + 1
+        let hi = util.u8_after(last, vr.ex)
         acc + str.from_char('\n') + str.slice(last, 0, hi)
 
 // Buffer after deleting a charwise selection (first/last partial line merged,
@@ -1363,12 +1393,12 @@ fn vyank_char_text(ed: Editor, vr: VRange) -> Str
 fn vdelete_char_lines(ed: Editor, vr: VRange) -> [Str]
     if vr.sy == vr.ey
         let line = line_at(ed, vr.sy)
-        let hi = if vr.ex + 1 > str.len(line) then str.len(line) else vr.ex + 1
+        let hi = util.u8_after(line, vr.ex)
         set_line(ed.lines, vr.sy, str.slice(line, 0, vr.sx) + str.slice(line, hi, str.len(line)))
     else
         let first = line_at(ed, vr.sy)
         let last = line_at(ed, vr.ey)
-        let hi = if vr.ex + 1 > str.len(last) then str.len(last) else vr.ex + 1
+        let hi = util.u8_after(last, vr.ex)
         let merged = str.slice(first, 0, vr.sx) + str.slice(last, hi, str.len(last))
         let total = list.len(ed.lines)
         var ls: [Str] = []
@@ -1435,8 +1465,8 @@ fn tobj_lw(lo: Int, hi: Int) -> TObj
 
 // Char class for word objects; `big` (WORD) folds punctuation into the word
 // class so a WORD is any whitespace-delimited run.
-fn wcls(c: Int, big: Bool) -> Int
-    let k = util.char_class_of(c)
+fn wcls(line: Str, x: Int, big: Bool) -> Int
+    let k = util.class_at_u8(line, x)
     if big and k == 2 then 1 else k
 
 // iw / aw (and iW / aW when `big`) — the word/WORD (or whitespace run) under the
@@ -1446,22 +1476,24 @@ fn textobj_word(ed: Editor, around: Bool, big: Bool) -> TObj
     let n = str.len(line)
     if n == 0
         return tobj_none()
-    let cx = if ed.cx >= n then n - 1 else ed.cx
-    let cls = wcls(str.byte_at(line, cx) ?? ' ', big)
+    let cx = if ed.cx >= n then util.u8_last(line) else util.u8_start(line, ed.cx)
+    let cls = wcls(line, cx, big)
+    // `lo` and `hi` are the starts of the first and the last character of the
+    // object; each step moves a whole character.
     var lo = cx
-    while lo > 0 and wcls(str.byte_at(line, lo - 1) ?? ' ', big) == cls
-        lo = lo - 1
+    while lo > 0 and wcls(line, util.u8_prev(line, lo), big) == cls
+        lo = util.u8_prev(line, lo)
     var hi = cx
-    while hi + 1 < n and wcls(str.byte_at(line, hi + 1) ?? ' ', big) == cls
-        hi = hi + 1
+    while util.u8_next(line, hi) < n and wcls(line, util.u8_next(line, hi), big) == cls
+        hi = util.u8_next(line, hi)
     if around
         var added = false
-        while hi + 1 < n and wcls(str.byte_at(line, hi + 1) ?? ' ', big) == 0
-            hi = hi + 1
+        while util.u8_next(line, hi) < n and wcls(line, util.u8_next(line, hi), big) == 0
+            hi = util.u8_next(line, hi)
             added = true
         if not added
-            while lo > 0 and wcls(str.byte_at(line, lo - 1) ?? ' ', big) == 0
-                lo = lo - 1
+            while lo > 0 and wcls(line, util.u8_prev(line, lo), big) == 0
+                lo = util.u8_prev(line, lo)
     tobj(ed.cy, lo, ed.cy, hi)
 
 // i" / a" (and ' / `) — the first quote pair on the line at/after the cursor.
@@ -1489,7 +1521,7 @@ fn textobj_quote(ed: Editor, q: Int, around: Bool) -> TObj
     if around
         tobj(ed.cy, op, ed.cy, cl)
     else
-        tobj(ed.cy, op + 1, ed.cy, cl - 1)
+        tobj(ed.cy, op + 1, ed.cy, util.u8_prev(line, cl))   // the end is the start of the last inner character
 
 // A buffer position with a found flag (bracket-pair search).
 struct Pos
@@ -1553,7 +1585,7 @@ fn textobj_bracket(ed: Editor, open_ch: Int, close_ch: Int, around: Bool) -> TOb
     if around
         tobj(op.y, op.x, cl.y, cl.x)
     else
-        tobj(op.y, op.x + 1, cl.y, cl.x - 1)
+        tobj(op.y, op.x + 1, cl.y, if cl.x > 0 then util.u8_prev(line_at(ed, cl.y), cl.x) else 0 - 1)
 
 // ip / ap — the paragraph under the cursor: a maximal run of non-blank lines
 // (or of blank lines, when the cursor sits on one).  `around` also takes the
@@ -1646,12 +1678,11 @@ fn visual_motion(ed: Editor, b: Int, cnt: Int) -> Editor
     elif b == '0'
         clamp(Editor { lines: ed.lines, cy: ed.cy, cx: 0 })
     elif b == '$'
-        let ll = str.len(line_at(ed, ed.cy))
-        clamp(Editor { lines: ed.lines, cy: ed.cy, cx: if ll > 0 then ll - 1 else 0 })
+        clamp(Editor { lines: ed.lines, cy: ed.cy, cx: util.u8_last(line_at(ed, ed.cy)) })
     elif b == '^'
         clamp(Editor { lines: ed.lines, cy: ed.cy, cx: first_nonblank(line_at(ed, ed.cy)) })
     elif b == 'G'
-        clamp(Editor { lines: ed.lines, cy: list.len(ed.lines) - 1, cx: ed.cx })
+        move_rows(ed, list.len(ed.lines) - 1)
     elif b == '%'
         match_pair(ed)
     elif b == '}'
@@ -1670,29 +1701,6 @@ fn ist_visual_keep(st: InputState, mode: Int) -> InputState
 fn ist_visual_pending(st: InputState, pcode: Int) -> InputState
     InputState { count: st.count, pending: pcode, mode: st.mode, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx }
 
-// Case map for a byte: kind 0 = toggle, 1 = lower, 2 = upper.
-fn case_byte(b: Int, kind: Int) -> Int
-    if kind == 0
-        toggle_case_byte(b)
-    elif kind == 1
-        if b >= 'A' and b <= 'Z' then b + 32 else b
-    else
-        if b >= 'a' and b <= 'z' then b - 32 else b
-
-// Apply a case map to byte range [lo, hi) of `line`.
-fn case_line_range(line: Str, lo: Int, hi: Int, kind: Int) -> Str
-    var out = ""
-    let n = str.len(line)
-    let mut i = 0
-    while i < n
-        let b = str.byte_at(line, i) ?? 0
-        if i >= lo and i < hi
-            out = out + str.from_byte(case_byte(b, kind))
-        else
-            out = out + str.from_byte(b)
-        i = i + 1
-    out
-
 // `~` / `u` / `U` on the visual selection → back to Normal.
 fn visual_case(ed: Editor, st: InputState, kind: Int) -> Step
     let vr = visual_range(st, ed)
@@ -1703,8 +1711,8 @@ fn visual_case(ed: Editor, st: InputState, kind: Int) -> Step
         if i >= vr.sy and i <= vr.ey
             let line = ed.lines[i]
             let lo = if st.mode == 3 then 0 elif i == vr.sy then vr.sx else 0
-            let hi = if st.mode == 3 then str.len(line) elif i == vr.ey then vr.ex + 1 else str.len(line)
-            ls = list.append(ls, [case_line_range(line, lo, hi, kind)])
+            let hi = if st.mode == 3 then str.len(line) elif i == vr.ey then util.u8_after(line, vr.ex) else str.len(line)
+            ls = list.append(ls, [case_text(line, lo, hi, kind)])
         else
             ls = list.append(ls, [ed.lines[i]])
         i = i + 1
@@ -1720,7 +1728,7 @@ fn case_line_span(ed: Editor, st: InputState, kind: Int, lo: Int, hi: Int) -> St
     let mut i = 0
     while i < total
         if i >= lo and i <= hi
-            ls = list.append(ls, [case_line_range(ed.lines[i], 0, str.len(ed.lines[i]), kind)])
+            ls = list.append(ls, [case_text(ed.lines[i], 0, str.len(ed.lines[i]), kind)])
         else
             ls = list.append(ls, [ed.lines[i]])
         i = i + 1
@@ -1735,8 +1743,8 @@ fn case_char_vr(ed: Editor, vr: VRange, kind: Int) -> [Str]
         if i >= vr.sy and i <= vr.ey
             let line = ed.lines[i]
             let lo = if i == vr.sy then vr.sx else 0
-            let hi = if i == vr.ey then vr.ex + 1 else str.len(line)
-            ls = list.append(ls, [case_line_range(line, lo, hi, kind)])
+            let hi = if i == vr.ey then util.u8_after(line, vr.ex) else str.len(line)
+            ls = list.append(ls, [case_text(line, lo, hi, kind)])
         else
             ls = list.append(ls, [ed.lines[i]])
         i = i + 1
@@ -1781,8 +1789,8 @@ fn feed_case(ed: Editor, st: InputState, kind: Int, pcode: Int, b: Int) -> Step
         let lo = if ed.cx < tgt.tx then ed.cx else tgt.tx
         var hi = if ed.cx < tgt.tx then tgt.tx else ed.cx
         if tgt.inclusive
-            hi = hi + 1
-        return Step { ed: clamp(Editor { lines: set_line(ed.lines, ed.cy, case_line_range(line_at(ed, ed.cy), lo, hi, kind)), cy: ed.cy, cx: lo }), st: ist_done(st) }
+            hi = util.u8_after(line_at(ed, ed.cy), hi)
+        return Step { ed: clamp(Editor { lines: set_line(ed.lines, ed.cy, case_text(line_at(ed, ed.cy), lo, hi, kind)), cy: ed.cy, cx: lo }), st: ist_done(st) }
     feed(ed, ist_clear_pending(st), b)           // invalid — cancel + reprocess
 
 // `J` joins the selected lines → back to Normal.
@@ -1858,7 +1866,7 @@ fn vblock_fill(ed: Editor, st: InputState, ch: Int) -> Step
             var rep = ""
             var k = xlo
             while k < bcol
-                rep = rep + str.from_byte(ch)
+                rep = rep + str.from_char(ch)
                 k = k + 1
             lines = set_line(lines, y, str.slice(line, 0, xlo) + rep + str.slice(line, bcol, n))
         y = y + 1
@@ -1961,7 +1969,7 @@ fn feed_visual(ed: Editor, st: InputState, b: Int) -> Step
     if st.pending == 1                           // g<g> — gg (to line / count)
         if b == 'g'
             let tgt = if st.count > 0 then st.count - 1 else 0
-            return Step { ed: clamp(Editor { lines: ed.lines, cy: tgt, cx: ed.cx }), st: ist_visual_keep(st, st.mode) }
+            return Step { ed: move_rows(ed, tgt), st: ist_visual_keep(st, st.mode) }
         return Step { ed: ed, st: ist_visual_keep(st, st.mode) }   // not gg — drop
     if st.pending == 48                          // i<obj> — inner text object
         return visual_set_textobj(ed, st, b, false)
@@ -2092,13 +2100,72 @@ fn feed_replace(ed: Editor, st: InputState, b: Int) -> Step
         return Step { ed: overtype_char(ed, b), st: st }
     Step { ed: ed, st: st }
 
+// ── The target character of r, f, F, t, T ─────────────────────────
+// The command after `r` or `f` takes one character, and a terminal sends a
+// multi-byte character one byte at a time.  `feed` therefore holds the bytes of
+// such a target in the pending code: the code of the waiting command in the low
+// 8 bits, and above them the count of continuation bytes still to come (2 bits)
+// and the bits of the code point read so far.  The command itself (`feed_cmd`)
+// then receives the whole code point, `229` for å, as its byte.
+
+// True when the state waits for the target character of a command: `r`, the
+// find commands, an operator's find form, the find commands in Visual mode and
+// the blockwise `r`.
+fn awaits_target(st: InputState) -> Bool
+    if st.mode == 0
+        st.pending == 4 or (st.pending >= 8 and st.pending <= 11) or (st.pending >= 20 and st.pending <= 31)
+    elif st.mode == 2 or st.mode == 3 or st.mode == 5
+        (st.pending >= 8 and st.pending <= 11) or st.pending == 60
+    else
+        false
+
+// Leave the command that waits for a target, in the mode it was typed in.
+fn target_cancel(st: InputState) -> InputState
+    if st.mode == 0
+        ist_done(st)
+    else
+        ist_visual_keep(st, st.mode)
+
+// The lead byte `b` of a multi-byte target: remember its payload and how many
+// bytes follow.  A byte that leads no character cancels the command.
+fn feed_target_head(ed: Editor, st: InputState, b: Int) -> Step
+    let k = util.u8_lead_len(b)
+    if k == 1
+        return Step { ed: ed, st: target_cancel(st) }
+    let payload = if k == 2 then b & 31 elif k == 3 then b & 15 else b & 7
+    Step { ed: ed, st: ist_visual_pending(st, st.pending + 256 * ((k - 1) + 4 * payload)) }
+
+// A byte after the lead byte of a target.  A continuation byte joins the code
+// point, and the last one runs the command with it.  Any other byte ends the
+// half-typed character without a target and is read as a key of its own.
+fn feed_target_tail(ed: Editor, st: InputState, b: Int) -> Step
+    let p = st.pending % 256
+    let code = st.pending / 256
+    let rem = code % 4
+    let payload = code / 4
+    if b >= 128 and b < 192
+        let cp = payload * 64 + (b - 128)
+        if rem == 1
+            return feed_cmd(ed, ist_visual_pending(st, p), cp)
+        return Step { ed: ed, st: ist_visual_pending(st, p + 256 * ((rem - 1) + 4 * cp)) }
+    feed(ed, target_cancel(st), b)
+
 @intent("""The pure input core: fold one input byte into (editor, input-state).
 Dispatches by mode — Insert/Visual/Replace delegate to their handlers; Normal
 mode resolves counts (`5j`, `10G`), motions, operators, and pending multi-key
 commands.  No I/O: the driver owns the buffer, registers, undo, and the screen;
 `feed` only transforms editor + input state so it stays deterministic and
-testable.""")
+testable.  A multi-byte target of `r` or `f` is gathered here, byte by byte,
+and reaches the command as one code point.""")
 fn feed(ed: Editor, st: InputState, b: Int) -> Step
+    if st.pending >= 256
+        return feed_target_tail(ed, st, b)
+    if b >= 128 and awaits_target(st)
+        return feed_target_head(ed, st, b)
+    feed_cmd(ed, st, b)
+
+// One key, or one whole target character, through the mode that owns it.
+fn feed_cmd(ed: Editor, st: InputState, b: Int) -> Step
     // Insert mode owns every byte until Esc.
     if st.mode == 1
         return feed_insert(ed, st, b)
@@ -2112,7 +2179,7 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
     if st.pending == 1
         if b == 'g'                   // `gg` — go to line (count or 1)
             let tgt = if st.count > 0 then st.count - 1 else 0
-            return Step { ed: clamp(Editor { lines: ed.lines, cy: tgt, cx: ed.cx }), st: ist_done(st) }
+            return Step { ed: move_rows(ed, tgt), st: ist_done(st) }
         if b == 'u'                   // `gu` — lowercase operator
             return Step { ed: ed, st: InputState { count: st.count, pending: 51, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx } }
         if b == 'U'                   // `gU` — uppercase operator
@@ -2216,9 +2283,7 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
     if b == '0'                       // '0' — first column
         return Step { ed: clamp(Editor { lines: ed.lines, cy: ed.cy, cx: 0 }), st: ist_done(st) }
     if b == '$'                       // '$' — end of line
-        let ll = str.len(line_at(ed, ed.cy))
-        let ex = if ll > 0 then ll - 1 else 0
-        return Step { ed: clamp(Editor { lines: ed.lines, cy: ed.cy, cx: ex }), st: ist_done(st) }
+        return Step { ed: clamp(Editor { lines: ed.lines, cy: ed.cy, cx: util.u8_last(line_at(ed, ed.cy)) }), st: ist_done(st) }
     if b == '^'                       // '^' — first non-blank
         return Step { ed: clamp(Editor { lines: ed.lines, cy: ed.cy, cx: first_nonblank(line_at(ed, ed.cy)) }), st: ist_done(st) }
     if b == '}'                       // '}' — next paragraph (blank line)
@@ -2246,7 +2311,7 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
         return Step { ed: find_next(ed, w, b == '*'), st: ist_set_search(st, w) }
     if b == 'G'                       // 'G' — go to line (count or last)
         let tgt = if st.count > 0 then st.count - 1 else list.len(ed.lines) - 1
-        return Step { ed: clamp(Editor { lines: ed.lines, cy: tgt, cx: ed.cx }), st: ist_done(st) }
+        return Step { ed: move_rows(ed, tgt), st: ist_done(st) }
     if b == '%'                       // '%' — jump to the matching bracket
         return Step { ed: match_pair(ed), st: ist_done(st) }
     if b == 'R'                       // 'R' — enter Replace (overtype) mode
@@ -2289,10 +2354,10 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
     // Visual mode entry: anchor the selection at the cursor.  A
     // count pre-extends the selection (`3v` = 3 chars, `2V` = 2 lines).
     if b == 'v'                       // 'v' — charwise visual
-        let ne = clamp(Editor { lines: ed.lines, cy: ed.cy, cx: ed.cx + cnt - 1 })
+        let ne = clamp(Editor { lines: ed.lines, cy: ed.cy, cx: util.u8_fwd(line_at(ed, ed.cy), ed.cx, cnt - 1) })
         return Step { ed: ne, st: InputState { count: 0, pending: 0, mode: 2, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: ed.cy, avx: ed.cx } }
     if b == 'V'                       // 'V' — linewise visual
-        let ne = clamp(Editor { lines: ed.lines, cy: ed.cy + cnt - 1, cx: ed.cx })
+        let ne = move_rows(ed, ed.cy + cnt - 1)
         return Step { ed: ne, st: InputState { count: 0, pending: 0, mode: 3, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: ed.cy, avx: ed.cx } }
     if b == '\x16'                    // Ctrl-V — blockwise visual (column selection)
         return Step { ed: ed, st: InputState { count: 0, pending: 0, mode: 5, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: ed.cy, avx: ed.cx } }
@@ -2327,7 +2392,7 @@ fn feed(ed: Editor, st: InputState, b: Int) -> Step
     if b == 's'                       // 's' — substitute char(s): delete then insert
         let sline = line_at(ed, ed.cy)
         let sl = str.len(sline)
-        let shi = if ed.cx + cnt > sl then sl else ed.cx + cnt
+        let shi = util.u8_fwd(sline, ed.cx, cnt)
         let sremoved = str.slice(sline, ed.cx, shi)
         let snls = set_line(ed.lines, ed.cy, str.slice(sline, 0, ed.cx) + str.slice(sline, shi, sl))
         return Step { ed: clamp_insert(Editor { lines: snls, cy: ed.cy, cx: ed.cx }), st: ist_reg_cw(st, sremoved, true) }
@@ -3728,7 +3793,7 @@ fn find_next(ed: Editor, pattern: Str, forward: Bool) -> Editor
     let total = list.len(ed.lines)
     if forward
         var y = ed.cy
-        var startcol = ed.cx + 1
+        var startcol = util.u8_after(line_at(ed, ed.cy), ed.cx)
         var steps = 0
         while steps <= total
             let col = nvregex.re_find_in_line(atoms, line_at(ed, y), startcol)
@@ -4373,9 +4438,13 @@ fn feed_edit(ed: Editor, st: InputState, km: Keymap, var es: EditState, b: Int) 
     if st.mode == 0 and st.pending == 0 and b == '@'          // '@'
         return EditStep { ed: ed, st: st, es: macro_await(var es, 2) }
     var result = feed_edit_core(ed, st, km, var es, b)
-    // A completed f/F/t/T (pending 8-11 + a target byte) → remember for ; / ,.
-    var result1 = if st.pending >= 8 and st.pending <= 11 and b != '\e'
-        EditStep { ed: result.ed, st: result.st, es: edit_save_find(var result.es, b, st.pending) }
+    // A completed f/F/t/T (pending 8-11 + a target character) → remember for ; / ,.
+    // The target of a multi-byte character completes on its last byte, and is
+    // saved as its code point (see `feed`).
+    let fpend = if st.pending >= 256 then st.pending % 256 else st.pending
+    let tcomplete = result.st.pending < 256 and ((st.pending < 256 and b < 128) or (st.pending >= 256 and b >= 128 and b < 192))
+    var result1 = if fpend >= 8 and fpend <= 11 and b != '\e' and tcomplete
+        EditStep { ed: result.ed, st: result.st, es: edit_save_find(var result.es, if st.pending >= 256 then ((st.pending / 256) / 4) * 64 + (b - 128) else b, fpend) }
     else
         result
     // Leaving Visual mode → remember the selection for `gv`.
@@ -4748,7 +4817,7 @@ fn run_batch(keys: Str, cfg_path: Str, fpath: Str) [io, fs, time]
             search_buf = ""
             search_back = true
         elif scroll_idle(st, es) and key_free(km, b) and scroll_ctrl_kind(b) >= 0   // Ctrl-D/U/F/B paging
-            ed = clamp(Editor { lines: ed.lines, cy: scroll_new_cy(ed, batch_rows, scroll_ctrl_kind(b)), cx: ed.cx })
+            ed = move_rows(ed, scroll_new_cy(ed, batch_rows, scroll_ctrl_kind(b)))
         elif scroll_idle(st, es) and key_free(km, b) and screen_kind(b) >= 0        // H / M / L (top=0 in batch)
             let ty = screen_target(0, batch_rows, list.len(ed.lines), screen_kind(b))
             ed = clamp(Editor { lines: ed.lines, cy: ty, cx: first_nonblank(line_at(ed, ty)) })
@@ -5522,26 +5591,28 @@ fn vis_to_byte(raw: Str, vcol: Int, ts: Int) -> Int
 fn arrow_move(ed: Editor, fin: Int, allow_eol: Bool) -> Editor
     let nl = list.len(ed.lines)
     if fin == 'D'                                  // ← left
-        Editor { lines: ed.lines, cy: ed.cy, cx: if ed.cx > 0 then ed.cx - 1 else 0 }
+        Editor { lines: ed.lines, cy: ed.cy, cx: util.u8_prev(line_at(ed, ed.cy), ed.cx) }
     elif fin == 'C'                                // → right
-        let m = str.len(line_at(ed, ed.cy))
-        let cap = if allow_eol then m elif m > 0 then m - 1 else 0
-        Editor { lines: ed.lines, cy: ed.cy, cx: if ed.cx < cap then ed.cx + 1 else cap }
+        let line = line_at(ed, ed.cy)
+        let cap = if allow_eol then str.len(line) else util.u8_last(line)
+        Editor { lines: ed.lines, cy: ed.cy, cx: if ed.cx < cap then util.u8_next(line, ed.cx) else cap }
     elif fin == 'A'                                // ↑ up
         let ny = if ed.cy > 0 then ed.cy - 1 else 0
-        let m = str.len(line_at(ed, ny))
-        let cap = if allow_eol then m elif m > 0 then m - 1 else 0
-        Editor { lines: ed.lines, cy: ny, cx: if ed.cx < cap then ed.cx else cap }
+        let line = line_at(ed, ny)
+        let cap = if allow_eol then str.len(line) else util.u8_last(line)
+        let nx = util.u8_same_col(line_at(ed, ed.cy), ed.cx, line)
+        Editor { lines: ed.lines, cy: ny, cx: if nx < cap then nx else cap }
     elif fin == 'B'                                // ↓ down
         let ny = if ed.cy + 1 < nl then ed.cy + 1 else nl - 1
-        let m = str.len(line_at(ed, ny))
-        let cap = if allow_eol then m elif m > 0 then m - 1 else 0
-        Editor { lines: ed.lines, cy: ny, cx: if ed.cx < cap then ed.cx else cap }
+        let line = line_at(ed, ny)
+        let cap = if allow_eol then str.len(line) else util.u8_last(line)
+        let nx = util.u8_same_col(line_at(ed, ed.cy), ed.cx, line)
+        Editor { lines: ed.lines, cy: ny, cx: if nx < cap then nx else cap }
     elif fin == 'H'                                // Home
         Editor { lines: ed.lines, cy: ed.cy, cx: 0 }
     elif fin == 'F'                                // End
-        let m = str.len(line_at(ed, ed.cy))
-        Editor { lines: ed.lines, cy: ed.cy, cx: if allow_eol then m elif m > 0 then m - 1 else 0 }
+        let line = line_at(ed, ed.cy)
+        Editor { lines: ed.lines, cy: ed.cy, cx: if allow_eol then str.len(line) else util.u8_last(line) }
     else
         ed
 
@@ -6115,7 +6186,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                                         ncy = top
                                     if ncy > top + body - 1
                                         ncy = top + body - 1
-                                    ed = clamp(Editor { lines: ed.lines, cy: ncy, cx: ed.cx })
+                                    ed = move_rows(ed, ncy)
                                 elif mfin == 'M' and btn == 0     // left-click press — position the caret
                                     let scr = wlayout.rect(0, 0, cols, rows)
                                     let px = mev[1] - 1
@@ -6162,17 +6233,17 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                                 let prm = packed / 256
                                 let ins = st.mode == 1 or st.mode == 4
                                 if fin == '~' and prm == 5         // PageUp (~ Ctrl-B)
-                                    ed = clamp(Editor { lines: ed.lines, cy: scroll_new_cy(ed, rows, 3), cx: ed.cx })
+                                    ed = move_rows(ed, scroll_new_cy(ed, rows, 3))
                                     top = scroll_new_top(ed.cy, top, rows, 3)
                                 elif fin == '~' and prm == 6       // PageDown (~ Ctrl-F)
-                                    ed = clamp(Editor { lines: ed.lines, cy: scroll_new_cy(ed, rows, 2), cx: ed.cx })
+                                    ed = move_rows(ed, scroll_new_cy(ed, rows, 2))
                                     top = scroll_new_top(ed.cy, top, rows, 2)
                                 elif fin == '~' and prm == 3       // Delete — forward-delete the char at the cursor
                                     if ins
                                         let ln = line_at(ed, ed.cy)
                                         if ed.cx < str.len(ln)
                                             es = edit_push_undo(var es, ed)
-                                            let newln = str.slice(ln, 0, ed.cx) + str.slice(ln, ed.cx + 1, str.len(ln))
+                                            let newln = str.slice(ln, 0, ed.cx) + str.slice(ln, util.u8_next(ln, ed.cx), str.len(ln))
                                             ed = Editor { lines: set_line(ed.lines, ed.cy, newln), cy: ed.cy, cx: ed.cx }
                                     else
                                         let dstep = feed_edit(ed, st, km, var es, 'x')   // normal/visual: like `x`
@@ -7085,7 +7156,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                     zpend = true
                 elif scroll_idle(st, es) and key_free(km, b) and scroll_ctrl_kind(b) >= 0   // Ctrl-D/U/F/B
                     let k = scroll_ctrl_kind(b)
-                    ed = clamp(Editor { lines: ed.lines, cy: scroll_new_cy(ed, rows, k), cx: ed.cx })
+                    ed = move_rows(ed, scroll_new_cy(ed, rows, k))
                     top = scroll_new_top(ed.cy, top, rows, k)
                 elif scroll_idle(st, es) and key_free(km, b) and screen_kind(b) >= 0        // H / M / L
                     let ty = screen_target(top, rows, list.len(ed.lines), screen_kind(b))
@@ -7105,7 +7176,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
                         ncy = top
                     if ncy > top + body - 1
                         ncy = top + body - 1
-                    ed = clamp(Editor { lines: ed.lines, cy: ncy, cx: ed.cx })
+                    ed = move_rows(ed, ncy)
                 elif scroll_idle(st, es) and key_free(km, b) and b == '\x0f' and list.len(jback) >= 1   // Ctrl-O — jump back
                     let e = jback[list.len(jback) - 1]
                     let tf = jentry_path(e)

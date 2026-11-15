@@ -196,6 +196,91 @@ fn u8_back(s: Str, x: Int, k: Int) -> Int
         c = c + 1
     i
 
+// The number of bytes of the character that a lead byte starts: 2 to 4 for a
+// multi-byte lead, 1 for ASCII and for a byte that starts no character.
+fn u8_lead_len(b: Int) -> Int
+    if b >= 240 and b < 248
+        4
+    else if b >= 224 and b < 240
+        3
+    else if b >= 192 and b < 224
+        2
+    else
+        1
+
+// The code point of the character that starts at byte `x` of `s`; 0 past the
+// end.  A byte that does not start a well-formed sequence answers itself, so a
+// line that is not valid UTF-8 is still read one byte at a time.
+fn u8_decode(s: Str, x: Int) -> Int
+    let n = str.len(s)
+    if x < 0 or x >= n
+        return 0
+    let b0 = str.byte_at(s, x) ?? 0
+    let k = u8_lead_len(b0)
+    if k == 1 or x + k > n
+        return b0
+    var cp = if k == 2 then b0 & 31 else if k == 3 then b0 & 15 else b0 & 7
+    var j = 1
+    while j < k
+        let c = str.byte_at(s, x + j) ?? 0
+        if not u8_cont(c)
+            return b0
+        cp = cp * 64 + (c & 63)
+        j = j + 1
+    cp
+
+// The number of characters that start in the bytes `[from, to)` of `s`.
+fn u8_count(s: Str, from: Int, to: Int) -> Int
+    let n = str.len(s)
+    let hi = if to > n then n else to
+    var i = from
+    var c = 0
+    while i < hi
+        i = u8_next(s, i)
+        c = c + 1
+    c
+
+// The start of the last character of `s`; 0 for an empty line.  This is where
+// a Normal-mode cursor may stand furthest right.
+fn u8_last(s: Str) -> Int
+    let n = str.len(s)
+    if n > 0
+        u8_start(s, n - 1)
+    else
+        0
+
+// The byte index in `to` of the character column that byte `x` of `from`
+// stands at, for a move between lines (`j`, `k`, `G`, `gg`): the column is
+// kept in characters, so å on one line and a letter on the next line up are
+// in the same column.  The line length when `to` is shorter.
+fn u8_same_col(from: Str, x: Int, to: Str) -> Int
+    u8_fwd(to, 0, u8_count(from, 0, x))
+
+// The end of the character that starts at byte `x`, for a span that includes it
+// (`x` itself when it is past the end, so a stale index cannot run on).
+fn u8_after(s: Str, x: Int) -> Int
+    let n = str.len(s)
+    if x >= n
+        n
+    else
+        u8_next(s, x)
+
+// The class of a character, by code point: the ASCII classes of
+// `char_class_of`, and every other character is a word character.
+fn char_class_cp(cp: Int) -> Int
+    if cp < 128
+        char_class_of(cp)
+    else
+        1
+
+// The class of the character that starts at byte `x` of `s`; whitespace past
+// the end, the gap between lines.
+fn class_at_u8(s: Str, x: Int) -> Int
+    if x >= 0 and x < str.len(s)
+        char_class_cp(u8_decode(s, x))
+    else
+        0
+
 // The basename (last `/`-separated component) of a path.
 fn basename_of(p: Str) -> Str
     var last = 0

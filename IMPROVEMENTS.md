@@ -97,9 +97,8 @@ already defines enums — the mode/pending model is entirely magic integers.
   `6157`–`6196`. Replace with `enum WinCmd`.
 - `src/main.nv:111` — `fn hist_parse(text: Str, kind: Int)` / `:124`
   `fn history_load(kind: Int)`: `kind` selects ex vs search history. Enum.
-- `src/main.nv:1549` — `case_byte(b, kind: Int)` and the `kind` thread through
-  `case_line_range`/`visual_case`/`feed_case` (`1558`–`1637`): lower/upper/toggle.
-  Enum `CaseKind`.
+- `src/main.nv` — `case_cp(cp, kind: Int)` and the `kind` thread through
+  `case_text`/`visual_case`/`feed_case`: lower/upper/toggle.  Enum `CaseKind`.
 - `src/main.nv:993` — `fn mt(ty: Int, ...)` / `MTarget.ty`: motion-target kind
   code used by `motion_target`. Enum if the finite set is small.
 
