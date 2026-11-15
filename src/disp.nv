@@ -349,6 +349,26 @@ fn ts_line_syncols(spans: [Int], line_start: Int, raw: Str, tabstop: Int,
             vc = vc + w
         else
             cols = list.append(cols, [color])
-            vc = vc + 1
+            if not is_utf8_cont(ch)      // a continuation byte adds no column, so a tab after å stops where expand_tabs puts it
+                vc = vc + 1
         b = b + 1
     cols
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+// ts_line_syncols answers one colour for each byte of the tab-expanded line, so
+// its length is that of disp.expand_tabs of the same line.  The tab stop of a
+// tab that follows a multi-byte character is counted in columns, not bytes.
+
+@test
+fn test_ts_line_syncols_has_one_entry_per_byte_of_the_expanded_line()
+    let cs = colorscheme.colorscheme_plain(colorscheme.depth_256())
+    let raws = ["å\tb", "ab\tå", "€\t😀\tx", "\tø", "plain", ""]
+    for raw in raws
+        let cols = ts_line_syncols([], 0, raw, 8, cs)
+        test.assert_eq(list.len(cols), str.len(expand_tabs(raw, 8)))
+
+@test
+fn test_ts_line_syncols_tab_after_a_two_byte_character_stops_at_column_eight()
+    let cs = colorscheme.colorscheme_plain(colorscheme.depth_256())
+    // å is two bytes and one column, so the tab takes seven columns: 2 + 7 + 1.
+    test.assert_eq(list.len(ts_line_syncols([], 0, "å\tb", 8, cs)), 10)

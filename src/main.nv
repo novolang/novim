@@ -5064,27 +5064,6 @@ fn term_leave(want_color: Bool) [io]
 // stale glyphs from a longer previous line survive.  Draws up to (rows-1)
 // buffer lines (a `~` past end-of-buffer), a reverse-video status line on the
 // last row, then places the hardware cursor at the editor cursor.
-// Emit visual columns [left, left+width) of an (already tab-expanded) line,
-// reverse-videoing the selected visual-column span [vlo, vhi) (vlo>=vhi → no
-// highlight, e.g. outside visual mode).
-fn emit_line_hl(expanded: Str, left: Int, width: Int, vlo: Int, vhi: Int) [io]
-    let elen = str.len(expanded)
-    let endc = if left + width < elen then left + width else elen
-    var c = left
-    var insel = false
-    while c < endc
-        let want = c >= vlo and c < vhi
-        if want and not insel
-            sgr("7")
-            insel = true
-        if not want and insel
-            sgr("0")
-            insel = false
-        emit_byte(str.byte_at(expanded, c) ?? ' ')
-        c = c + 1
-    if insel
-        sgr("0")
-
 // Is visual column `c` inside any [start,end) range of the flat list `sr`?
 fn col_in_ranges(sr: [Int], c: Int) -> Bool
     var k = 0
@@ -5112,25 +5091,31 @@ fn search_vis_ranges(atoms: [nvregex.ReAtom], raw: Str, ts: Int) -> [Int]
 // ts_line_syncols), and byte_offset_of_line all moved to disp.nv (pure display
 // helpers).
 
-// Paint a line: syntax colours (`syncols`, per-column fg index) as the base,
-// search matches (`sr`/`scol`) over them, and the [vlo,vhi) highlight on top.
-// `hlcol` is that top slot's SGR — the caller resolved it from the theme as
-// the Visual-selection colour or the yank-flash colour, the two never
+// Paint a line: syntax colours (`syncols`, per-byte fg index of the expanded
+// line) as the base, search matches (`sr`/`scol`) over them, and the [vlo,vhi)
+// highlight on top.  `left`, `width`, `vlo`, `vhi` and `sr` are display
+// columns, one for each character, the same unit as disp.vis_col and the
+// cursor; the line is walked one character at a time, so a character of two to
+// four bytes is one column and is emitted whole, and only `syncols` is indexed
+// by byte.  `hlcol` is the top slot's SGR — the caller resolved it from the
+// theme as the Visual-selection colour or the yank-flash colour, the two never
 // coexisting.  Both `scol` and `hlcol` are SGR parameter strings, not colour
 // indices, because a slot may be a fg/bg pair or plain reverse video.
 fn emit_line_styled(expanded: Str, left: Int, width: Int, vlo: Int, vhi: Int, sr: [Int], scol: Str, syncols: [Int], hlcol: Str) [io]
     let elen = str.len(expanded)
-    let endc = if left + width < elen then left + width else elen
+    let ncols = util.u8_count(expanded, 0, elen)
+    let endc = if left + width < ncols then left + width else ncols
     let sn = list.len(syncols)
     var c = left
+    var b = util.u8_fwd(expanded, 0, left)       // the byte where column `c` starts
     var cur = 0                      // 0 none, 1 selection/flash, 2 search, 1000+idx syntax
     while c < endc
         let want = if c >= vlo and c < vhi
             1
         elif col_in_ranges(sr, c)
             2
-        elif c < sn and syncols[c] > 0
-            1000 + syncols[c]
+        elif b < sn and syncols[b] > 0
+            1000 + syncols[b]
         else
             0
         if want != cur
@@ -5142,7 +5127,10 @@ fn emit_line_styled(expanded: Str, left: Int, width: Int, vlo: Int, vhi: Int, sr
             elif want >= 1000
                 sgr(colorscheme.fg_params(want - 1000))
             cur = want
-        emit_byte(str.byte_at(expanded, c) ?? ' ')
+        let nb = util.u8_next(expanded, b)
+        while b < nb
+            emit_byte(str.byte_at(expanded, b) ?? ' ')
+            b = b + 1
         c = c + 1
     if cur != 0
         sgr("0")
@@ -5269,7 +5257,7 @@ fn draw_window(ed: Editor, win: wlayout.Rect, path: Str, top: Int, left: Int, mo
         if li < nl
             let raw = ed.lines[li]
             let expanded = disp.expand_tabs(raw, opts.tabstop)
-            let vlen = str.len(expanded)
+            let vlen = util.u8_count(expanded, 0, str.len(expanded))   // display columns, not bytes
             var vlo = 0
             var vhi = 0
             if vis and li >= ssy and li <= sey
@@ -5344,7 +5332,7 @@ fn draw_window(ed: Editor, win: wlayout.Rect, path: Str, top: Int, left: Int, mo
                 // coexist), so the caller picks which colour that slot carries.
                 let hlcol = if (not vis) and flash.active then flashcol else selcol
                 emit_line_styled(expanded, segleft, width, vlo, vhi, srng, searchcol, syncols, hlcol)
-                // chars emitted by emit_line_styled = clamp(vlen - segleft, 0, width)
+                // columns emitted by emit_line_styled = clamp(vlen - segleft, 0, width)
                 let shown = if vlen - segleft < 0 then 0 elif vlen - segleft > width then width else vlen - segleft
                 eol(clip, width - shown)
                 r = r + 1
@@ -5431,7 +5419,8 @@ fn place_cursor(ed: Editor, win: wlayout.Rect, top: Int, left: Int, opts: Option
         var crow = 0
         var ci = top
         while ci < ed.cy
-            let cvl = str.len(disp.expand_tabs(ed.lines[ci], opts.tabstop))
+            let cx_line = disp.expand_tabs(ed.lines[ci], opts.tabstop)
+            let cvl = util.u8_count(cx_line, 0, str.len(cx_line))
             crow = crow + (if cvl > width then (cvl + width - 1) / width else 1)
             ci = ci + 1
         cup(ry + crow + cviscol / width + 1, rx + (cviscol % width) + gutter + 1)
