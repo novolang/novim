@@ -1,0 +1,162 @@
+// nvkeys_tests — the state a key leaves, and the front of the path a key takes:
+// the bytes of a multi-byte character gathered, each character sent to the
+// package or handed back to the code novim keeps for itself.
+
+use std.test
+use std.list
+use std.str
+use nvview
+use nvkeys
+
+fn editor(lines: [Str], cy: Int, cx: Int) -> Editor
+    Editor { lines: lines, cy: cy, cx: cx }
+
+// feed_all feeds bytes one at a time, as the driver does, and answers the last
+// answer of the front.
+fn feed_all(ed0: Editor, st0: InputState, bytes: [Int]) -> Step
+    var ed = ed0
+    var st = st0
+    for b in bytes
+        let f = nvkeys.feed_front(ed, st, b)
+        ed = f.step.ed
+        st = f.step.st
+    Step { ed: ed, st: st }
+
+fn with_mode(st: InputState, mode: Int) -> InputState
+    nvkeys.ist_idle(st, mode, st.avy, st.avx)
+
+@test
+fn test_the_clean_state_is_normal_mode_with_nothing_pending()
+    let st = nvkeys.ist_new()
+    test.assert_eq(st.mode, 0)
+    test.assert_eq(st.count, 0)
+    test.assert_eq(st.pending, 0)
+    test.assert_eq(st.reg, "")
+    test.assert(not st.reg_lw)
+    test.assert_eq(st.u8, 0)
+
+@test
+fn test_done_and_insert_keep_the_register_and_the_pattern()
+    let st = nvkeys.ist_set_search(nvkeys.ist_set_reg(nvkeys.ist_new(), "abc", true), "pat")
+    test.assert_eq(st.search, "pat")
+    test.assert_eq(st.reg, "abc")
+    test.assert(st.reg_lw)
+    let d = nvkeys.ist_done(with_mode(st, 3))
+    test.assert_eq(d.mode, 0)
+    test.assert_eq(d.reg, "abc")
+    test.assert_eq(d.search, "pat")
+    let i = nvkeys.ist_insert(st)
+    test.assert_eq(i.mode, 1)
+    test.assert_eq(i.reg, "abc")
+
+@test
+fn test_blanking_the_search_keeps_the_rest()
+    let st = nvkeys.ist_set_search(nvkeys.ist_new(), "pat")
+    let b = nvkeys.ist_blank_search(st)
+    test.assert_eq(b.search, "")
+    test.assert_eq(st.search, "pat")
+    test.assert_eq(b.mode, st.mode)
+
+@test
+fn test_setting_a_pattern_forgets_the_command_being_typed()
+    let typed = feed_all(editor(["abc"], 0, 0), nvkeys.ist_new(), [50, 100]).st
+    test.assert(typed.pending != 0)
+    let st = nvkeys.ist_set_search(typed, "x")
+    test.assert_eq(st.pending, 0)
+    test.assert_eq(st.count, 0)
+
+@test
+fn test_visual_keep_and_pending()
+    let st = with_mode(nvkeys.ist_new(), 2)
+    let k = nvkeys.ist_visual_keep(st, 3)
+    test.assert_eq(k.mode, 3)
+    test.assert_eq(k.pending, 0)
+    let p = nvkeys.ist_visual_pending(st, 60)
+    test.assert_eq(p.pending, 60)
+    test.assert_eq(p.mode, 2)
+
+@test
+fn test_a_character_goes_to_the_package()
+    let f = nvkeys.feed_front(editor(["abc"], 0, 0), nvkeys.ist_new(), 'l')
+    test.assert(not f.deferred)
+    test.assert_eq(f.step.ed.cx, 1)
+    let g = nvkeys.feed_front(editor(["abc"], 0, 0), nvkeys.ist_new(), 'x')
+    test.assert_eq(g.step.ed.lines, ["bc"])
+    test.assert_eq(g.step.st.reg, "a")
+
+@test
+fn test_novims_own_keys_are_handed_back()
+    let ed = editor(["abc"], 0, 0)
+    let v = nvkeys.feed_front(ed, nvkeys.ist_new(), 22)
+    test.assert(v.deferred)
+    test.assert_eq(v.route, nvview.ROUTE_ENTER_BLOCK)
+    test.assert_eq(v.c, 22)
+    let a = nvkeys.feed_front(ed, nvkeys.ist_new(), 1)
+    test.assert_eq(a.route, nvview.ROUTE_INCREMENT)
+    let x = nvkeys.feed_front(ed, nvkeys.ist_new(), 24)
+    test.assert_eq(x.route, nvview.ROUTE_DECREMENT)
+    let blk = nvkeys.feed_front(ed, with_mode(nvkeys.ist_new(), 5), 'd')
+    test.assert_eq(blk.route, nvview.ROUTE_BLOCK)
+    test.assert_eq(blk.st.mode, 5)
+
+@test
+fn test_gi_with_no_earlier_insert_types_i()
+    let st = feed_all(editor(["abc"], 0, 1), nvkeys.ist_new(), ['g']).st
+    test.assert_eq(st.pending, 1)
+    let f = nvkeys.feed_front(editor(["abc"], 0, 1), st, 'i')
+    test.assert(not f.deferred)
+    test.assert_eq(f.step.st.mode, 1)
+
+@test
+fn test_a_two_byte_character_reaches_the_package_whole()
+    // å is C3 A5; r replaces the character under the cursor with it.
+    let s = feed_all(editor(["abc"], 0, 0), nvkeys.ist_new(), ['r', 0xC3, 0xA5])
+    test.assert_eq(s.ed.lines, ["åbc"])
+    test.assert_eq(s.st.u8, 0)
+
+@test
+fn test_the_bytes_of_a_character_are_held_until_it_is_whole()
+    let mid = nvkeys.feed_front(editor(["abc"], 0, 0), feed_all(editor(["abc"], 0, 0), nvkeys.ist_new(), ['r']).st, 0xE2)
+    test.assert(not mid.deferred)
+    test.assert(mid.step.st.u8 != 0)
+    test.assert_eq(mid.step.ed.lines, ["abc"])
+    let s = feed_all(editor(["abc"], 0, 0), nvkeys.ist_new(), ['r', 0xE2, 0x82, 0xAC])
+    test.assert_eq(s.ed.lines, ["€bc"])
+
+@test
+fn test_insert_mode_types_a_character_of_several_bytes()
+    let s = feed_all(editor(["abc"], 0, 0), nvkeys.ist_insert(nvkeys.ist_new()), [0xF0, 0x9F, 0x98, 0x80])
+    test.assert_eq(s.ed.lines, ["😀abc"])
+
+@test
+fn test_a_byte_that_leads_no_character_gives_up_the_command()
+    // A continuation byte with no lead, and a byte no character starts with.
+    let r = feed_all(editor(["abc"], 0, 0), nvkeys.ist_new(), ['r', 0xA5])
+    test.assert_eq(r.st.pending, 0)
+    test.assert_eq(r.ed.lines, ["abc"])
+    let f = feed_all(editor(["abc"], 0, 0), nvkeys.ist_new(), ['r', 0xF8])
+    test.assert_eq(f.st.pending, 0)
+    // In Visual mode the selection stays.
+    let v = feed_all(editor(["abc"], 0, 0), nvkeys.ist_new(), ['v', 'f', 0xA5])
+    test.assert_eq(v.st.mode, 2)
+    test.assert_eq(v.st.pending, 0)
+    // In Insert mode there is no command to give up.
+    let i = feed_all(editor(["abc"], 0, 0), nvkeys.ist_insert(nvkeys.ist_new()), [0xA5])
+    test.assert_eq(i.st.mode, 1)
+    // In the block selection the mode stays too.
+    let b = feed_all(editor(["abc"], 0, 0), with_mode(nvkeys.ist_new(), 5), [0xA5])
+    test.assert_eq(b.st.mode, 5)
+
+@test
+fn test_a_half_typed_character_ends_and_the_next_key_is_its_own()
+    // r, the lead byte of a character, then x: the r is given up and x deletes.
+    let s = feed_all(editor(["abc"], 0, 0), nvkeys.ist_new(), ['r', 0xC3, 'x'])
+    test.assert_eq(s.ed.lines, ["bc"])
+    let v = feed_all(editor(["abc"], 0, 0), nvkeys.ist_new(), ['v', 'f', 0xC3, 'd'])
+    test.assert_eq(v.ed.lines, ["bc"])
+    // Without a command waiting, the key is typed as it is.
+    let n = feed_all(editor(["abc"], 0, 0), nvkeys.ist_new(), [0xC3, 'l'])
+    test.assert_eq(n.ed.cx, 1)
+    // In Insert mode the half character is dropped and the key is typed.
+    let i = feed_all(editor(["abc"], 0, 0), nvkeys.ist_insert(nvkeys.ist_new()), [0xC3, 'z'])
+    test.assert_eq(i.ed.lines, ["zabc"])

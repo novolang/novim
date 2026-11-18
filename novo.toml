@@ -7,7 +7,10 @@ layer       = "app"
 main        = "src/main.nv"
 
 [dependencies]
-# No external Novo packages.
+# The modal editing model: motions, operators, text objects, Visual, Insert and
+# Replace mode.  src/nvview.nv is novim's side of it; src/main.nv keeps the
+# blockwise selection, Ctrl-A and Ctrl-X, and the driver around a key.
+vim-motions-nv = "^0.1.0"
 
 # Tree-sitter syntax highlighting (src/ts.nv).  Links the system libtree-sitter
 # plus the orbit/novo-treesitter shim, both installed to ~/.novo/lib by

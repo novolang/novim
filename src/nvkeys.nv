@@ -1,0 +1,148 @@
+// nvkeys.nv — the state a key leaves in novim, and the front of the path a key
+// takes: the bytes of a multi-byte character are gathered, and each character
+// goes to vim-motions-nv (nvview.key) or is handed back for the code novim
+// keeps for itself.
+//
+// `Editor`, `InputState` and `Step` are novim's own: the buffer with its
+// cursor, the state of the keys that the driver reads, and the answer to a key.
+// `InputState` holds the package's `Modal` and, beside it, the fields the
+// driver reads after every key.
+
+use std.list
+use std.str
+use vimmodal
+use nvview
+
+// Editor state.  The cursor is 0-based (line, col); the buffer is a line vector.
+pub struct Editor
+    lines: [Str]
+    cy:    Int
+    cx:    Int
+
+// The input state carried across bytes.  `m` is the state of vim-motions-nv
+// (the mode, the cursor, the count and operator being typed, the marks and the
+// find to repeat); the other fields are the part of it the driver reads, kept
+// beside it after every key: `count` is non-zero while a count is typed,
+// `pending` is 0 when no command waits for more keys, 1 while a `g` waits and
+// 2 for any other command in progress, and `mode` is 0 Normal, 1 Insert,
+// 2 Visual over characters, 3 Visual over lines, 4 Replace, 5 Visual over a
+// block.  `reg` + `reg_lw` are the unnamed register (linewise when reg_lw),
+// `search` the last pattern, `avy` / `avx` the Visual anchor in bytes, and
+// `u8` the bytes of a multi-byte character received so far: the bytes still
+// to come in bits 24 and up, the bits of the code point below them.
+pub struct InputState
+    count:   Int
+    pending: Int
+    mode:    Int
+    reg:     Str
+    reg_lw:  Bool
+    search:  Str
+    avy:     Int
+    avx:     Int
+    m:       vimmodal.Modal
+    u8:      Int
+
+// feed()'s result: the new editor + the new input state.
+pub struct Step
+    ed: Editor
+    st: InputState
+
+// The clean initial state (empty register).  Used once at editor start.
+pub fn ist_new() -> InputState
+    InputState { count: 0, pending: 0, mode: 0, reg: "", reg_lw: false, search: "", avy: 0, avx: 0, m: vimmodal.modal_new(), u8: 0 }
+
+// A state with the command being typed forgotten and `mode` and the anchor as
+// given.  The register and the search pattern are kept.
+pub fn ist_idle(st: InputState, mode: Int, avy: Int, avx: Int) -> InputState
+    InputState { count: 0, pending: 0, mode: mode, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: avy, avx: avx, m: nvview.idle_modal(st.m), u8: 0 }
+
+// End-of-command reset: clear count/pending, return to Normal, but PRESERVE
+// the register so a later `p` can paste an earlier `yy`/`dd`.
+pub fn ist_done(st: InputState) -> InputState
+    ist_idle(st, 0, st.avy, st.avx)
+
+// Enter Insert mode, preserving the register.
+pub fn ist_insert(st: InputState) -> InputState
+    ist_idle(st, 1, st.avy, st.avx)
+
+// Replace the unnamed register (used by the driver to seed it from the OS
+// clipboard before a paste); everything else about `st` is preserved.
+pub fn ist_set_reg(st: InputState, reg: Str, lw: Bool) -> InputState
+    InputState { count: st.count, pending: st.pending, mode: st.mode, reg: reg, reg_lw: lw, search: st.search, avy: st.avy, avx: st.avx, m: st.m, u8: st.u8 }
+
+// A copy of `st` with no search pattern — used only to render with search
+// highlight suppressed (`:noh`) while the real `st.search` is kept for `n`/`N`.
+pub fn ist_blank_search(st: InputState) -> InputState
+    InputState { count: st.count, pending: st.pending, mode: st.mode, reg: st.reg, reg_lw: st.reg_lw, search: "", avy: st.avy, avx: st.avx, m: st.m, u8: st.u8 }
+
+// Record the last search pattern (after `/pattern<Enter>`).
+pub fn ist_set_search(st: InputState, pat: Str) -> InputState
+    InputState { count: 0, pending: 0, mode: 0, reg: st.reg, reg_lw: st.reg_lw, search: pat, avy: st.avy, avx: st.avx, m: nvview.idle_modal(st.m), u8: 0 }
+
+// State that stays in visual mode (preserve anchor + register, reset count).
+pub fn ist_visual_keep(st: InputState, mode: Int) -> InputState
+    ist_idle(st, mode, st.avy, st.avx)
+
+// Stay in visual mode but set a pending sub-state (await the character of
+// the blockwise `r`) — preserves the count.
+pub fn ist_visual_pending(st: InputState, pcode: Int) -> InputState
+    InputState { count: st.count, pending: pcode, mode: st.mode, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx, m: st.m, u8: 0 }
+
+// The state with the bytes of a multi-byte character received so far set.
+fn ist_u8(st: InputState, u8: Int) -> InputState
+    InputState { count: st.count, pending: st.pending, mode: st.mode, reg: st.reg, reg_lw: st.reg_lw, search: st.search, avy: st.avy, avx: st.avx, m: st.m, u8: u8 }
+
+// The state after a command that waits for a character, a count or a second
+// key is given up, in the mode it was typed in.  Insert and Replace mode have
+// no command to give up.
+fn ist_cancel(st: InputState) -> InputState
+    if st.mode == 0
+        ist_done(st)
+    elif st.mode == 2 or st.mode == 3 or st.mode == 5
+        ist_visual_keep(st, st.mode)
+    else
+        ist_u8(st, 0)
+
+// pkg_feed is one character through the package.
+pub fn pkg_feed(ed: Editor, st: InputState, c: Int) -> Step
+    let k = nvview.KeyIn { lines: ed.lines, cy: ed.cy, cx: ed.cx, m: st.m, mode: st.mode, avy: st.avy, avx: st.avx, reg: st.reg, reg_lw: st.reg_lw, search: st.search }
+    let o = nvview.key(k, c)
+    Step { ed: Editor { lines: o.lines, cy: o.cy, cx: o.cx }, st: InputState { count: o.count, pending: o.pending, mode: o.mode, reg: o.reg, reg_lw: o.reg_lw, search: o.search, avy: o.avy, avx: o.avx, m: o.m, u8: 0 } }
+
+// Fed is what the front of the key path answers.  When `deferred` is not set,
+// `step` is the answer to the byte.  When it is, the byte completed a
+// character, `c`, that novim's own code handles (`route` is one of the
+// `nvview.ROUTE_` numbers), and `st` is the state to give that code.
+pub struct Fed
+    deferred: Bool
+    step:     Step
+    st:       InputState
+    route:    Int
+    c:        Int
+
+// answered is the answer to a byte that is not handed on.
+fn answered(s: Step) -> Fed
+    Fed { deferred: false, step: s, st: s.st, route: 0, c: 0 }
+
+// route_char sends one whole character to the package, or hands it back.
+fn route_char(ed: Editor, st: InputState, c: Int) -> Fed
+    let r = nvview.route(st.mode, st.pending, c)
+    if r == nvview.ROUTE_PKG
+        return answered(pkg_feed(ed, st, c))
+    if r == nvview.ROUTE_GI_FALLBACK             // gi with no earlier Insert: i
+        return answered(pkg_feed(ed, ist_done(st), c))
+    Fed { deferred: true, step: Step { ed: ed, st: st }, st: st, route: r, c: c }
+
+// feed_front folds one byte into the state.  A terminal sends a multi-byte
+// character one byte at a time, so the bytes are gathered in `u8` and the
+// character reaches the package whole.  A byte that leads no character gives
+// up the command that waited for one.
+pub fn feed_front(ed: Editor, st: InputState, b: Int) -> Fed
+    let u = nvview.u8_step(st.u8, b)
+    if u.kind == nvview.U8_KEY
+        return route_char(ed, ist_u8(st, 0), u.cp)
+    if u.kind == nvview.U8_ABORT_KEY
+        return route_char(ed, ist_cancel(ist_u8(st, 0)), b)
+    if u.kind == nvview.U8_WAIT
+        return answered(Step { ed: ed, st: ist_u8(st, u.u8) })
+    answered(Step { ed: ed, st: ist_cancel(st) })

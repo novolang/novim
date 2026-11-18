@@ -1,0 +1,839 @@
+// nvview.nv — novim's side of vim-motions-nv: the text the package reads, and
+// the actions it answers applied to novim's line vector.
+//
+// The package counts columns in codepoints and answers every edit as an
+// `Action` for the host to carry out.  novim's buffer is a `[Str]` with the
+// cursor column counted in bytes.  `EdView` is the buffer as the package
+// reads it, by reference, with no copy of the lines; `cp_col` and `byte_col`
+// move a column between the two counts; and `key` feeds one character to the
+// package and answers the buffer and the state after it.  A key that changes
+// no text leaves the vector as it is; one that does makes one new vector,
+// because a snapshot for undo holds the old one.
+
+use std.list
+use std.str
+use util
+use nvregex
+use vimtext
+use vimmodal
+use vimstep
+use vimmotion
+use vimobject
+use vimnormal
+
+// EdView is the lines of a buffer, read by codepoint.  `top` and `rows` are
+// the window the screen commands of the package measure against; the driver
+// owns the real window, so these keep the values of a window at the top of
+// the buffer.
+pub struct EdView
+    lines: [Str]
+    top:   Int
+    rows:  Int
+
+impl TextView for EdView
+    fn line_count(self) -> Int
+        list.len(self.lines)
+
+    fn line_len(self, line: Int) -> Int
+        let s = self.lines[line]
+        util.u8_count(s, 0, str.len(s))
+
+    fn char_at(self, line: Int, col: Int) -> Int
+        let s = self.lines[line]
+        util.u8_decode(s, util.u8_fwd(s, 0, col))
+
+    fn top_line(self) -> Int
+        self.top
+
+    fn height(self) -> Int
+        self.rows
+
+// view_of is the buffer as the package reads it.
+pub fn view_of(lines: [Str]) -> EdView
+    EdView { lines: lines, top: 0, rows: 24 }
+
+// cp_col is the codepoint column of byte `x` of a line.
+pub fn cp_col(line: Str, x: Int) -> Int
+    util.u8_count(line, 0, x)
+
+// byte_col is the byte index of codepoint column `col` of a line, the line
+// length when the column is past the end.
+pub fn byte_col(line: Str, col: Int) -> Int
+    util.u8_fwd(line, 0, col)
+
+// ── Shifting and case ───────────────────────────────────────────────
+
+// indent_one adds one indent level to a line.  The indent is a real tab, whose
+// width follows `tabstop`, and a blank line is left alone as Vim leaves it.
+pub fn indent_one(line: Str) -> Str
+    if str.len(line) == 0 then line else str.from_char('\t') + line
+
+// dedent_one removes one indent level: a single leading tab, or up to a
+// tab's worth, at most eight, of leading spaces.
+pub fn dedent_one(line: Str) -> Str
+    let n = str.len(line)
+    if n == 0
+        return line
+    if (str.byte_at(line, 0) ?? 0) == '\t'
+        return str.slice(line, 1, n)
+    var k = 0
+    while k < 8 and k < n and (str.byte_at(line, k) ?? 0) == ' '
+        k = k + 1
+    str.slice(line, k, n)
+
+// case_cp maps one codepoint: kind 0 toggles, 1 lowers and 2 uppers.  The
+// letters of ASCII and of Latin-1 (À-Þ and à-þ, which holds å ø æ and their
+// capitals) change; every other character stays as it is.
+pub fn case_cp(cp: Int, kind: Int) -> Int
+    let is_up = (cp >= 'A' and cp <= 'Z') or (cp >= 192 and cp <= 222 and cp != 215)
+    let is_lo = (cp >= 'a' and cp <= 'z') or (cp >= 224 and cp <= 254 and cp != 247)
+    if is_up and kind != 2
+        cp + 32
+    elif is_lo and kind != 1
+        cp - 32
+    else
+        cp
+
+// case_kind is novim's case kind for the package's: the package numbers lower,
+// upper and toggle from zero, novim toggle, lower and upper.
+fn case_kind(pkg_kind: Int) -> Int
+    if pkg_kind == CASE_LOWER
+        1
+    elif pkg_kind == CASE_UPPER
+        2
+    else
+        0
+
+// ── Applying actions ────────────────────────────────────────────────
+
+// split_cps breaks codepoints at newlines.
+fn split_cps(cps: [Int]) -> [[Int]]
+    var out: [[Int]] = []
+    var cur: [Int] = []
+    for c in cps
+        if c == '\n'
+            list.push(out, cur)
+            cur = []
+        else
+            list.push(cur, c)
+    list.push(out, cur)
+    out
+
+// cps_of is the codepoints of line `i`.
+fn cps_of(ls: [Str], i: Int) -> [Int]
+    vimtext.decode_utf8(ls[i])
+
+// splice replaces the lines `first` to `last` inclusive with `repl`, as a new
+// vector.  A result with no lines is one empty line.
+fn splice(ls: [Str], first: Int, last: Int, repl: [Str]) -> [Str]
+    let n = list.len(ls)
+    let head = if first < n then first else n
+    let rest = if last + 1 < n then last + 1 else n
+    var out: [Str] = [...ls[0:head], ...repl, ...ls[rest:]]
+    if list.len(out) == 0
+        list.push(out, "")
+    out
+
+// with_line is the lines with line `i` replaced: one copy of the vector and one
+// store.
+fn with_line(ls: [Str], i: Int, s: Str) -> [Str]
+    var out = list.clone(ls)
+    out[i] = s
+    out
+
+// text_lines is the lines of a block of text as strings.
+fn text_lines(text: Str) -> [Str]
+    var out: [Str] = []
+    for cps in split_cps(vimtext.decode_utf8(text))
+        list.push(out, vimtext.encode_utf8(cps))
+    out
+
+// delete_span removes a span.  The columns are turned into byte indexes and the
+// line is cut there, so no line is decoded.
+fn delete_span(ls: [Str], s: Span) -> [Str]
+    if s.linewise
+        return splice(ls, s.line, s.end_line, [])
+    let first = ls[s.line]
+    let last = ls[s.end_line]
+    let joined = str.slice(first, 0, byte_col(first, s.col)) + str.slice(last, byte_col(last, s.end_col), str.len(last))
+    if s.line == s.end_line
+        with_line(ls, s.line, joined)
+    else
+        splice(ls, s.line, s.end_line, [joined])
+
+// insert_at puts text at a place; a newline in the text breaks the line.
+fn insert_at(ls: [Str], line: Int, col: Int, text: Str) -> [Str]
+    let cur = ls[line]
+    let at = byte_col(cur, col)
+    let head = str.slice(cur, 0, at)
+    let tail = str.slice(cur, at, str.len(cur))
+    if util.index_of_byte(text, '\n') < 0
+        return with_line(ls, line, head + text + tail)
+    let pieces = text_lines(text)
+    let k = list.len(pieces)
+    var repl: [Str] = []
+    list.push(repl, head + pieces[0])
+    for i in 1..k - 1
+        list.push(repl, pieces[i])
+    list.push(repl, pieces[k - 1] + tail)
+    splice(ls, line, line, repl)
+
+// replace_chars writes one codepoint over `count` characters from a place, as
+// many as the line has.
+fn replace_chars(ls: [Str], line: Int, col: Int, count: Int, ch: Int) -> [Str]
+    let cur = ls[line]
+    let a = byte_col(cur, col)
+    let b = util.u8_fwd(cur, a, count)
+    var rep = ""
+    var i = util.u8_count(cur, a, b)
+    while i > 0
+        rep = rep + str.from_char(ch)
+        i = i - 1
+    with_line(ls, line, str.slice(cur, 0, a) + rep + str.slice(cur, b, str.len(cur)))
+
+// blanks_end is the number of blanks that begin a line of codepoints.
+fn blanks_end(cps: [Int]) -> Int
+    var i = 0
+    while i < list.len(cps) and vimtext.is_blank(cps[i])
+        i = i + 1
+    i
+
+// join_lines joins `count` lines from `line`, as `J` does with `spaces` set and
+// `gJ` does without it.
+fn join_lines(ls: [Str], line: Int, count: Int, spaces: Bool) -> [Str]
+    var cur = cps_of(ls, line)
+    var prev_last = 0
+    if list.len(cur) > 0
+        prev_last = cur[list.len(cur) - 1]
+    var k = 1
+    while k < count and line + k < list.len(ls)
+        var piece = cps_of(ls, line + k)
+        if spaces
+            piece = piece[blanks_end(piece):]
+        var sp: [Int] = []
+        if spaces and list.len(piece) > 0 and list.len(cur) > 0 and piece[0] != ')' and prev_last != '\t' and prev_last != ' '
+            sp = [' ']
+        cur = [...cur, ...sp, ...piece]
+        prev_last = 0
+        if list.len(piece) > 0
+            prev_last = piece[list.len(piece) - 1]
+        k = k + 1
+    splice(ls, line, line + k - 1, [vimtext.encode_utf8(cur)])
+
+// shift_lines shifts the lines `first` to `last` by `levels` indent levels.
+fn shift_lines(ls: [Str], first: Int, last: Int, levels: Int, right: Bool) -> [Str]
+    var out = list.clone(ls)
+    var l = first
+    while l <= last and l < list.len(out)
+        var s = out[l]
+        var i = 0
+        while i < levels
+            s = if right then indent_one(s) else dedent_one(s)
+            i = i + 1
+        out[l] = s
+        l = l + 1
+    out
+
+// case_span changes the case of the characters in a span.
+fn case_span(ls: [Str], s: Span, pkg_kind: Int) -> [Str]
+    var out = list.clone(ls)
+    let kind = case_kind(pkg_kind)
+    for l in s.line..=s.end_line
+        var cps = cps_of(out, l)
+        var from = 0
+        var to = list.len(cps)
+        if not s.linewise
+            if l == s.line
+                from = s.col
+            if l == s.end_line
+                to = s.end_col
+        for c in from..to
+            cps[c] = case_cp(cps[c], kind)
+        out[l] = vimtext.encode_utf8(cps)
+    out
+
+// put_text puts the text of a register.  A linewise put inserts its lines
+// before `line`; a characterwise one inserts at the place.
+fn put_text(ls: [Str], line: Int, col: Int, text: Str, linewise: Bool) -> [Str]
+    if not linewise
+        return insert_at(ls, line, col, text)
+    let n = list.len(ls)
+    let at = if line > n then n else line
+    splice(ls, at, at - 1, text_lines(text))
+
+// is_text_action says whether an action changes the text.
+fn is_text_action(a: Action) -> Bool
+    match a
+        Delete(s)                       =>
+            true
+        Insert(line, col, text)         =>
+            true
+        ReplaceChar(line, col, n, ch)   =>
+            true
+        JoinLines(line, count, spaces)  =>
+            true
+        Indent(first, last, levels)     =>
+            true
+        Dedent(first, last, levels)     =>
+            true
+        ChangeCase(s, kind)             =>
+            true
+        Put(line, col, text, linewise)  =>
+            true
+        _                               =>
+            false
+
+// apply_action carries out one action on the lines and answers the new vector;
+// the one it was given is not changed, because a snapshot for undo holds it.
+// An action that only concerns the cursor, the mode, the screen, an undo or a
+// search answers a copy.
+pub fn apply_action(ls: [Str], a: Action) -> [Str]
+    match a
+        Delete(s)                       =>
+            delete_span(ls, s)
+        Insert(line, col, text)         =>
+            insert_at(ls, line, col, text)
+        ReplaceChar(line, col, n, ch)   =>
+            replace_chars(ls, line, col, n, ch)
+        JoinLines(line, count, spaces)  =>
+            join_lines(ls, line, count, spaces)
+        Indent(first, last, levels)     =>
+            shift_lines(ls, first, last, levels, true)
+        Dedent(first, last, levels)     =>
+            shift_lines(ls, first, last, levels, false)
+        ChangeCase(s, kind)             =>
+            case_span(ls, s, kind)
+        Put(line, col, text, linewise)  =>
+            put_text(ls, line, col, text, linewise)
+        _                               =>
+            list.clone(ls)
+
+// ── One key through the package ─────────────────────────────────────
+
+// KeyIn is what a key is fed against: the buffer and the cursor in bytes,
+// the package state, and the parts of novim's own state the package reads.
+// `mode` counts as novim does: 0 Normal, 1 Insert, 2 Visual over characters,
+// 3 Visual over lines, 4 Replace, 5 Visual over a block.  The Visual anchor
+// is in bytes, and `reg` is the unnamed register novim carries beside the
+// package's registers.
+pub struct KeyIn
+    lines:  [Str]
+    cy:     Int
+    cx:     Int
+    m:      Modal
+    mode:   Int
+    avy:    Int
+    avx:    Int
+    reg:    Str
+    reg_lw: Bool
+    search: Str
+
+// KeyOut is the same state after the key.  `count` is non-zero while a count
+// is being typed, and `pending` is 0 when no command waits for more keys, 1
+// while a `g` waits and 2 for any other command in progress.
+pub struct KeyOut
+    lines:   [Str]
+    cy:      Int
+    cx:      Int
+    m:       Modal
+    mode:    Int
+    count:   Int
+    pending: Int
+    avy:     Int
+    avx:     Int
+    reg:     Str
+    reg_lw:  Bool
+    search:  Str
+
+// pkg_mode is the package's number for a mode of novim.
+pub fn pkg_mode(mode: Int) -> Int
+    if mode == 1
+        MODE_INSERT
+    elif mode == 2
+        MODE_VISUAL
+    elif mode == 3
+        MODE_VISUAL_LINE
+    elif mode == 4
+        MODE_REPLACE
+    elif mode == 5
+        MODE_VISUAL_BLOCK
+    else
+        MODE_NORMAL
+
+// nv_mode is novim's number for a mode of the package.
+pub fn nv_mode(mode: Int) -> Int
+    if mode == MODE_INSERT
+        1
+    elif mode == MODE_VISUAL
+        2
+    elif mode == MODE_VISUAL_LINE
+        3
+    elif mode == MODE_REPLACE
+        4
+    elif mode == MODE_VISUAL_BLOCK
+        5
+    else
+        0
+
+// nv_code is the package's number for a character novim read: a terminal
+// sends Backspace as 127 or 8, and the package reads 127.
+fn nv_code(c: Int) -> Int
+    if c == 8
+        127
+    else
+        c
+
+// clamp_into is `v` held between 0 and `hi`.
+fn clamp_into(v: Int, hi: Int) -> Int
+    if v > hi
+        hi
+    elif v < 0
+        0
+    else
+        v
+
+// inside is the state with the cursor and the Visual anchor held inside the
+// buffer, which the driver keeps them in; a stale anchor after the text shrank
+// is brought back rather than read past the end.
+fn inside(k: KeyIn) -> KeyIn
+    let last = list.len(k.lines) - 1
+    let cy = clamp_into(k.cy, last)
+    let avy = clamp_into(k.avy, last)
+    KeyIn { lines: k.lines, cy: cy, cx: clamp_into(k.cx, str.len(k.lines[cy])), m: k.m,
+            mode: k.mode, avy: avy, avx: clamp_into(k.avx, str.len(k.lines[avy])),
+            reg: k.reg, reg_lw: k.reg_lw, search: k.search }
+
+// idle_modal is the package state with the command being typed forgotten.
+pub fn idle_modal(m0: Modal) -> Modal
+    var m = vimmodal.modal_clone(m0)
+    m.reset_pending()
+    m
+
+// prepare is the package state to step from: the cursor, the mode, the Visual
+// anchor and the unnamed register are novim's, and the rest is the package's.
+// The wanted column is the cursor's: novim does not remember the column a
+// vertical move started from, so `j` across a short line keeps the short
+// line's column.
+fn prepare(k: KeyIn) -> Modal
+    var m = vimmodal.modal_clone(k.m)
+    let col = cp_col(k.lines[k.cy], k.cx)
+    m.line = k.cy
+    m.col = col
+    let pm = pkg_mode(k.mode)
+    if m.mode != pm
+        if pm == MODE_INSERT or pm == MODE_REPLACE
+            m.ins_text = []
+            m.ins_orig = []
+            m.ins_count = 1
+            m.ins_lead = 0
+            m.ins_line = k.cy
+            m.ins_col = col
+            m.prefix = 0
+        m.mode = pm
+    if vimmodal.is_visual(pm)
+        m.anchor_line = k.avy
+        m.anchor_col = cp_col(k.lines[k.avy], k.avx)
+    let has = m.unnamed >= 0
+    let cur = if has then m.regs[m.unnamed] else ""
+    let cur_lw = if has then m.regs_linewise[m.unnamed] else false
+    if cur != k.reg or cur_lw != k.reg_lw
+        m.regs[SLOT_YANK] = k.reg
+        m.regs_linewise[SLOT_YANK] = k.reg_lw
+        m.regs_set[SLOT_YANK] = str.len(k.reg) > 0
+        m.unnamed = if str.len(k.reg) > 0 then SLOT_YANK else SLOT_NONE
+    m.search_forward = true
+    m.want = col
+    m
+
+// SearchHit is where a search ended, as a line and a byte index.
+struct SearchHit
+    found: Bool
+    line:  Int
+    x:     Int
+
+// search_once finds the next match of a pattern from a place, wrapping around
+// the buffer.  A forward search starts after the character at the place and a
+// backward one before it.
+fn search_once(lines: [Str], cy: Int, cx: Int, pattern: Str, forward: Bool) -> SearchHit
+    let atoms = nvregex.re_compile(pattern)
+    let total = list.len(lines)
+    var y = cy
+    var steps = 0
+    if forward
+        var startcol = util.u8_after(lines[cy], cx)
+        while steps <= total
+            let col = nvregex.re_find_in_line(atoms, lines[y], startcol)
+            if col >= 0
+                return SearchHit { found: true, line: y, x: col }
+            y = (y + 1) % total
+            startcol = 0
+            steps = steps + 1
+    else
+        var before = cx
+        while steps <= total
+            let col = nvregex.re_find_last_in_line(atoms, lines[y], before)
+            if col >= 0
+                return SearchHit { found: true, line: y, x: col }
+            y = y - 1
+            if y < 0
+                y = total - 1
+            before = 0 - 1
+            steps = steps + 1
+    SearchHit { found: false, line: cy, x: cx }
+
+// search_count finds the `count`th match in turn.
+fn search_count(lines: [Str], cy: Int, cx: Int, pattern: Str, forward: Bool, count: Int) -> SearchHit
+    var hit = SearchHit { found: true, line: cy, x: cx }
+    var i = 0
+    while i < count and hit.found
+        hit = search_once(lines, hit.line, hit.x, pattern, forward)
+        i = i + 1
+    hit
+
+// Run is the buffer, the package state and the search pattern after some
+// actions.  `changed` says whether `lines` is a new vector; when it is not,
+// `lines` is the vector the actions started from.
+struct Run
+    lines:   [Str]
+    changed: Bool
+    m:       Modal
+    search:  Str
+
+// run_actions carries out the actions of a step in order.  An action that
+// changes the text makes a new vector, because a snapshot for undo holds the
+// one the lines came from; a step that changes none leaves the vector as it is.  A search is answered at once, and the
+// actions the answer asks for are carried out in turn.  A command line is never
+// opened: novim reads its own, so the package leaves it at once.
+fn run_actions(lines0: [Str], m0: Modal, acts: [Action], search0: Str) -> Run
+    var lines: [Str] = []
+    var owned = false
+    var m = m0
+    var search = search0
+    for a in acts
+        match a
+            Search(forward, pattern, whole, count) =>
+                let src = if owned then lines else lines0
+                let pat = if str.len(pattern) > 0 then pattern else search
+                if str.len(pattern) > 0
+                    search = pattern
+                let view = view_of(src)
+                let hit = search_count(src, m.line, byte_col(src[m.line], m.col), pat, forward, count)
+                let ans = if hit.found
+                    vimstep.search_found(m, view, hit.line, cp_col(src[hit.line], hit.x))
+                else
+                    vimstep.search_failed(m, view)
+                let r = run_actions(src, ans.modal, ans.actions, search)
+                if r.changed
+                    lines = list.clone(r.lines)
+                    owned = true
+                m = r.m
+                search = r.search
+            EnterCommandLine(kind, initial)        =>
+                m = vimstep.cmdline_abort(m).modal
+            _                                      =>
+                if is_text_action(a)
+                    let src = if owned then lines else lines0
+                    lines = apply_action(src, a)
+                    owned = true
+    Run { lines: if owned then lines else lines0, changed: owned, m: m, search: search }
+
+// The kinds of adjustment novim makes after a step, for the places where
+// its keys differ from the package's.  See the notes on `adjust`.
+const ADJ_NONE = 0
+const ADJ_ENTER = 1
+const ADJ_OPEN_BELOW = 2
+const ADJ_OPEN_ABOVE = 3
+const ADJ_KEEP_COLUMN = 4
+const ADJ_JOIN_FIRST = 5
+
+// leading_ws is the blanks that begin a line.
+fn leading_ws(line: Str) -> Str
+    let n = str.len(line)
+    var i = 0
+    while i < n and ((str.byte_at(line, i) ?? 0) == ' ' or (str.byte_at(line, i) ?? 0) == '\t')
+        i = i + 1
+    str.slice(line, 0, i)
+
+// adjust_kind says which adjustment follows the key `c` typed in the state `k`.
+//
+//   Enter in Insert or Replace mode, `o` and `O` give the new line the indent of
+//   the line it came from (autoindent; the package has none).
+//   `G` and `gg` keep the character column of the cursor (novim does not move
+//   to the first non-blank character, as `startofline` does).
+//   `3J` and `3gJ` leave the cursor at the first join, not the last.
+fn adjust_kind(k: KeyIn, c: Int) -> Int
+    let plain = k.m.op == OP_NONE and k.m.prefix == 0
+    if (k.mode == 1 or k.mode == 4) and (c == 13 or c == 10)
+        return ADJ_ENTER
+    if k.mode == 0 and plain and c == 'o'
+        return ADJ_OPEN_BELOW
+    if k.mode == 0 and plain and c == 'O'
+        return ADJ_OPEN_ABOVE
+    if (k.mode == 0 or k.mode == 2 or k.mode == 3) and plain and c == 'G'
+        return ADJ_KEEP_COLUMN
+    if (k.mode == 0 or k.mode == 2 or k.mode == 3) and k.m.op == OP_NONE and k.m.prefix == 'g' and c == 'g'
+        return ADJ_KEEP_COLUMN
+    if k.mode == 0 and k.m.count >= 3 and ((plain and c == 'J') or (k.m.op == OP_NONE and k.m.prefix == 'g' and c == 'J'))
+        return ADJ_JOIN_FIRST
+    ADJ_NONE
+
+// adjust puts novim's behaviour over the package's after a step.  `lines` is
+// the text after the actions, `m` the state, and `k` the state before the key.
+// The text is copied only where an indent is written.
+fn adjust(kind: Int, k: KeyIn, lines: [Str], m0: Modal) -> Run
+    var m = m0
+    if kind == ADJ_ENTER and m.line == k.cy + 1 and m.line < list.len(lines)
+        var out = list.clone(lines)
+        let ind = leading_ws(k.lines[k.cy])
+        out[m.line] = ind + out[m.line]
+        m.col = cp_col(ind, str.len(ind))
+        m.want = m.col
+        return Run { lines: out, changed: true, m: m, search: "" }
+    if (kind == ADJ_OPEN_BELOW or kind == ADJ_OPEN_ABOVE) and m.mode == MODE_INSERT and m.line < list.len(lines)
+        var out = list.clone(lines)
+        let src = if kind == ADJ_OPEN_BELOW then k.cy else k.cy + 1
+        let ind = leading_ws(out[src])
+        out[m.line] = ind + out[m.line]
+        m.col = cp_col(ind, str.len(ind))
+        m.want = m.col
+        return Run { lines: out, changed: true, m: m, search: "" }
+    if kind == ADJ_KEEP_COLUMN and m.line < list.len(lines)
+        let n = cp_col(lines[m.line], str.len(lines[m.line]))
+        let old = cp_col(k.lines[k.cy], k.cx)
+        m.col = if old > n - 1 then (if n > 0 then n - 1 else 0) else old
+        m.want = m.col
+        m.nonblank = false
+    elif kind == ADJ_JOIN_FIRST and m.line == k.cy
+        m.col = cp_col(k.lines[k.cy], str.len(k.lines[k.cy]))
+        m.want = m.col
+    Run { lines: lines, changed: false, m: m, search: "" }
+
+// settle_in brings the cursor inside the text the way the mode keeps it, and
+// finds the first non-blank character when a command asked for it.  It is what
+// `vimstep.settle` does, on the state in hand and not on a copy of it.
+fn settle_in(var m: Modal, view: EdView)
+    if m.mode == MODE_INSERT or m.mode == MODE_REPLACE or m.mode == MODE_VISUAL
+        let p = view.clamp_insert(vimtext.pos_new(m.line, m.col))
+        m.line = p.line
+        m.col = p.col
+    else
+        let p = view.clamp_normal(vimtext.pos_new(m.line, m.col))
+        m.line = p.line
+        m.col = p.col
+        if m.nonblank
+            m.col = view.first_nonblank(m.line)
+            m.want = m.col
+    m.nonblank = false
+
+// finish builds the state a key left from the package state and its actions.
+fn finish(k: KeyIn, kind: Int, m0: Modal, acts: [Action]) -> KeyOut
+    let r0 = run_actions(k.lines, m0, acts, k.search)
+    let r1 = adjust(kind, k, r0.lines, r0.m)
+    let lines = if r1.changed then r1.lines else r0.lines
+    var m = r1.m
+    settle_in(var m, view_of(lines))
+    let cy = if m.line < list.len(lines) then m.line else list.len(lines) - 1
+    let cx = byte_col(lines[cy], m.col)
+    let vis = vimmodal.is_visual(m.mode)
+    let avy = if not vis then k.avy elif m.anchor_line < list.len(lines) then m.anchor_line else list.len(lines) - 1
+    let avx = if vis then byte_col(lines[avy], m.anchor_col) else k.avx
+    let count = if m.count > 0 then m.count elif m.op_count > 0 then m.op_count else m.reg_count
+    let waiting = m.op != OP_NONE or m.prefix != 0 or m.search_wait
+    let pending = if not waiting then 0 elif m.op == OP_NONE and m.prefix == 'g' then 1 else 2
+    let has = m.unnamed >= 0
+    KeyOut { lines: lines, cy: cy, cx: cx, m: m, mode: nv_mode(m.mode), count: count,
+             pending: pending, avy: avy, avx: avx,
+             reg: if has then m.regs[m.unnamed] else "",
+             reg_lw: if has then m.regs_linewise[m.unnamed] else false,
+             search: r0.search }
+
+// has_bell says whether a step refused its key.
+fn has_bell(acts: [Action]) -> Bool
+    for a in acts
+        match a
+            Bell =>
+                return true
+            _    =>
+                continue
+    false
+
+// is_plain_command says whether a character is a Normal-mode command that is
+// not a motion, an operator or the start of a text object.
+fn is_plain_command(c: Int) -> Bool
+    c == 'x' or c == 'X' or c == 'D' or c == 'C' or c == 'S' or c == 's' or c == 'p' or c == 'P' or c == 'J' or c == '~' or c == 'A' or c == 'I' or c == 'o' or c == 'O' or c == 'R' or c == 'Y'
+
+// pkg_run types one key into the package state `m`, which `prepare` made, and
+// answers the actions it asks for.  The cursor is settled first, as
+// `vimstep.step` does, except for a Normal-mode cursor that stands after the
+// last character of its line, as `Ctrl-O` in Insert mode leaves it, so that `h`
+// steps back onto the last character.  A count before `v` or `V` selects that
+// many characters or lines at once.
+fn pkg_run(k: KeyIn, var m: Modal, c: Int) -> [Action]
+    let view = view_of(k.lines)
+    let line = k.lines[k.cy]
+    let plain = k.m.op == OP_NONE and k.m.prefix == 0
+    if k.mode == 0 and plain and k.m.count > 1 and (c == 'v' or c == 'V')
+        settle_in(var m, view)
+        vimnormal.handle_key(var m, view, c)
+        m.count = k.m.count - 1
+        settle_in(var m, view)
+        vimnormal.handle_key(var m, view, if c == 'v' then 'l' else 'j')
+    else
+        if not (k.mode == 0 and k.cx >= str.len(line) and str.len(line) > 0)
+            settle_in(var m, view)
+        vimnormal.handle_key(var m, view, nv_code(c))
+    let acts = m.out
+    m.out = []
+    acts
+
+// key feeds one character to the package, as novim's state stands, and answers
+// the state after it.
+//
+// novim reads a key that cannot continue a command as the start of a new one:
+// a plain command after an operator, as in `>x`, or any key after `g` that
+// names no command, is typed again with the command forgotten and its count
+// kept.  The package refuses such a key and drops the command.
+//
+// A key copies the package state once (`prepare`) and the lines only when it
+// changes the text.
+pub fn key(k0: KeyIn, c: Int) -> KeyOut
+    let k = inside(k0)
+    var m = prepare(k)
+    let acts = pkg_run(k, var m, c)
+    let again = k.mode == 0 and has_bell(acts) and ((k.m.op != OP_NONE and k.m.prefix == 0 and is_plain_command(c)) or (k.m.op == OP_NONE and k.m.prefix == 'g'))
+    if again
+        var idle = idle_modal(k.m)
+        idle.count = if k.m.op_count > 0 then k.m.op_count else k.m.count
+        let k2 = KeyIn { lines: k.lines, cy: k.cy, cx: k.cx, m: idle, mode: k.mode, avy: k.avy, avx: k.avx, reg: k.reg, reg_lw: k.reg_lw, search: k.search }
+        var m2 = prepare(k2)
+        let acts2 = pkg_run(k2, var m2, c)
+        return finish(k2, adjust_kind(k2, c), m2, acts2)
+    finish(k, adjust_kind(k, c), m, acts)
+
+// ── Paragraphs for the comment toggle ───────────────────────────────
+
+// para_line is the line of the `count`th paragraph boundary, an empty line,
+// below the line `cy` or above it; the last or the first line when the buffer
+// ends first.
+pub fn para_line(lines: [Str], cy: Int, count: Int, forward: Bool) -> Int
+    vimmotion.motion_paragraph(view_of(lines), vimtext.pos_new(cy, 0), count, forward).line
+
+// para_object is the first and last line of the paragraph at line `cy`, with
+// the blank lines after it, or before it at the end of the buffer, when
+// `around` is set.
+pub fn para_object(lines: [Str], cy: Int, around: Bool) -> [Int]
+    let at = vimtext.pos_new(cy, 0)
+    let o = vimobject.obj_paragraph(view_of(lines), at, at, false, false, 1, around)
+    if o.ok
+        [o.sl, o.el]
+    else
+        [cy, cy]
+
+// ── Routing a character ─────────────────────────────────────────────
+
+// Where `feed` sends a character: to the package, or to code of novim's own
+// for what the package has no counterpart of.
+pub const ROUTE_PKG = 0
+// A key of the blockwise selection.
+pub const ROUTE_BLOCK = 1
+// `Ctrl-V` in Normal mode: start a blockwise selection.
+pub const ROUTE_ENTER_BLOCK = 2
+// `Ctrl-A`: add to the number at the cursor.
+pub const ROUTE_INCREMENT = 3
+// `Ctrl-X`: subtract from the number at the cursor.
+pub const ROUTE_DECREMENT = 4
+// `gi` with no earlier Insert: it types `i`.
+pub const ROUTE_GI_FALLBACK = 5
+
+// route says where a character goes, given novim's mode and pending code.
+pub fn route(mode: Int, pending: Int, c: Int) -> Int
+    if mode == 5
+        return ROUTE_BLOCK
+    if mode == 0 and pending == 1 and c == 'i'
+        return ROUTE_GI_FALLBACK
+    if mode == 0 and pending == 0
+        if c == 22
+            return ROUTE_ENTER_BLOCK
+        if c == 1
+            return ROUTE_INCREMENT
+        if c == 24
+            return ROUTE_DECREMENT
+    ROUTE_PKG
+
+// What the blockwise selection does with a character.
+pub const BLK_FILL = 0
+pub const BLK_DELETE = 1
+pub const BLK_YANK = 2
+pub const BLK_FILL_WAIT = 3
+pub const BLK_INSERT = 4
+pub const BLK_SHIFT_RIGHT = 5
+pub const BLK_SHIFT_LEFT = 6
+pub const BLK_IGNORE = 7
+pub const BLK_PKG = 8
+
+// block_route says what a character does in the blockwise selection.  The
+// package has no block, so novim acts on the rectangle for `d`, `x`, `y`, `r`,
+// `I`, `A`, `c`, `>` and `<`, and ignores the keys that would act on text;
+// every other key, the motions among them, is the package's.  `pending` is 60
+// while `r` waits for the character to fill with.
+pub fn block_route(pending: Int, c: Int) -> Int
+    if pending == 60
+        BLK_FILL
+    elif c == 'd' or c == 'x'
+        BLK_DELETE
+    elif c == 'y'
+        BLK_YANK
+    elif c == 'r'
+        BLK_FILL_WAIT
+    elif c == 'I' or c == 'A' or c == 'c'
+        BLK_INSERT
+    elif c == '>'
+        BLK_SHIFT_RIGHT
+    elif c == '<'
+        BLK_SHIFT_LEFT
+    elif c == 's' or c == '~' or c == 'u' or c == 'U' or c == 'J' or c == 'p' or c == 'i' or c == 'a'
+        BLK_IGNORE
+    else
+        BLK_PKG
+
+// ── Bytes of a multi-byte character ─────────────────────────────────
+
+// The character is complete: `cp` is its codepoint, or the byte itself for a
+// byte below 128.
+pub const U8_KEY = 0
+// More bytes are due: `u8` is the state to keep.
+pub const U8_WAIT = 1
+// The bytes make no character: the command waiting for one is given up.
+pub const U8_CANCEL = 2
+// A byte below 128 ended a half-typed character: the command waiting for it is
+// given up and the byte is a key of its own.
+pub const U8_ABORT_KEY = 3
+
+// U8Step is what one byte does to the bytes received so far.
+pub struct U8Step
+    kind: Int
+    u8:   Int
+    cp:   Int
+
+// u8_step folds a byte into the bytes of a character received so far.  `u8`
+// holds, from bit 24 up, the number of bytes still to come, and below them
+// the bits of the codepoint read so far.  A terminal sends a multi-byte
+// character one byte at a time.
+pub fn u8_step(u8: Int, b: Int) -> U8Step
+    if b < 128
+        if u8 != 0
+            return U8Step { kind: U8_ABORT_KEY, u8: 0, cp: b }
+        return U8Step { kind: U8_KEY, u8: 0, cp: b }
+    if b >= 192
+        let k = util.u8_lead_len(b)
+        if k == 1
+            return U8Step { kind: U8_CANCEL, u8: 0, cp: 0 }
+        let payload = if k == 2 then b & 31 elif k == 3 then b & 15 else b & 7
+        return U8Step { kind: U8_WAIT, u8: (k - 1) * 16777216 + payload, cp: 0 }
+    if u8 == 0
+        return U8Step { kind: U8_CANCEL, u8: 0, cp: 0 }
+    let rem = u8 / 16777216
+    let cp = (u8 % 16777216) * 64 + (b - 128)
+    if rem > 1
+        return U8Step { kind: U8_WAIT, u8: (rem - 1) * 16777216 + cp, cp: 0 }
+    U8Step { kind: U8_KEY, u8: 0, cp: cp }

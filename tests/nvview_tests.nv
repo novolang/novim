@@ -1,0 +1,464 @@
+// nvview_tests — the side of novim that talks to vim-motions-nv: the text the
+// package reads, the actions applied to novim's lines, the keys routed to the
+// package or to novim's own code, and the places where novim keeps its own
+// behaviour over the package's.
+//
+// A key is fed to `nvview.key` with the state a previous key left, so a string
+// of keys runs as it does in the editor.  The text is a `[Str]` and the cursor
+// a byte index, as novim keeps them.
+
+use std.test
+use std.list
+use std.str
+use vimmodal
+use vimtext
+use nvview
+
+fn start(lines: [Str]) -> KeyIn
+    KeyIn { lines: lines, cy: 0, cx: 0, m: vimmodal.modal_new(), mode: 0, avy: 0, avx: 0, reg: "", reg_lw: false, search: "" }
+
+fn carry(o: KeyOut) -> KeyIn
+    KeyIn { lines: o.lines, cy: o.cy, cx: o.cx, m: o.m, mode: o.mode, avy: o.avy, avx: o.avx, reg: o.reg, reg_lw: o.reg_lw, search: o.search }
+
+fn at(k: KeyIn, y: Int, x: Int) -> KeyIn
+    KeyIn { lines: k.lines, cy: y, cx: x, m: k.m, mode: k.mode, avy: k.avy, avx: k.avx, reg: k.reg, reg_lw: k.reg_lw, search: k.search }
+
+fn with_search(k: KeyIn, pat: Str) -> KeyIn
+    KeyIn { lines: k.lines, cy: k.cy, cx: k.cx, m: k.m, mode: k.mode, avy: k.avy, avx: k.avx, reg: k.reg, reg_lw: k.reg_lw, search: pat }
+
+fn with_reg(k: KeyIn, reg: Str, lw: Bool) -> KeyIn
+    KeyIn { lines: k.lines, cy: k.cy, cx: k.cx, m: k.m, mode: k.mode, avy: k.avy, avx: k.avx, reg: reg, reg_lw: lw, search: k.search }
+
+fn with_mode(k: KeyIn, mode: Int) -> KeyIn
+    KeyIn { lines: k.lines, cy: k.cy, cx: k.cx, m: k.m, mode: mode, avy: k.avy, avx: k.avx, reg: k.reg, reg_lw: k.reg_lw, search: k.search }
+
+// last is the answer to the last character of `keys`; an empty `keys` answers
+// the state unchanged, as one key that does nothing.
+fn last(k0: KeyIn, keys: [Int]) -> KeyOut
+    var k = k0
+    var o = nvview.key(k, 'x')
+    var first = true
+    for c in keys
+        o = nvview.key(k, c)
+        k = carry(o)
+        first = false
+    o
+
+fn keys_of(s: Str) -> [Int]
+    vimtext.decode_utf8(s)
+
+// run feeds the characters of a string of keys.
+fn run(lines: [Str], keys: Str) -> KeyOut
+    last(start(lines), keys_of(keys))
+
+fn run_from(k: KeyIn, keys: Str) -> KeyOut
+    last(k, keys_of(keys))
+
+fn assert_text(o: KeyOut, want: [Str])
+    test.assert_eq(o.lines, want)
+
+fn assert_at(o: KeyOut, y: Int, x: Int)
+    test.assert_eq(o.cy, y)
+    test.assert_eq(o.cx, x)
+
+@test
+fn test_the_view_reads_codepoints()
+    let v = nvview.view_of(["åb", "", "x€y"])
+    test.assert_eq(v.line_count(), 3)
+    test.assert_eq(v.line_len(0), 2)
+    test.assert_eq(v.line_len(1), 0)
+    test.assert_eq(v.line_len(2), 3)
+    test.assert_eq(v.char_at(0, 0), 229)
+    test.assert_eq(v.char_at(0, 1), 'b')
+    test.assert_eq(v.char_at(2, 1), 0x20AC)
+    test.assert_eq(v.top_line(), 0)
+    test.assert_eq(v.height(), 24)
+
+@test
+fn test_columns_move_between_bytes_and_codepoints()
+    test.assert_eq(nvview.cp_col("åb€c", 0), 0)
+    test.assert_eq(nvview.cp_col("åb€c", 3), 2)
+    test.assert_eq(nvview.cp_col("åb€c", 6), 3)
+    test.assert_eq(nvview.byte_col("åb€c", 2), 3)
+    test.assert_eq(nvview.byte_col("åb€c", 9), 7)
+
+@test
+fn test_one_indent_level_is_a_tab_and_blank_lines_stay_blank()
+    test.assert_eq(nvview.indent_one("x"), "\tx")
+    test.assert_eq(nvview.indent_one(""), "")
+    test.assert_eq(nvview.dedent_one("\tx"), "x")
+    test.assert_eq(nvview.dedent_one("    x"), "x")
+    test.assert_eq(nvview.dedent_one("            x"), "    x")
+    test.assert_eq(nvview.dedent_one("x"), "x")
+    test.assert_eq(nvview.dedent_one(""), "")
+
+@test
+fn test_case_maps_ascii_and_latin_one_only()
+    test.assert_eq(nvview.case_cp('a', 0), 'A')
+    test.assert_eq(nvview.case_cp('A', 0), 'a')
+    test.assert_eq(nvview.case_cp('a', 1), 'a')
+    test.assert_eq(nvview.case_cp('A', 1), 'a')
+    test.assert_eq(nvview.case_cp('a', 2), 'A')
+    test.assert_eq(nvview.case_cp('A', 2), 'A')
+    test.assert_eq(nvview.case_cp(229, 2), 197)
+    test.assert_eq(nvview.case_cp(197, 1), 229)
+    test.assert_eq(nvview.case_cp(215, 0), 215)
+    test.assert_eq(nvview.case_cp(247, 0), 247)
+    test.assert_eq(nvview.case_cp(0x20AC, 2), 0x20AC)
+
+@test
+fn test_modes_map_both_ways()
+    for m in 0..6
+        test.assert_eq(nvview.nv_mode(nvview.pkg_mode(m)), m)
+    test.assert_eq(nvview.pkg_mode(1), vimmodal.MODE_INSERT)
+    test.assert_eq(nvview.pkg_mode(4), vimmodal.MODE_REPLACE)
+    test.assert_eq(nvview.pkg_mode(5), vimmodal.MODE_VISUAL_BLOCK)
+    test.assert_eq(nvview.nv_mode(vimmodal.MODE_CMDLINE), 0)
+
+@test
+fn test_idle_modal_forgets_the_command_being_typed()
+    let o = run(["abc"], "2d")
+    test.assert(o.m.op != vimmodal.OP_NONE)
+    let idle = nvview.idle_modal(o.m)
+    test.assert_eq(idle.op, vimmodal.OP_NONE)
+    test.assert_eq(idle.count, 0)
+
+// ── The actions ─────────────────────────────────────────────────────
+
+@test
+fn test_delete_removes_lines_and_leaves_one_when_all_go()
+    assert_text(run(["a", "b", "c"], "jdd"), ["a", "c"])
+    assert_text(run(["a", "b"], "2dd"), [""])
+    assert_text(run(["a", "b", "c"], "dj"), ["c"])
+
+@test
+fn test_delete_joins_the_ends_of_a_span_over_lines()
+    assert_text(run(["abc", "def"], "lvjd"), ["af"])
+    assert_text(run(["åbc", "dëf"], "lvjd"), ["åf"])
+
+@test
+fn test_insert_breaks_a_line_at_the_cursor()
+    let o = run(["abcd"], "llia\rx\e")
+    assert_text(o, ["aba", "xcd"])
+    assert_text(run(["ab"], "A€z\e"), ["ab€z"])
+
+@test
+fn test_replace_writes_over_characters()
+    assert_text(run(["abcd"], "2rx"), ["xxcd"])
+    assert_text(run(["abc"], "Rxy\e"), ["xyc"])
+    assert_text(run(["abc"], "3rx"), ["xxx"])
+    assert_text(run(["ab"], "3rx"), ["ab"])
+    assert_text(run(["åbc"], "rö"), ["öbc"])
+
+@test
+fn test_join_follows_the_rules_of_vim()
+    assert_text(run(["a", "  b", ")c"], "J"), ["a b", ")c"])
+    assert_text(run(["a", "b", "c"], "3J"), ["a b c"])
+    assert_text(run(["a ", "b"], "J"), ["a b"])
+    assert_text(run(["a", ")"], "J"), ["a)"])
+    assert_text(run(["a", "  b"], "gJ"), ["a  b"])
+    assert_text(run(["", "b"], "J"), ["b"])
+    assert_text(run(["a"], "J"), ["a"])
+
+@test
+fn test_shift_adds_and_removes_a_tab()
+    assert_text(run(["a", "b"], ">j"), ["\ta", "\tb"])
+    assert_text(run(["\ta", "\t\tb"], "<j"), ["a", "\tb"])
+    assert_text(run(["a", ""], ">>"), ["\ta", ""])
+    assert_text(run(["a", "b"], "2>>"), ["\ta", "\tb"])
+
+@test
+fn test_case_changes_use_the_latin_one_map()
+    assert_text(run(["aBå"], "g~\$"), ["AbÅ"])
+    assert_text(run(["aBå"], "gU\$"), ["ABÅ"])
+    assert_text(run(["aBÅ"], "gu\$"), ["abå"])
+    assert_text(run(["ab", "cd"], "gUj"), ["AB", "CD"])
+    assert_text(run(["aB", "cd"], "~"), ["AB", "cd"])
+    assert_text(run(["abc", "def"], "lvj~"), ["aBC", "DEf"])
+
+@test
+fn test_put_inserts_lines_or_characters()
+    assert_text(run(["a", "b"], "yyjp"), ["a", "b", "a"])
+    assert_text(run(["a", "b"], "yyjP"), ["a", "a", "b"])
+    assert_text(run(["abc"], "xp"), ["bac"])
+    assert_text(run(["abc"], "xP"), ["abc"])
+    assert_text(run(["ab", "cd"], "lvjy\$p"), ["abb", "cd", "cd"])
+    assert_text(run(["a"], "p"), ["a"])
+
+@test
+fn test_a_put_of_several_lines_breaks_the_line_at_every_newline()
+    let k = with_reg(start(["ab"]), "X\nY\nZ", false)
+    assert_text(run_from(k, "p"), ["aX", "Y", "Zb"])
+
+@test
+fn test_backspace_is_read_as_delete_in_either_form()
+    let k = with_mode(at(start(["abc"]), 0, 2), 1)
+    assert_text(run_from(k, "\b"), ["ac"])
+    assert_text(run_from(k, "\x7f"), ["ac"])
+
+@test
+fn test_an_anchor_beyond_the_text_is_taken_as_an_empty_line()
+    let k = with_mode(start(["abc"]), 2)
+    let stale = KeyIn { lines: k.lines, cy: 0, cx: 1, m: k.m, mode: 2, avy: 7, avx: 3, reg: "", reg_lw: false, search: "" }
+    test.assert_eq(run_from(stale, "l").mode, 2)
+
+@test
+fn test_a_cursor_before_or_after_the_text_is_brought_inside()
+    let k = start(["abc", "de"])
+    assert_at(run_from(at(k, 0 - 3, 0 - 1), "l"), 0, 1)
+    assert_at(run_from(at(k, 9, 9), "h"), 1, 1)
+
+@test
+fn test_put_takes_the_register_novim_carries()
+    let k = with_reg(start(["ab"]), "XY", false)
+    assert_text(run_from(k, "p"), ["aXYb"])
+    let kl = with_reg(start(["ab"]), "XY", true)
+    assert_text(run_from(kl, "p"), ["ab", "XY"])
+    let o = run_from(k, "x")
+    test.assert_eq(o.reg, "a")
+    test.assert(not o.reg_lw)
+    let o2 = run(["a", "b"], "dd")
+    test.assert_eq(o2.reg, "a")
+    test.assert(o2.reg_lw)
+    let o3 = run_from(with_reg(start(["ab"]), "", false), "p")
+    assert_text(o3, ["ab"])
+
+// ── Searching ───────────────────────────────────────────────────────
+
+@test
+fn test_n_and_N_search_the_last_pattern_with_wrapping()
+    let k = with_search(start(["foo", "bar", "foo", "baz"]), "foo")
+    assert_at(run_from(k, "n"), 2, 0)
+    assert_at(run_from(k, "nn"), 0, 0)
+    assert_at(run_from(k, "N"), 2, 0)
+    assert_at(run_from(k, "2n"), 0, 0)
+    assert_at(run_from(at(k, 2, 0), "N"), 0, 0)
+
+@test
+fn test_a_search_that_finds_nothing_leaves_the_cursor()
+    let k = with_search(start(["foo", "bar"]), "zzz")
+    assert_at(run_from(k, "n"), 0, 0)
+    assert_at(run_from(k, "N"), 0, 0)
+    assert_text(run_from(k, "dn"), ["foo", "bar"])
+
+@test
+fn test_star_and_hash_search_the_word_under_the_cursor()
+    let k = start(["foo bar", "x foo", "bar"])
+    let o = run_from(k, "*")
+    assert_at(o, 1, 2)
+    test.assert_eq(o.search, "foo")
+    assert_at(run_from(k, "#"), 1, 2)
+    assert_at(run_from(at(k, 0, 4), "*"), 2, 0)
+    assert_text(run_from(k, "d*"), ["foo", "bar"])
+
+@test
+fn test_an_operator_works_up_to_the_match()
+    let k = with_search(start(["abc foo"]), "foo")
+    assert_text(run_from(k, "dn"), ["foo"])
+
+@test
+fn test_a_search_uses_columns_of_characters_not_bytes()
+    let k = start(["ååb", "xb"])
+    assert_at(run_from(k, "*"), 0, 0)
+    let k2 = with_search(k, "b")
+    assert_at(run_from(k2, "n"), 0, 4)
+
+@test
+fn test_the_command_line_is_left_at_once()
+    let o = run(["abc"], "v/")
+    test.assert_eq(o.mode, 2)
+    let o2 = run(["abc"], "/")
+    test.assert_eq(o2.mode, 0)
+
+// ── The state the driver reads ──────────────────────────────────────
+
+@test
+fn test_count_and_pending_follow_the_command_being_typed()
+    let o = run(["abc"], "")
+    test.assert_eq(o.count, 0)
+    test.assert_eq(o.pending, 0)
+    test.assert_eq(run(["abc"], "2").count, 2)
+    test.assert_eq(run(["abc"], "d").pending, 2)
+    test.assert_eq(run(["abc"], "d3").count, 3)
+    test.assert_eq(run(["abc"], "g").pending, 1)
+    test.assert_eq(run(["abc"], "f").pending, 2)
+    test.assert_eq(run(["abc"], "dw").pending, 0)
+
+@test
+fn test_the_visual_anchor_is_kept_in_bytes()
+    let o = run(["åbc", "def"], "lvj")
+    test.assert_eq(o.mode, 2)
+    test.assert_eq(o.avy, 0)
+    test.assert_eq(o.avx, 2)
+    let o2 = run(["abc", "def"], "Vj")
+    test.assert_eq(o2.mode, 3)
+    test.assert_eq(o2.avy, 0)
+    let o3 = run(["abc", "def"], "lvjo")
+    test.assert_eq(o3.avy, 1)
+    test.assert_eq(o3.avx, 1)
+    let o4 = run(["abc"], "vl\e")
+    test.assert_eq(o4.mode, 0)
+
+@test
+fn test_novim_sets_the_mode_and_the_anchor_the_package_starts_from()
+    let k = with_mode(at(start(["åbc", "def"]), 1, 2), 2)
+    let k2 = KeyIn { lines: k.lines, cy: 1, cx: 2, m: k.m, mode: 2, avy: 0, avx: 2, reg: "", reg_lw: false, search: "" }
+    let o = run_from(k2, "d")
+    assert_text(o, ["å"])
+    let ki = with_mode(start(["abc"]), 1)
+    assert_text(run_from(ki, "X\e"), ["Xabc"])
+    let kr = with_mode(start(["abc"]), 4)
+    assert_text(run_from(kr, "XY\e"), ["XYc"])
+
+// ── Where novim keeps its own behaviour ─────────────────────────────
+
+@test
+fn test_enter_and_open_line_keep_the_indent()
+    assert_text(run(["\tfoo"], "A\rbar\e"), ["\tfoo", "\tbar"])
+    assert_text(run(["\tfoo"], "obar\e"), ["\tfoo", "\tbar"])
+    assert_text(run(["\tfoo"], "Obar\e"), ["\tbar", "\tfoo"])
+    assert_text(run(["    foo"], "obar\e"), ["    foo", "    bar"])
+    assert_text(run(["foo"], "obar\e"), ["foo", "bar"])
+    assert_text(run(["foo"], "Rx\rY\e"), ["x", "Yo"])
+    assert_at(run(["\tfoo"], "obar\e"), 1, 3)
+    assert_at(run(["\tfoo"], "A\r"), 1, 1)
+
+@test
+fn test_G_and_gg_keep_the_character_column()
+    let k = start(["abc", "  def", "ghijk"])
+    assert_at(run_from(at(k, 0, 1), "G"), 2, 1)
+    assert_at(run_from(at(k, 2, 4), "gg"), 0, 2)
+    assert_at(run_from(at(k, 0, 2), "2G"), 1, 2)
+    assert_at(run_from(at(k, 0, 0), "2G"), 1, 0)
+    assert_at(run_from(at(start(["", "x"]), 1, 0), "gg"), 0, 0)
+    assert_at(run_from(at(start(["ååååx", "ab"]), 0, 8), "Gk"), 0, 2)
+
+@test
+fn test_a_counted_join_leaves_the_cursor_at_the_first_join()
+    let o = run(["ab", "cd", "ef"], "3J")
+    assert_text(o, ["ab cd ef"])
+    assert_at(o, 0, 2)
+    let o2 = run(["ab", "cd", "ef"], "3gJ")
+    assert_text(o2, ["abcdef"])
+    assert_at(o2, 0, 2)
+    assert_at(run(["ab", "cd"], "J"), 0, 2)
+    assert_at(run(["ab", "cd", "ef"], "2J"), 0, 2)
+
+@test
+fn test_the_wanted_column_is_the_cursors_own()
+    let k = start(["abcdef", "x", "abcdef"])
+    assert_at(run_from(at(k, 0, 4), "jj"), 2, 0)
+    assert_at(run_from(at(k, 0, 4), "\$jj"), 2, 0)
+
+@test
+fn test_a_key_that_cannot_continue_a_command_starts_a_new_one()
+    assert_text(run(["abc"], ">x"), ["bc"])
+    assert_text(run(["abc"], "dx"), ["bc"])
+    assert_text(run(["abc", "def"], "gxj"), ["bc", "def"])
+    assert_text(run(["abc"], "gp"), ["abc"])
+    assert_text(run(["abcdef"], "3dx"), ["def"])
+    assert_text(run(["abcdef"], "d3x"), ["def"])
+    assert_text(run(["abc"], "dz"), ["abc"])
+    assert_text(run(["abc"], "dfz"), ["abc"])
+
+@test
+fn test_a_count_before_v_and_V_selects_that_much()
+    assert_text(run(["åbcd"], "3vd"), ["d"])
+    assert_text(run(["a", "b", "c", "d"], "3Vd"), ["d"])
+    assert_text(run(["abc"], "vd"), ["bc"])
+
+@test
+fn test_a_cursor_past_the_end_steps_back_onto_the_last_character()
+    let k = at(start(["abc"]), 0, 3)
+    assert_at(run_from(k, "h"), 0, 2)
+    assert_at(run_from(at(start(["åbc"]), 0, 4), "h"), 0, 3)
+
+// ── Paragraphs for the comment toggle ───────────────────────────────
+
+@test
+fn test_para_line_finds_the_next_blank_line()
+    let ls = ["a", "b", "", "c", "", "d"]
+    test.assert_eq(nvview.para_line(ls, 0, 1, true), 2)
+    test.assert_eq(nvview.para_line(ls, 0, 2, true), 4)
+    test.assert_eq(nvview.para_line(ls, 5, 1, false), 4)
+    test.assert_eq(nvview.para_line(ls, 3, 1, false), 2)
+
+@test
+fn test_para_object_is_the_paragraph_under_the_cursor()
+    let ls = ["a", "b", "", "c", "", "d"]
+    test.assert_eq(nvview.para_object(ls, 0, false), [0, 1])
+    test.assert_eq(nvview.para_object(ls, 0, true), [0, 2])
+    test.assert_eq(nvview.para_object(["a", "", ""], 2, true), [2, 2])
+
+// ── Routing ─────────────────────────────────────────────────────────
+
+@test
+fn test_route_sends_novims_own_keys_aside()
+    test.assert_eq(nvview.route(5, 0, 'j'), nvview.ROUTE_BLOCK)
+    test.assert_eq(nvview.route(0, 1, 'i'), nvview.ROUTE_GI_FALLBACK)
+    test.assert_eq(nvview.route(0, 1, 'g'), nvview.ROUTE_PKG)
+    test.assert_eq(nvview.route(0, 0, 22), nvview.ROUTE_ENTER_BLOCK)
+    test.assert_eq(nvview.route(0, 0, 1), nvview.ROUTE_INCREMENT)
+    test.assert_eq(nvview.route(0, 0, 24), nvview.ROUTE_DECREMENT)
+    test.assert_eq(nvview.route(0, 0, 'x'), nvview.ROUTE_PKG)
+    test.assert_eq(nvview.route(1, 0, 1), nvview.ROUTE_PKG)
+    test.assert_eq(nvview.route(0, 2, 22), nvview.ROUTE_PKG)
+
+@test
+fn test_block_route_names_the_keys_that_act_on_the_rectangle()
+    test.assert_eq(nvview.block_route(60, 'x'), nvview.BLK_FILL)
+    test.assert_eq(nvview.block_route(0, 'd'), nvview.BLK_DELETE)
+    test.assert_eq(nvview.block_route(0, 'x'), nvview.BLK_DELETE)
+    test.assert_eq(nvview.block_route(0, 'y'), nvview.BLK_YANK)
+    test.assert_eq(nvview.block_route(0, 'r'), nvview.BLK_FILL_WAIT)
+    test.assert_eq(nvview.block_route(0, 'I'), nvview.BLK_INSERT)
+    test.assert_eq(nvview.block_route(0, 'A'), nvview.BLK_INSERT)
+    test.assert_eq(nvview.block_route(0, 'c'), nvview.BLK_INSERT)
+    test.assert_eq(nvview.block_route(0, '>'), nvview.BLK_SHIFT_RIGHT)
+    test.assert_eq(nvview.block_route(0, '<'), nvview.BLK_SHIFT_LEFT)
+    for c in ['s', '~', 'u', 'U', 'J', 'p', 'i', 'a']
+        test.assert_eq(nvview.block_route(0, c), nvview.BLK_IGNORE)
+    test.assert_eq(nvview.block_route(0, 'j'), nvview.BLK_PKG)
+
+@test
+fn test_a_multi_byte_character_is_gathered_byte_by_byte()
+    let a = nvview.u8_step(0, 'a')
+    test.assert_eq(a.kind, nvview.U8_KEY)
+    test.assert_eq(a.cp, 'a')
+    // å is C3 A5.
+    let lead = nvview.u8_step(0, 0xC3)
+    test.assert_eq(lead.kind, nvview.U8_WAIT)
+    let tail = nvview.u8_step(lead.u8, 0xA5)
+    test.assert_eq(tail.kind, nvview.U8_KEY)
+    test.assert_eq(tail.cp, 229)
+    // € is E2 82 AC.
+    let l3 = nvview.u8_step(0, 0xE2)
+    let m3 = nvview.u8_step(l3.u8, 0x82)
+    test.assert_eq(m3.kind, nvview.U8_WAIT)
+    let e3 = nvview.u8_step(m3.u8, 0xAC)
+    test.assert_eq(e3.kind, nvview.U8_KEY)
+    test.assert_eq(e3.cp, 0x20AC)
+    // 😀 is F0 9F 98 80.
+    var s = nvview.u8_step(0, 0xF0)
+    for b in [0x9F, 0x98]
+        s = nvview.u8_step(s.u8, b)
+        test.assert_eq(s.kind, nvview.U8_WAIT)
+    test.assert_eq(nvview.u8_step(s.u8, 0x80).cp, 0x1F600)
+
+@test
+fn test_bytes_that_make_no_character_give_up_the_command()
+    test.assert_eq(nvview.u8_step(0, 0xA5).kind, nvview.U8_CANCEL)
+    test.assert_eq(nvview.u8_step(0, 0xF8).kind, nvview.U8_CANCEL)
+    let lead = nvview.u8_step(0, 0xC3)
+    let broken = nvview.u8_step(lead.u8, 'x')
+    test.assert_eq(broken.kind, nvview.U8_ABORT_KEY)
+    test.assert_eq(broken.cp, 'x')
+
+@test
+fn test_apply_action_leaves_the_vector_it_was_given()
+    let ls = ["abc", "def"]
+    test.assert_eq(nvview.apply_action(ls, vimmodal.Bell), ["abc", "def"])
+    test.assert_eq(nvview.apply_action(ls, Delete(span: Span.chars(0, 1, 0, 2))), ["ac", "def"])
+    test.assert_eq(nvview.apply_action(ls, Delete(span: Span.chars(0, 1, 1, 1))), ["aef"])
+    test.assert_eq(nvview.apply_action(ls, Insert(line: 1, col: 3, text: "!\n?")), ["abc", "def!", "?"])
+    test.assert_eq(ls, ["abc", "def"])
