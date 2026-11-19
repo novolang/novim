@@ -403,19 +403,32 @@ fn inside(k: KeyIn) -> KeyIn
             mode: k.mode, avy: avy, avx: clamp_into(k.avx, str.len(k.lines[avy])),
             reg: k.reg, reg_lw: k.reg_lw, search: k.search }
 
-// idle_modal is the package state with the command being typed forgotten.
+// idle_modal is the package state with the command being typed forgotten.  It
+// is a copy: the state it is given is left as it was, which the driver's
+// `ist_idle` and `ist_set_search` want, since they build a new input state
+// beside the old one.
 pub fn idle_modal(m0: Modal) -> Modal
     var m = vimmodal.modal_clone(m0)
     m.reset_pending()
     m
 
-// prepare is the package state to step from: the cursor, the mode, the Visual
-// anchor and the unnamed register are novim's, and the rest is the package's.
-// The wanted column is the cursor's: novim does not remember the column a
-// vertical move started from, so `j` across a short line keeps the short
-// line's column.
-fn prepare(k: KeyIn) -> Modal
-    var m = vimmodal.modal_clone(k.m)
+// Pre is the part of the package state a key reads again after the package has
+// stepped, kept before the step because a step changes the state in place.
+struct Pre
+    op:       Int
+    prefix:   Int
+    count:    Int
+    op_count: Int
+
+fn pre_of(m: Modal) -> Pre
+    Pre { op: m.op, prefix: m.prefix, count: m.count, op_count: m.op_count }
+
+// prepare_into sets the package state `m` up to step from: the cursor, the
+// mode, the Visual anchor and the unnamed register are novim's, and the rest
+// is the package's.  The wanted column is the cursor's: novim does not
+// remember the column a vertical move started from, so `j` across a short
+// line keeps the short line's column.
+fn prepare_into(k: KeyIn, var m: Modal)
     let col = cp_col(k.lines[k.cy], k.cx)
     m.line = k.cy
     m.col = col
@@ -443,7 +456,6 @@ fn prepare(k: KeyIn) -> Modal
         m.unnamed = if str.len(k.reg) > 0 then SLOT_YANK else SLOT_NONE
     m.search_forward = true
     m.want = col
-    m
 
 // SearchHit is where a search ended, as a line and a byte index.
 struct SearchHit
@@ -503,7 +515,9 @@ struct Run
 // changes the text makes a new vector, because a snapshot for undo holds the
 // one the lines came from; a step that changes none leaves the vector as it is.  A search is answered at once, and the
 // actions the answer asks for are carried out in turn.  A command line is never
-// opened: novim reads its own, so the package leaves it at once.
+// opened: novim reads its own, so the package leaves it at once.  The state
+// `m0` is the one the step is made on, and the answers to a search and to a
+// command line change it in place (`_mut`): nothing here needs it as it was.
 fn run_actions(lines0: [Str], m0: Modal, acts: [Action], search0: Str) -> Run
     var lines: [Str] = []
     var owned = false
@@ -518,18 +532,18 @@ fn run_actions(lines0: [Str], m0: Modal, acts: [Action], search0: Str) -> Run
                     search = pattern
                 let view = view_of(src)
                 let hit = search_count(src, m.line, byte_col(src[m.line], m.col), pat, forward, count)
-                let ans = if hit.found
-                    vimstep.search_found(m, view, hit.line, cp_col(src[hit.line], hit.x))
+                let more = if hit.found
+                    vimstep.search_found_mut(var m, view, hit.line, cp_col(src[hit.line], hit.x))
                 else
-                    vimstep.search_failed(m, view)
-                let r = run_actions(src, ans.modal, ans.actions, search)
+                    vimstep.search_failed_mut(var m, view)
+                let r = run_actions(src, m, more, search)
                 if r.changed
                     lines = list.clone(r.lines)
                     owned = true
                 m = r.m
                 search = r.search
             EnterCommandLine(kind, initial)        =>
-                m = vimstep.cmdline_abort(m).modal
+                let _ = vimstep.cmdline_abort_mut(var m)
             _                                      =>
                 if is_text_action(a)
                     let src = if owned then lines else lines0
@@ -554,31 +568,33 @@ fn leading_ws(line: Str) -> Str
         i = i + 1
     str.slice(line, 0, i)
 
-// adjust_kind says which adjustment follows the key `c` typed in the state `k`.
+// adjust_kind says which adjustment follows the key `c` typed in the mode
+// `mode` with the command `pre` waiting.
 //
 //   Enter in Insert or Replace mode, `o` and `O` give the new line the indent of
 //   the line it came from (autoindent; the package has none).
 //   `G` and `gg` keep the character column of the cursor (novim does not move
 //   to the first non-blank character, as `startofline` does).
 //   `3J` and `3gJ` leave the cursor at the first join, not the last.
-fn adjust_kind(k: KeyIn, c: Int) -> Int
-    let plain = k.m.op == OP_NONE and k.m.prefix == 0
-    if (k.mode == 1 or k.mode == 4) and (c == 13 or c == 10)
+fn adjust_kind(mode: Int, pre: Pre, c: Int) -> Int
+    let plain = pre.op == OP_NONE and pre.prefix == 0
+    if (mode == 1 or mode == 4) and (c == 13 or c == 10)
         return ADJ_ENTER
-    if k.mode == 0 and plain and c == 'o'
+    if mode == 0 and plain and c == 'o'
         return ADJ_OPEN_BELOW
-    if k.mode == 0 and plain and c == 'O'
+    if mode == 0 and plain and c == 'O'
         return ADJ_OPEN_ABOVE
-    if (k.mode == 0 or k.mode == 2 or k.mode == 3) and plain and c == 'G'
+    if (mode == 0 or mode == 2 or mode == 3) and plain and c == 'G'
         return ADJ_KEEP_COLUMN
-    if (k.mode == 0 or k.mode == 2 or k.mode == 3) and k.m.op == OP_NONE and k.m.prefix == 'g' and c == 'g'
+    if (mode == 0 or mode == 2 or mode == 3) and pre.op == OP_NONE and pre.prefix == 'g' and c == 'g'
         return ADJ_KEEP_COLUMN
-    if k.mode == 0 and k.m.count >= 3 and ((plain and c == 'J') or (k.m.op == OP_NONE and k.m.prefix == 'g' and c == 'J'))
+    if mode == 0 and pre.count >= 3 and ((plain and c == 'J') or (pre.op == OP_NONE and pre.prefix == 'g' and c == 'J'))
         return ADJ_JOIN_FIRST
     ADJ_NONE
 
 // adjust puts novim's behaviour over the package's after a step.  `lines` is
-// the text after the actions, `m` the state, and `k` the state before the key.
+// the text after the actions, `m` the state, and `k` the buffer and cursor
+// before the key.
 // The text is copied only where an indent is written.
 fn adjust(kind: Int, k: KeyIn, lines: [Str], m0: Modal) -> Run
     var m = m0
@@ -608,30 +624,13 @@ fn adjust(kind: Int, k: KeyIn, lines: [Str], m0: Modal) -> Run
         m.want = m.col
     Run { lines: lines, changed: false, m: m, search: "" }
 
-// settle_in brings the cursor inside the text the way the mode keeps it, and
-// finds the first non-blank character when a command asked for it.  It is what
-// `vimstep.settle` does, on the state in hand and not on a copy of it.
-fn settle_in(var m: Modal, view: EdView)
-    if m.mode == MODE_INSERT or m.mode == MODE_REPLACE or m.mode == MODE_VISUAL
-        let p = view.clamp_insert(vimtext.pos_new(m.line, m.col))
-        m.line = p.line
-        m.col = p.col
-    else
-        let p = view.clamp_normal(vimtext.pos_new(m.line, m.col))
-        m.line = p.line
-        m.col = p.col
-        if m.nonblank
-            m.col = view.first_nonblank(m.line)
-            m.want = m.col
-    m.nonblank = false
-
 // finish builds the state a key left from the package state and its actions.
 fn finish(k: KeyIn, kind: Int, m0: Modal, acts: [Action]) -> KeyOut
     let r0 = run_actions(k.lines, m0, acts, k.search)
     let r1 = adjust(kind, k, r0.lines, r0.m)
     let lines = if r1.changed then r1.lines else r0.lines
     var m = r1.m
-    settle_in(var m, view_of(lines))
+    vimstep.settle_mut(var m, view_of(lines))
     let cy = if m.line < list.len(lines) then m.line else list.len(lines) - 1
     let cx = byte_col(lines[cy], m.col)
     let vis = vimmodal.is_visual(m.mode)
@@ -662,53 +661,91 @@ fn has_bell(acts: [Action]) -> Bool
 fn is_plain_command(c: Int) -> Bool
     c == 'x' or c == 'X' or c == 'D' or c == 'C' or c == 'S' or c == 's' or c == 'p' or c == 'P' or c == 'J' or c == '~' or c == 'A' or c == 'I' or c == 'o' or c == 'O' or c == 'R' or c == 'Y'
 
-// pkg_run types one key into the package state `m`, which `prepare` made, and
-// answers the actions it asks for.  The cursor is settled first, as
-// `vimstep.step` does, except for a Normal-mode cursor that stands after the
-// last character of its line, as `Ctrl-O` in Insert mode leaves it, so that `h`
-// steps back onto the last character.  A count before `v` or `V` selects that
-// many characters or lines at once.
-fn pkg_run(k: KeyIn, var m: Modal, c: Int) -> [Action]
-    let view = view_of(k.lines)
-    let line = k.lines[k.cy]
-    let plain = k.m.op == OP_NONE and k.m.prefix == 0
-    if k.mode == 0 and plain and k.m.count > 1 and (c == 'v' or c == 'V')
-        settle_in(var m, view)
-        vimnormal.handle_key(var m, view, c)
-        m.count = k.m.count - 1
-        settle_in(var m, view)
-        vimnormal.handle_key(var m, view, if c == 'v' then 'l' else 'j')
-    else
-        if not (k.mode == 0 and k.cx >= str.len(line) and str.len(line) > 0)
-            settle_in(var m, view)
-        vimnormal.handle_key(var m, view, nv_code(c))
+// take_out moves the actions a step left out of the state, so the next step
+// starts with none.
+fn take_out(var m: Modal) -> [Action]
     let acts = m.out
     m.out = []
     acts
 
+// pkg_run types one key into the package state `m`, which `prepare_into` made,
+// and answers the actions it asks for.  `pre` is the command that waited before
+// the key.  The cursor is settled first, as `vimstep.step_code_mut` does, except
+// for a Normal-mode cursor that stands after the last character of its line, as
+// `Ctrl-O` in Insert mode leaves it, so that `h` steps back onto the last
+// character.  A count before `v` or `V` selects that many characters or lines
+// at once.
+//
+// `Modal.key_line` and `key_col` hold the cursor the key was typed at, which
+// the package keeps for a host that redoes a change from the `Undo` action.
+// novim does not: it undoes and redoes from whole-buffer snapshots that hold
+// the cursor of their own, and `u` and `Ctrl-R` never reach the package.
+fn pkg_run(k: KeyIn, pre: Pre, var m: Modal, c: Int) -> [Action]
+    let view = view_of(k.lines)
+    let line = k.lines[k.cy]
+    let plain = pre.op == OP_NONE and pre.prefix == 0
+    if k.mode == 0 and plain and pre.count > 1 and (c == 'v' or c == 'V')
+        vimstep.settle_mut(var m, view)
+        vimnormal.handle_key(var m, view, c)
+        m.count = pre.count - 1
+        vimstep.settle_mut(var m, view)
+        vimnormal.handle_key(var m, view, if c == 'v' then 'l' else 'j')
+        return take_out(var m)
+    if k.mode == 0 and k.cx >= str.len(line) and str.len(line) > 0
+        vimnormal.handle_key(var m, view, nv_code(c))
+        return take_out(var m)
+    vimstep.step_code_mut(var m, view, nv_code(c))
+
+// may_retry says whether a key can be refused and typed again: a plain command
+// after an operator, as in `>x`, or any key after `g`.
+fn may_retry(mode: Int, pre: Pre, c: Int) -> Bool
+    mode == 0 and ((pre.op != OP_NONE and pre.prefix == 0 and is_plain_command(c)) or (pre.op == OP_NONE and pre.prefix == 'g'))
+
 // key feeds one character to the package, as novim's state stands, and answers
-// the state after it.
+// the state after it.  The state in `k0.m` is left as it was.
 //
 // novim reads a key that cannot continue a command as the start of a new one:
 // a plain command after an operator, as in `>x`, or any key after `g` that
 // names no command, is typed again with the command forgotten and its count
 // kept.  The package refuses such a key and drops the command.
 //
-// A key copies the package state once (`prepare`) and the lines only when it
-// changes the text.
+// A key copies the package state once (`prepare_into`) and the lines only when
+// it changes the text.  See `key_mut` for the key that copies neither state.
 pub fn key(k0: KeyIn, c: Int) -> KeyOut
     let k = inside(k0)
-    var m = prepare(k)
-    let acts = pkg_run(k, var m, c)
-    let again = k.mode == 0 and has_bell(acts) and ((k.m.op != OP_NONE and k.m.prefix == 0 and is_plain_command(c)) or (k.m.op == OP_NONE and k.m.prefix == 'g'))
+    let pre = pre_of(k.m)
+    var m = vimmodal.modal_clone(k.m)
+    prepare_into(k, var m)
+    let acts = pkg_run(k, pre, var m, c)
+    let again = may_retry(k.mode, pre, c) and has_bell(acts)
     if again
         var idle = idle_modal(k.m)
-        idle.count = if k.m.op_count > 0 then k.m.op_count else k.m.count
+        idle.count = if pre.op_count > 0 then pre.op_count else pre.count
         let k2 = KeyIn { lines: k.lines, cy: k.cy, cx: k.cx, m: idle, mode: k.mode, avy: k.avy, avx: k.avx, reg: k.reg, reg_lw: k.reg_lw, search: k.search }
-        var m2 = prepare(k2)
-        let acts2 = pkg_run(k2, var m2, c)
-        return finish(k2, adjust_kind(k2, c), m2, acts2)
-    finish(k, adjust_kind(k, c), m, acts)
+        let pre2 = pre_of(idle)
+        prepare_into(k2, var idle)
+        let acts2 = pkg_run(k2, pre2, var idle, c)
+        return finish(k2, adjust_kind(k2.mode, pre2, c), idle, acts2)
+    finish(k, adjust_kind(k.mode, pre, c), m, acts)
+
+// key_mut is `key` for a caller that has no use for the state it gave: the
+// package state of `k0.m` is changed in place and `KeyOut.m` is that state, so
+// a key costs no copy of the registers, the marks and the dot record.  Keep a
+// `vimmodal.modal_clone` of it first where the state before the key is wanted.
+//
+// A key that may be refused and typed again (see `may_retry`) is the exception:
+// it needs the state as it was before the key to type it again from, so it
+// takes the copying path of `key` and leaves `k0.m` as it was.  That is a key
+// after an operator or after `g`, one in a command and not the usual key.
+pub fn key_mut(k0: KeyIn, c: Int) -> KeyOut
+    let k = inside(k0)
+    let pre = pre_of(k.m)
+    if may_retry(k.mode, pre, c)
+        return key(k0, c)
+    var m = k.m
+    prepare_into(k, var m)
+    let acts = pkg_run(k, pre, var m, c)
+    finish(k, adjust_kind(k.mode, pre, c), m, acts)
 
 // ── Paragraphs for the comment toggle ───────────────────────────────
 

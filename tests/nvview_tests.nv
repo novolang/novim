@@ -361,6 +361,49 @@ fn test_a_key_that_cannot_continue_a_command_starts_a_new_one()
     assert_text(run(["abc"], "dz"), ["abc"])
     assert_text(run(["abc"], "dfz"), ["abc"])
 
+// feed_mut feeds the characters of a string of keys with `key_mut`, each key to
+// the state the one before it left.
+fn feed_mut(k0: KeyIn, keys: Str) -> KeyOut
+    var k = k0
+    var o = nvview.key_mut(k, 'x')
+    for c in keys_of(keys)
+        o = nvview.key_mut(k, c)
+        k = carry(o)
+    o
+
+@test
+fn test_key_mut_answers_what_key_answers()
+    let text = ["abc def", "  ghi", "", "jkl"]
+    let strings = ["wdw", "jddp", "3x", "ix\x1b", "Vjd", "vly", ">>", ">x", "gxj", "d3x", "dfz", "2yyjp", "Gkkdd", "ihello\ra\x1b", "o\x1bO", "/ghi\ruu", "3J", "gg"]
+    for keys in strings
+        let want = run_from(KeyIn { lines: text, cy: 0, cx: 0, m: vimmodal.modal_new(), mode: 0, avy: 0, avx: 0, reg: "", reg_lw: false, search: "" }, keys)
+        let got = feed_mut(KeyIn { lines: text, cy: 0, cx: 0, m: vimmodal.modal_new(), mode: 0, avy: 0, avx: 0, reg: "", reg_lw: false, search: "" }, keys)
+        test.assert_eq(got.lines, want.lines)
+        test.assert_eq(got.cy, want.cy)
+        test.assert_eq(got.cx, want.cx)
+        test.assert_eq(got.mode, want.mode)
+        test.assert_eq(got.reg, want.reg)
+
+@test
+fn test_key_mut_steps_the_state_it_is_given_and_key_does_not()
+    let k = start(["abc def"])
+    let o = nvview.key_mut(k, 'w')
+    test.assert_eq(o.cx, 4)
+    test.assert_eq(k.m.col, 4)
+    let k2 = start(["abc def"])
+    let o2 = nvview.key(k2, 'w')
+    test.assert_eq(o2.cx, 4)
+    test.assert_eq(k2.m.col, 0)
+
+@test
+fn test_key_mut_copies_the_state_for_a_key_that_may_be_typed_again()
+    let k = carry(nvview.key_mut(start(["abc"]), '>'))
+    test.assert_eq(k.m.op, vimmodal.OP_SHIFT_RIGHT)
+    let o = nvview.key_mut(k, 'x')
+    assert_text(o, ["bc"])
+    test.assert_eq(k.m.op, vimmodal.OP_SHIFT_RIGHT)
+    test.assert_eq(o.m.op, vimmodal.OP_NONE)
+
 @test
 fn test_a_count_before_v_and_V_selects_that_much()
     assert_text(run(["åbcd"], "3vd"), ["d"])

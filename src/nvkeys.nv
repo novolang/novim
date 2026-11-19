@@ -103,10 +103,15 @@ fn ist_cancel(st: InputState) -> InputState
     else
         ist_u8(st, 0)
 
-// pkg_feed is one character through the package.
+// pkg_feed is one character through the package.  The package state `st.m` is
+// stepped in place (`nvview.key_mut`) and the state this answers holds it, so a
+// key costs no copy of the registers, the marks and the dot record.  The driver
+// takes the answer in place of `st` after every key and reads nothing from the
+// `m` of the old one; the undo and redo stacks hold the buffer and the cursor,
+// not the package state.
 pub fn pkg_feed(ed: Editor, st: InputState, c: Int) -> Step
     let k = nvview.KeyIn { lines: ed.lines, cy: ed.cy, cx: ed.cx, m: st.m, mode: st.mode, avy: st.avy, avx: st.avx, reg: st.reg, reg_lw: st.reg_lw, search: st.search }
-    let o = nvview.key(k, c)
+    let o = nvview.key_mut(k, c)
     Step { ed: Editor { lines: o.lines, cy: o.cy, cx: o.cx }, st: InputState { count: o.count, pending: o.pending, mode: o.mode, reg: o.reg, reg_lw: o.reg_lw, search: o.search, avy: o.avy, avx: o.avx, m: o.m, u8: 0 } }
 
 // Fed is what the front of the key path answers.  When `deferred` is not set,
