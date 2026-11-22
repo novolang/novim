@@ -20,7 +20,7 @@ use util
 
 // ── The novo-lang palette ───────────────────────────────────────────────
 //
-// docs/design/palette.md is canon and its HEX VALUES are the contract, so
+// The palette of the novo-lang site is canon and its HEX VALUES are the contract, so
 // the palette is emitted as truecolor wherever the host will take it.  A
 // 256-cube index fails that contract twice over: it is an approximation
 // (index 43 is #00d7af, not the canonical #2dd4bf, so novim did not match

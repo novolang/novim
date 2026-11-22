@@ -1,8 +1,10 @@
 # novim ↔ novols (LSP) integration — design
 
-Status: **design / not yet implemented**.  Target: novim as an LSP *client* of
-`bin/novols`, the existing Novo language server.  This doc is the plan; it
-should be read before writing any code, and updated as decisions land.
+Status: design record, kept beside the code.  novim is an LSP *client* of
+`novols`, the language server of the toolchain.  The client is in `src/lsp.nv`
+and `src/main.nv`, and section 12 records the multi-language tier that shipped
+after the first plan.  The sections before it are the plan as it was written,
+and the open questions of section 10 are the ones that were open then.
 
 ---
 
@@ -29,8 +31,7 @@ to it, and surfaces the server's intelligence in the TUI:
   emit semantic tokens anyway).
 - Perfect UTF-16 position fidelity on day 1 (see §9.3).
 
-`novols` already implements the methods we need (confirmed in
-`compiler/lsp/novols.ml`):
+`novols` already implements the methods we need:
 `initialize`, `initialized`, `shutdown`, `textDocument/{didOpen,didChange,
 didClose,didSave,publishDiagnostics,definition,hover,completion,documentSymbol,
 formatting,prepareRename,rename}`.
@@ -70,7 +71,7 @@ deterministic test path clean).
 | terminal in | `novo_pty_poll_h(0, t)`, `novo_pty_stdin_read_byte_h()` | existing loop |
 | JSON | `json.*` (`json_get`, `json_get_str/int/list`, `json_array`, `json_int`, …) | parse + build |
 
-The server is `bin/novols` (resolve via the same logic as the install path, or
+The server is `novols` (resolve via the same logic as the install path, or
 an absolute path; PATH is not guaranteed — mirror novim's own `~/.novo/bin`
 convention or accept a `[options] lsp_cmd`).
 
@@ -258,11 +259,10 @@ the 25-field `EditState` untouched.
 - On `:q` always `proc.kill` + `close` so no zombie novols.
 
 ### 9.6 Testing strategy
-- Phase A is **integration-testable with the real `bin/novols`**: open a `.nv`
+- Phase A is **integration-testable with the real `novols`**: open a `.nv`
   with a deliberately broken expression in a pty, wait, and assert the
   diagnostic count / message reaches the status line.  novols is deterministic
-  for fixed input.  The test harness already uses `$ROOT/...` paths, so it can
-  point at `$ROOT/bin/novols`.
+  for fixed input.
 - Lower-level: a unit test for the framing reader (feed it a canned
   `Content-Length` stream, assert it yields the right message boundaries) and the
   JSON request builders — these can be plain `--batch`-style or standalone Novo
@@ -340,7 +340,7 @@ get no LSP this session.  A multi-server pool keyed by language is Tier 2.
 
 **Debugging — `--lsp-resolve <file>`** prints the resolved languageId, command,
 and rootUri without spawning anything; this is also how the resolver is
-regression-tested headlessly (test_novim.sh slice 113), since CI has no
+regression-tested headlessly, since CI has no
 community servers installed.
 
 ```

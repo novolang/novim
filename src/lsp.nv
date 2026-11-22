@@ -34,7 +34,7 @@ fn lsp_content_length(hdr: Str) -> Int
 // Returns "" on EOF/error.
 //
 // Framing goes through `Read.read_until` / `Read.read_exact` — trait
-// defaults in compiler/stdlib/io_traits.nv, reached via
+// defaults of the standard library, reached via
 // `impl Read[io] for FdStream`.
 //
 // The two chunk sizes are the interesting part:

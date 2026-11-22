@@ -51,8 +51,8 @@ fn ts_symbol_of(lang: Str) -> Str
         "tree_sitter_" + str.replace(lang, "-", "_")
 
 // Directories searched for `<lang>.so` / `<lang>-highlights.scm`, in order.
-// ~/.novo/lib comes first so a grammar installed by
-// orbit/novo-treesitter/bin/install-lib.sh always wins; the nvim-treesitter
+// ~/.novo/lib comes first so a grammar installed by the install-lib.sh
+// script of the package novo-treesitter always wins; the nvim-treesitter
 // parser directories follow because a machine with nvim already has compiled
 // grammars and matching queries for most languages, and rebuilding them would
 // be pure duplication.  Overridable wholesale with:

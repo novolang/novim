@@ -1,15 +1,16 @@
-// ts.nv — optional tree-sitter syntax highlighting for novim, via the
-// orbit/novo-treesitter libtree-sitter FFI shim.
+// ts.nv — optional tree-sitter syntax highlighting for novim, via a
+// small C shim (csrc/shim.c) over libtree-sitter.
 //
 // novim's native per-line tokenizer (syntax_colors) is the always-available
-// fallback; when the tree-sitter-novo grammar + libtree-sitter shim are present
-// at runtime, `ts_spans` parses the whole buffer and returns capture spans the
+// fallback; when a tree-sitter grammar for the file's language is installed,
+// `ts_spans` parses the whole buffer and returns capture spans the
 // renderer folds into its per-column colour model.  Captures map to a small set
 // of "kinds" the [colorscheme] colours (keyword / type / string / comment /
 // function / number / constant / variable / operator / module).
 //
-// The @ffi(library=...) names resolve against the [ffi.tree_sitter] and
-// [ffi.novo_treesitter_shim] sections in novo.toml.
+// The @ffi(library=...) name "tree_sitter" resolves against the
+// [ffi.tree_sitter] section in novo.toml, and "self" names the sources of
+// the [native] section, which is the shim.
 
 // ── libtree-sitter (system) ──────────────────────────────────────────────
 @ffi(library = "tree_sitter", symbol = "ts_parser_new")
@@ -23,22 +24,22 @@ fn ts_parser_parse_string(parser: Int, old_tree: Int, source: Str, length: Int) 
 @ffi(library = "tree_sitter", symbol = "ts_tree_delete")
 fn ts_tree_delete(tree: Int) [ffi]
 
-// ── novo_treesitter_shim (TSNode-by-value wrappers + query API) ───────────
-@ffi(library = "novo_treesitter_shim", symbol = "novo_ts_load_grammar")
+// ── the shim, csrc/shim.c (TSNode-by-value wrappers + query API) ──────────
+@ffi(library = "self", symbol = "novo_ts_load_grammar")
 fn novo_ts_load_grammar(gpath: Str, sym: Str) -> Int [io, ffi]
-@ffi(library = "novo_treesitter_shim", symbol = "novo_ts_tree_root_node")
+@ffi(library = "self", symbol = "novo_ts_tree_root_node")
 fn novo_ts_tree_root_node(tree: Int, out_node_addr: Int) [ffi]
-@ffi(library = "novo_treesitter_shim", symbol = "novo_ts_query_new")
+@ffi(library = "self", symbol = "novo_ts_query_new")
 fn novo_ts_query_new(lang: Int, source: Str, source_len: Int) -> Int [ffi]
-@ffi(library = "novo_treesitter_shim", symbol = "novo_ts_query_delete")
+@ffi(library = "self", symbol = "novo_ts_query_delete")
 fn novo_ts_query_delete(query: Int) [ffi]
-@ffi(library = "novo_treesitter_shim", symbol = "novo_ts_query_cursor_new")
+@ffi(library = "self", symbol = "novo_ts_query_cursor_new")
 fn novo_ts_query_cursor_new() -> Int [ffi]
-@ffi(library = "novo_treesitter_shim", symbol = "novo_ts_query_cursor_delete")
+@ffi(library = "self", symbol = "novo_ts_query_cursor_delete")
 fn novo_ts_query_cursor_delete(cursor: Int) [ffi]
-@ffi(library = "novo_treesitter_shim", symbol = "novo_ts_query_cursor_exec")
+@ffi(library = "self", symbol = "novo_ts_query_cursor_exec")
 fn novo_ts_query_cursor_exec(cursor: Int, query: Int, node_addr: Int) [ffi]
-@ffi(library = "novo_treesitter_shim", symbol = "novo_ts_next_capture")
+@ffi(library = "self", symbol = "novo_ts_next_capture")
 fn novo_ts_next_capture(cursor: Int, query: Int, out_name_addr_ptr: Int, out_start_ptr: Int,
                         out_end_ptr: Int) -> Int [ffi]
 

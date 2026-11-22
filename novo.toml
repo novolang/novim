@@ -1,10 +1,21 @@
 [package]
 name        = "novim"
 version     = "0.1.2"
-description = "novim — modal terminal editor written in Novo.  v1: a [Str] line-vector buffer, Vim motions/operators, an ANSI TUI, a deterministic --batch test mode, and TOML-driven keymaps + colorschemes.  See features/orbits/novim/README.md for the v1 scope + slice plan (piece-tree / novols LSP / novo-treesitter / plugins are v2)."
+description = "A modal terminal editor written in novo-lang: a line-vector buffer, Vim motions, operators and text objects, an ANSI terminal interface, tree-sitter highlighting, language-server diagnostics, and keymaps and colour schemes read from a TOML file."
+license     = "Apache-2.0"
+stability   = "experimental"
 category    = "terminal"
 layer       = "app"
+tags        = ["editor", "vim", "modal", "terminal", "tui", "tree-sitter", "lsp"]
+repository  = "https://github.com/novolang/novim"
+maintainers = ["novo-lang"]
+novo        = ">= 0.26.0"
 main        = "src/main.nv"
+
+[docs.pages]
+"README.md"         = "A modal terminal editor with Vim's keys: install, use, configuration"
+"docs/LANGUAGES.md" = "Tree-sitter grammars and language servers by file type"
+"docs/LSP-DESIGN.md" = "How novim talks to a language server"
 
 [dependencies]
 # The modal editing model: motions, operators, text objects, Visual, Insert and
@@ -12,25 +23,21 @@ main        = "src/main.nv"
 # blockwise selection, Ctrl-A and Ctrl-X, and the driver around a key.
 vim-motions-nv = "^0.1.1"
 
-# Tree-sitter syntax highlighting (src/ts.nv).  Links the system libtree-sitter
-# plus the orbit/novo-treesitter shim, both installed to ~/.novo/lib by
-# orbit/novo-treesitter/bin/install-lib.sh.  The rpath is that absolute lib dir
-# so both the dev binary (orbit/novim/novim) and the installed ~/.novo/bin/novim
-# resolve the shim identically.  If the grammar .so isn't found at RUNTIME,
-# ts.ts_spans returns [] and the renderer falls back to the native tokenizer —
-# so highlighting degrades gracefully, but the shim .so must exist at link time
-# (run install-lib.sh first).
-#
-# `$HOME` in the linker value is the home directory of whoever runs the build;
-# the compiler expands it when it reads the manifest.
+# Tree-sitter syntax highlighting (src/ts.nv) links the system libtree-sitter.
 [ffi.tree_sitter]
 pkg_config = "tree-sitter"
+
+# The shim between novim and libtree-sitter is this package's own C
+# (csrc/shim.c): libtree-sitter passes a node by value, which @ffi cannot
+# express, and the shim passes it by pointer.  The reserved library name "self"
+# in src/ts.nv names these sources.  The file is a copy of csrc/shim.c of the
+# package novo-treesitter.  `-ldl` is for the dlopen of a grammar at run time.
+[native]
+sources = ["csrc/shim.c"]
+linker  = "-ldl"
 
 # What `novo install` checks before it builds: the system library the
 # link step needs, and what to install when it is absent.
 [install]
 libs    = ["tree-sitter"]
 missing = "install libtree-sitter-dev (Debian, Ubuntu) or tree-sitter (Homebrew) first"
-
-[ffi.novo_treesitter_shim]
-linker = "-L$HOME/.novo/lib -lnovo_treesitter_shim -Wl,-rpath,$HOME/.novo/lib -ldl"

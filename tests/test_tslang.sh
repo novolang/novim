@@ -1,6 +1,9 @@
 #!/bin/bash
-# orbit/novim/tests/test_tslang.sh — filetype → tree-sitter grammar
+# tests/test_tslang.sh — filetype → tree-sitter grammar
 # resolution (src/tslang.nv).
+#
+#   bash tests/test_tslang.sh      from the package directory, with `novo` on PATH
+#   NOVO=/path/to/novo bash tests/test_tslang.sh
 #
 # novim used to highlight with the Novo grammar and nothing else: ts_spans
 # took a grammar_path but hardcoded the TSLanguage symbol to
@@ -16,11 +19,15 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PKG_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-REPO_ROOT="$(cd "$PKG_DIR/../.." && pwd)"
-NOVO="${NOVO:-$REPO_ROOT/bin/novo}"
+# The compiler: $NOVO, else bin/novo of the repository this directory is in
+# (a checkout of the toolchain's own repository has one), else `novo` on PATH.
+if [ -z "${NOVO:-}" ]; then
+  TOP="$(git -C "$PKG_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
+  if [ -n "$TOP" ] && [ -x "$TOP/bin/novo" ]; then NOVO="$TOP/bin/novo"; else NOVO="$(command -v novo || true)"; fi
+fi
 
-if [ ! -x "$NOVO" ]; then
-  echo "ERROR: $NOVO not found — build first" >&2; exit 1
+if [ -z "$NOVO" ] || [ ! -x "$NOVO" ]; then
+  echo "ERROR: novo not found — put it on PATH or set NOVO" >&2; exit 1
 fi
 
 PASS=0; FAIL=0
@@ -120,7 +127,7 @@ fi
 # ── what actually resolved on this machine (informational + soft gate) ──
 # Grammars come from wherever the user installed them, so their presence is
 # environment-dependent.  Report it, and only assert the Novo grammar, which
-# orbit/novo-treesitter/bin/install-lib.sh is responsible for.
+# the install-lib.sh script of the package novo-treesitter is responsible for.
 echo ""
 echo "  resolved on this machine:"
 for e in a.nv b.md c.c e.toml f.py g.ll; do
@@ -130,9 +137,9 @@ done
 echo ""
 
 if [ "$(field 'a.nv' 4)" = "G" ]; then
-  pass "novo grammar resolves (installed by novo-treesitter/bin/install-lib.sh)"
+  pass "novo grammar resolves (installed by the install-lib.sh of novo-treesitter)"
 else
-  echo "  … novo grammar not installed — run orbit/novo-treesitter/bin/install-lib.sh"
+  echo "  … novo grammar not installed — run bin/install-lib.sh of the novo-treesitter package"
   pass "novo grammar absent, resolution degraded cleanly (no crash)"
 fi
 

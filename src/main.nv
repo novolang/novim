@@ -622,8 +622,8 @@ fn block_replicate(ed: Editor, ylo: Int, yhi: Int, col: Int, flen0: Int, nch0: I
 // vim-motions-nv's: `nvkeys.feed_front` gathers the bytes of a multi-byte
 // character and hands the character to the package (nvview.key), and answers
 // the keys that novim keeps for itself to the code below.  novim keeps its own
-// code where the package has no counterpart (see planning/VIM-MOTIONS-0.2.md for
-// what each would need): the blockwise selection (Ctrl-V and the keys that act
+// code where the package has no counterpart (what each would need is
+// listed in the README of vim-motions-nv): the blockwise selection (Ctrl-V and the keys that act
 // on its rectangle), Ctrl-A and Ctrl-X, and the registers, marks, macros, undo
 // and dot repeat that the driver layers over a key (`feed_edit`).  What is left
 // in this file is the choice among `vblock_*` and `op_incdec`, which are in this
@@ -3977,7 +3977,7 @@ URI, and repaint.  Owns ALL session state the pure `feed` must not: the buffer
 list and per-buffer view/undo/marks/diagnostics, registers, the jumplist, the
 LSP connection, and the screen.  `path` is the first file; `extra` carries the
 rest (a Str, not [Str] — a [Str] param here reproducibly corrupted the
-buffer-switch codegen; see the bug filed in features/orbits/novim).""")
+buffer-switch codegen).""")
 fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, fs, time, ffi]
     let _ = novo_pty_set_raw_mode_h()
     term_enter(want_color)                // alternate screen + mouse wheel capture + cursor colour
@@ -4045,7 +4045,7 @@ fn run_interactive(cfg_path: Str, path: Str, extra: Str, want_color: Bool) [io, 
     // parse failed) means the renderer uses syntax_colors instead.
     //
     // Grammar + queries resolve PER FILETYPE from a search path — ~/.novo/lib
-    // first (where orbit/novo-treesitter/bin/install-lib.sh puts the Novo
+    // first (where the install-lib.sh script of novo-treesitter puts the Novo
     // grammar), then any nvim-treesitter parser dirs — so markdown / C / TOML /
     // Python / LLVM-IR buffers highlight with their own grammar instead of
     // everything being parsed as Novo.  `ts_lang` is "" for a filetype we have
@@ -6242,7 +6242,7 @@ fn run_dump_keymaps(cfg_path: Str) [io, fs]
 
 // ── LSP (novols) client — JSON-RPC transport ───────────────────────────────
 // novim talks JSON-RPC over stdio to `novols`.  All of this lives outside the
-// pure `feed`; see orbit/novim/docs/LSP-DESIGN.md.
+// pure `feed`; see docs/LSP-DESIGN.md.
 
 @intent("""Send one JSON-RPC message to the language server over `fd`, framed
 with the LSP `Content-Length: N\\r\\n\\r\\n<body>` header.  Writes in bulk via
@@ -6440,7 +6440,7 @@ fn run_lsp_diag(path: Str) [io, fs, time]
 
 // The command-line surface, declared once.  `std.cli` parses argv from
 // this declaration and generates the usage text from the same records,
-// so the two cannot drift (docs/stdlib/cli.md).
+// so the two cannot drift (the std.cli reference).
 //
 // The file list is a variadic positional: the first file is the active
 // buffer and the rest open as additional buffers, which is why it is

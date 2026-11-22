@@ -1,7 +1,7 @@
 // exhelp.nv — the Ex command table and the `:help` cheat sheet for novim.
 //
 // ONE table lists every Ex command the editor implements.  The `[help]`
-// buffer (a read-only split window) is rendered from it; tests/orbit/test_novim_help.sh compares it with the
+// buffer (a read-only split window) is rendered from it; a gate compares it with the
 // command literals in excmd.nv, so a command added to the dispatcher without
 // a row here fails the gate.  Pure — no [io]: main.nv owns the window and the
 // buffer.
